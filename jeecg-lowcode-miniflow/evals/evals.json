@@ -1,0 +1,40 @@
+{
+  "skill_name": "jeecg-lowcode-miniflow",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我创建一个简流：当请假申请表（表单编码 qing_jia_biao，表单名称"请假申请"，标题字段 input_111）新增记录时，自动发起，部门负责人审批（用表达式 ${flowNodeExpression.getApplyDepartLeaders(execution)}），审批通过后发系统通知给 HR（用户名 hruser）。API: http://localhost:8080/jeecgboot，token: testtoken123，lowAppId: 111222333",
+      "expected_output": "成功调用 build_process_json + save_flow + deploy_flow，生成包含 tableEvent 触发、表达式审批节点、系统通知节点的简流，并输出流程 ID",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 2,
+      "prompt": "创建一个手动触发的采购审批简流，流程名称'采购审批'，processKey 自动生成。采购金额（字段 input_amount）小于10000走部门经理审批（approverIds: ['mgr01']），否则走总经理审批（approverIds: ['ceo01']），审批完后把采购状态字段（select_status）更新为'已审批'。API: http://localhost:8080/jeecgboot，token: testtoken123，lowAppId: 111222333",
+      "expected_output": "生成包含 manual 触发、exclusive 排他分支（两个条件分支）、data_update 节点的简流，正确生成 processKey，成功保存并发布",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 3,
+      "prompt": "帮我创建一个简流，手动触发，包含一个意见分支：审批人（admin）同意时继续执行，发系统通知给发起人说审批通过；拒绝时直接结束流程。流程名'合同审批'。API: http://localhost:8080/jeecgboot，token: testtoken123，lowAppId: 111222333",
+      "expected_output": "生成包含 manual 触发、approver 节点、opinion 意见分支（同意分支含 notice 通知节点，拒绝分支为空）的简流，正确使用 type:opinion 而非手动构建 suggest",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 4,
+      "prompt": "每天早上8点扫描出库申请表（wh_outbound），获取所有状态字段（select_status）为'待处理'的记录，然后发钉钉消息通知仓库管理员（用户名 warehouse_mgr）。流程名'每日待处理提醒'，从2026-05-01开始。API: http://localhost:8080/jeecgboot，token: testtoken123，lowAppId: 111222333",
+      "expected_output": "生成包含 timerEvent 定时触发（每天8点，beginDateStr=2026-05-01）、get_more 获取多条记录、notice 钉钉通知节点的简流，timeCycle 使用数字字符串 '3'（每天）",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 5,
+      "prompt": "帮我创建一个文件审批简流（手动触发），需要张三（user01）、李四（user02）、王五（user03）三个人会签，必须全员同意才能通过，审批完发系统通知给申请人（用 ${applyUserId} 表达式）。流程名'文件会签审批'。API: http://localhost:8080/jeecgboot，token: testtoken123，lowAppId: 111222333",
+      "expected_output": "生成包含 manual 触发、countersign 会签节点（approvalMethod=2 全员通过，三个审批人）、notice 系统通知节点的简流",
+      "files": [],
+      "assertions": []
+    }
+  ]
+}
