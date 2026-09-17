@@ -4,7 +4,8 @@
 > 零代码、自然语言驱动 —— 依托敲敲云表单引擎、流程引擎、仪表盘引擎，AI 自动生成全套配置。
 
 <p>
-  <a href="https://www.qiaoqiaoyun.com"><img src="https://img.shields.io/badge/敲敲云官网-qiaoqiaoyun.com-1677ff?style=flat-square"></a>
+  <a href="https://www.qiaoqiaoyun.com/skills"><img src="https://img.shields.io/badge/Skills专题页-qiaoqiaoyun.com%2Fskills-1677ff?style=flat-square"></a>
+  <a href="https://gitee.com/jeecg/qqyun-skills"><img src="https://img.shields.io/badge/Gitee-jeecg%2Fqqyun--skills-C71D23?style=flat-square&logo=gitee"></a>
   <a href="https://github.com/jeecgboot/qqyun-skills"><img src="https://img.shields.io/badge/GitHub-jeecgboot%2Fqqyun--skills-181717?style=flat-square&logo=github"></a>
   <img src="https://img.shields.io/badge/License-Apache%202.0-52c41a?style=flat-square">
 </p>
@@ -48,19 +49,20 @@ curl -fsSL https://www.qiaoqiaoyun.com/claude/install-claude-code.sh | bash
 **macOS / Linux**
 
 ```bash
-git clone https://github.com/jeecgboot/qqyun-skills.git
+git clone https://gitee.com/jeecg/qqyun-skills.git
 cp -r qqyun-skills/jeecg-lowcode-* ~/.claude/skills/
 ```
 
 **Windows（PowerShell）**
 
 ```powershell
-git clone https://github.com/jeecgboot/qqyun-skills.git
+git clone https://gitee.com/jeecg/qqyun-skills.git
 Copy-Item qqyun-skills\jeecg-lowcode-* $env:USERPROFILE\.claude\skills\ -Recurse -Force
 ```
 
-> - 第 1 步脚本会顺带安装姊妹项目 [JeecgBoot Skills](https://github.com/jeecgboot/skills)（开发侧：代码生成 / Online 表单 / BPMN / 报表大屏），与敲敲云 Skills 同目录**共存、互不影响**
-> - 若 `~/.claude/skills` 尚未被占用，也可整库克隆：`git clone https://github.com/jeecgboot/qqyun-skills.git ~/.claude/skills`
+> - **国内推荐 Gitee**（访问快）；海外可用 GitHub：`git clone https://github.com/jeecgboot/qqyun-skills.git`
+> - 第 1 步脚本会顺带安装姊妹项目 [JeecgBoot Skills](https://gitee.com/jeecg/skills)（开发侧：代码生成 / Online 表单 / BPMN / 报表大屏），与敲敲云 Skills 同目录**共存、互不影响**
+> - 若 `~/.claude/skills` 尚未被占用，也可整库克隆：`git clone https://gitee.com/jeecg/qqyun-skills.git ~/.claude/skills`
 
 ### 已有 Claude Code？
 
@@ -130,6 +132,74 @@ claude
 
 ---
 
+## ✍️ 提示词写法
+
+两种写法**等价、二选一即可**，不必叠写；把【租户】【应用】换成实际名称。
+
+| 写法 | 示例开头 |
+| --- | --- |
+| **A · 命令触发** | `使用 /jeecg-lowcode-lowapp 在租户【租户名】的应用【应用名】下，……` |
+| **B · 点名敲敲云** | `在敲敲云租户【租户名】的应用【应用名】下，……` |
+
+三个技能各有对应命令：`/jeecg-lowcode-lowapp` · `/jeecg-lowcode-miniflow` · `/jeecg-lowcode-dashboard`；
+说「在敲敲云」「创建工作表」「建审批流程」等自然语言，也会自动路由到对应 Skill。
+
+**写法要点**
+
+- 必须写 **租户 + 应用** 两级上下文；应用不存在时直接说「创建一个应用【xxx】」，一句话连应用一起建
+- 字段用「**中文名 + 控件类型 + 关键属性**」描述（如：请假天数（整数，必填）），不要写 JSON
+- 能默认的就写上：当前登录人 / 当前部门 / 当天日期
+- 审批人给**真实姓名 / 角色名 / 部门名**；「分支」点名类型（互斥 / 包含 / 并行）
+- 同一句要「应用 + 工作表 + 简流 + 仪表盘」时，以 lowapp 开场即可，三个 Skill 自动协同
+
+---
+
+## 📚 实战提示词库（复制即用）
+
+> 更多示例（含 **30 张工作表 + 12 条简流 + 2 个仪表盘的人事OA整套系统完整提示词**）见官网专题页：**[qiaoqiaoyun.com/skills](https://www.qiaoqiaoyun.com/skills)**
+
+<details>
+<summary><b>单表 · 请假申请（最短一句话）</b></summary>
+
+```text
+在敲敲云租户【北京敲敲云科技有限公司】的应用【OA办公】下建工作表「请假申请」：
+姓名（选择用户，必填，标题）、部门（选择部门，默认当前用户所属部门）、请假类型（下拉单选：事假/病假/年假/调休）、开始日期、结束日期、请假天数（整数，必填）、请假原因（多行文本）、附件（附件上传）。
+```
+
+</details>
+
+<details>
+<summary><b>主子表 · 采购申请（应用 + 两张表 + 公式汇总）</b></summary>
+
+```text
+在敲敲云租户【北京敲敲云科技有限公司】下创建应用【采购协同】，两张工作表一对一：
+「采购申请」：申请编号（自动编号，前缀 PR+日期+4 位流水，只读）、申请标题（必填）、申请日期（默认当天）、申请人（成员，默认当前用户）、申请金额（汇总明细.金额 求和）。
+「申请明细」：物料名称、数量（整数，必填，默认 1）、单价（金额）、金额（公式：数量×单价）、所属申请（回指采购申请）。
+采购申请里把申请明细作为子表（表格、双向）。
+```
+
+</details>
+
+<details>
+<summary><b>简流 · 报销多级审批（金额分支）</b></summary>
+
+```text
+在敲敲云租户【北京敲敲云科技有限公司】的应用【费用管理】下，给「报销单」建审批流程：新增记录触发，金额小于等于 5000 走部门主管一级审批；金额大于 5000 先部门主管、再总经理二级审批。全部通过后状态改为「已通过」，驳回则改为「已驳回」，结果通知报销人。
+```
+
+</details>
+
+<details>
+<summary><b>简流 · 定时扫描超时提醒</b></summary>
+
+```text
+在敲敲云租户【北京敲敲云科技有限公司】的应用【客服工单】下，建定时流程：每天 9 点扫描「工单」，处理状态等于 待处理 且 创建时间超过 24 小时的改为 已超时，逐条站内通知负责人；没有超时记录时不通知。
+```
+
+</details>
+
+---
+
 ## 🔍 技能详情
 
 ### 1. jeecg-lowcode-lowapp — 敲敲云应用与工作表
@@ -172,8 +242,10 @@ claude
 ## 🧩 适用版本与相关链接
 
 - **敲敲云 APaaS**（[qiaoqiaoyun.com](https://www.qiaoqiaoyun.com) 在线版）或基于 JeecgBoot 低代码引擎的私有化环境
+- **Skills 官网专题页** · [qiaoqiaoyun.com/skills](https://www.qiaoqiaoyun.com/skills)（安装演示 · 提示词库 · 使用示例）
+- **本仓库** · [Gitee（国内推荐）](https://gitee.com/jeecg/qqyun-skills) · [GitHub](https://github.com/jeecgboot/qqyun-skills)
 - **Claude Code** 最新版本 · **Python 3.12+**
-- **姊妹项目** · [JeecgBoot Skills](https://github.com/jeecgboot/skills)（开发侧：代码生成 / Online 表单 / BPMN / 积木报表 / 大屏）
+- **姊妹项目** · [JeecgBoot Skills](https://gitee.com/jeecg/skills)（开发侧：代码生成 / Online 表单 / BPMN / 积木报表 / 大屏）
 
 ---
 
