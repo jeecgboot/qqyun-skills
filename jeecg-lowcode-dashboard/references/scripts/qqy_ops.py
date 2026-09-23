@@ -280,7 +280,10 @@ def cmd_apps(args):
         matched.append(a)
     if keyword:
         print('MATCH_COUNT=%d' % len(matched))
-        if len(matched) == 1:
+        exact = [a for a in matched if (a.get('appName') or '') == keyword]
+        if len(exact) == 1:
+            print('APP_ID=%s' % exact[0].get('id'))    # 精确同名优先于模糊命中
+        elif len(matched) == 1:
             print('APP_ID=%s' % matched[0].get('id'))
         elif not matched:
             print('APP_NOT_FOUND keyword=%s 全部应用见上方未过滤列表：' % keyword)
@@ -2099,6 +2102,21 @@ def cmd_add_charts(args):
         query_range = str(spec.get('queryRange') or spec.get('query_range') or 'all')
         query_range = _norm_query_range(query_range) or query_range
         query_field = str(spec.get('queryField') or spec.get('query_field') or 'create_time')
+        # ⚠️ queryField 落库必须是字段 **model**（`date_1790068169354_490689`），不是中文名。
+        # dim/val 都走 resolve_field 解析，唯独这里原来是**原样透传**：规格写「签订日期」就原样落库，
+        # 后端匹配不到列 → 时间过滤静默失效 → 卡片恒为 0，且 save/回读全都「成功」
+        #（2026-09-22 项目管理-速测5 销售看板：本年签约/回款/开票 三张卡全 0，
+        #  而唯一用 `create_time` 的「剩余应收账款」正常出数）。
+        if query_field and not str(query_field).startswith(('create_time', 'update_time')):
+            _qf = qc.resolve_field(query_field, fields_res, allow_record_count=False)
+            if _qf and _qf.get('fieldName'):
+                if _qf['fieldName'] != query_field:
+                    print('NOTE=specs[%d] queryField %s → %s' % (i, query_field, _qf['fieldName']))
+                query_field = _qf['fieldName']
+            else:
+                print('specs[%d] queryField 解析不到字段: %s（写字段中文名或 model，'
+                      '系统列只支持 create_time/update_time）' % (i, query_field))
+                sys.exit(1)
         custom_time = spec.get('customTime') or spec.get('custom_time') or []
         if query_range not in qc.QUERY_RANGE:
             print('specs[%d] queryRange 非法: %s 允许=%s 或中文别名(全部/本月/本周/上月/…)' % (
@@ -2107,6 +2125,21 @@ def cmd_add_charts(args):
         if query_range == 'custom' and (not isinstance(custom_time, list) or len(custom_time) < 2):
             print('specs[%d] queryRange=custom 必须配 customTime:[begin,end]' % i)
             sys.exit(1)
+        if query_range == 'custom' and len(custom_time) >= 2:
+            # ⚠️ `customTime` 是**写死的绝对日期**，规格生成那天算出来就固定了。隔几天再建应用，
+            # 新灌的业务数据全部落在窗口右边 → 盘上「暂无数据」，但配置本身挑不出毛病
+            #（2026-09-22 项目管理-速测5「客户合同一览」：窗口 2025-09-17~2026-09-17，
+            #  数据 create_time 是 2026-09-22，整张透视表空）。
+            # 「近一年 / 近半年」这类相对口径的右端就该是今天，所以右端落在过去一律顺延到今天。
+            # ⚠️ 顺延到**明天**，不是今天：右端只写日期时，后端把它当 `00:00:00` 还是 `23:59:59`
+            # 无法从接口侧验证（`getTotalData` 要签名）。写今天的话，只要它取 00:00:00，
+            # 今天新建的数据（`create_time` 带时分秒）就仍在窗外。写明天则两种取法都覆盖得到。
+            _today = time.strftime('%Y-%m-%d')
+            _tomorrow = time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400))
+            if str(custom_time[1])[:10] < _today:
+                print('NOTE=specs[%d] customTime 右端 %s 早于今天，顺延到 %s（否则新数据全在窗口外）'
+                      % (i, custom_time[1], _tomorrow))
+                custom_time = [custom_time[0], _tomorrow]
         if form_type == 'aggregation' and query_range != 'all':
             print('NOTE=聚合表弹窗不显示查询范围，specs[%d] queryRange=%s 已改为 all' % (i, query_range))
             query_range = 'all'
@@ -3057,6 +3090,9 @@ _BTN_OP_ALIASES = {
     '2': '2', 'view': '2', '打开视图': '2', '列表': '2', '打开列表': '2', '列表视图': '2',
     '打开订单列表视图': '2', '打开列表视图': '2',
     '3': '3', 'page': '3', '自定义页面': '3', '打开页面': '3', '打开自定义页面': '3',
+    # 需求文档里「跳转到 XX 看板」是最常见的口语（2026-09-21 进销存首页原文「跳转 4 个」），
+    # 不收编就得靠人翻成「打开页面」——猜错一次就是整组按钮 FAIL 外加半成品组件。
+    '跳转': '3', '跳转看板': '3', '打开看板': '3', '跳转页面': '3', '看板': '3',
     '4': '4', 'link': '4', 'url': '4', '打开链接': '4', '链接': '4',
     '6': '6', 'flow': '6', '业务流程': '6', '调用业务流程': '6', '流程': '6',
 }
@@ -3472,7 +3508,7 @@ def cmd_add_buttons(args):
         },
         'background': '#FFFFFF',
         'borderColor': '#E8E8E8',
-        'size': {'width': grid_w * 75, 'height': grid_h * 11},
+        'size': {'width': grid_w * 75, 'height': grid_h * 11 - 10},
     }
 
     add_resp = bi_utils._request('POST', '/drag/page/comp/add', data={
@@ -3794,7 +3830,7 @@ def cmd_add_filter(args):
         'relationChartList': relation_chart_list,
         'chartData': json.dumps(chart_data_list, ensure_ascii=False),
         'linkageConfig': linkage_config,
-        'size': {'width': grid_w * 75, 'height': grid_h * 11},
+        'size': {'width': grid_w * 75, 'height': grid_h * 11 - 10},
         'background': '#FFFFFF', 'borderColor': '#E8E8E8',
         'chart': {'subclass': 'JFilterQuery', 'category': 'Common'},
         'option': {
@@ -6402,7 +6438,7 @@ def cmd_add_ui(args):
             'dataType': 1, 'url': '', 'timeOut': 0, 'linkageConfig': [],
             'turnConfig': {'url': ''}, 'chartData': text,
             'background': bg, 'borderColor': '#E8E8E8',
-            'size': {'width': w * 75, 'height': h * 11},
+            'size': {'width': w * 75, 'height': h * 11 - 10},
             'option': {
                 'horseLamp': False, 'speed': 1000, 'card': dict(CARD),
                 'textAlign': align,
@@ -6421,7 +6457,7 @@ def cmd_add_ui(args):
         config = {
             'dataType': 1, 'timeOut': 0, 'chartData': html,
             'background': '#FFFFFF', 'borderColor': '#E8E8E8',
-            'size': {'width': w * 75, 'height': h * 11},
+            'size': {'width': w * 75, 'height': h * 11 - 10},
         }
     elif comp == 'JIframe':
         url = (getattr(args, 'url', None) or '').strip()
@@ -6431,7 +6467,7 @@ def cmd_add_ui(args):
         config = {
             'dataType': 1, 'url': '', 'timeOut': 0, 'chartData': url,
             'background': '#FFFFFF', 'borderColor': '#E8E8E8',
-            'size': {'width': w * 75, 'height': h * 11},
+            'size': {'width': w * 75, 'height': h * 11 - 10},
             'option': {'card': dict(CARD), 'body': {'url': url}},
         }
     elif comp == 'JCurrentTime':
@@ -6445,7 +6481,7 @@ def cmd_add_ui(args):
         config = {
             'dataType': 1, 'url': '', 'timeOut': 0, 'turnConfig': {'url': ''},
             'chartData': '', 'background': '#3F7DD4', 'borderColor': '#E8E8E8',
-            'size': {'width': w * 75, 'height': h * 11},
+            'size': {'width': w * 75, 'height': h * 11 - 10},
             'option': {
                 'showWeek': week, 'hourlySystem': '24',
                 'format': 'YYYY-MM-DD hh:mm:ss', 'card': dict(CARD),
@@ -6485,7 +6521,7 @@ def cmd_add_ui(args):
                 {'src': 'https://jeecgos.oss-cn-beijing.aliyuncs.com/files/site/drag/2.png'},
             ][:max(1, max_count)],
             'background': '#FFFFFF', 'borderColor': '#E8E8E8',
-            'size': {'width': w * 75, 'height': h * 11},
+            'size': {'width': w * 75, 'height': h * 11 - 10},
         }
         if code:
             config['worksheet'] = {'label': fname, 'value': code, 'key': code}

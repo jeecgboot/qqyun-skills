@@ -76,8 +76,18 @@ def render_table(rows, kw_map):
     return '\n'.join(out)
 
 
+FALLBACK = ('> （控件选项索引自动生成失败，请用 grep -n "## <控件type>" '
+            'references/desform-widget-options.md 定位行号后再 Read 该片段）')
+
+
 def main():
-    sys.stdout.write(render_table(build_index(), parse_type_keywords()) + '\n')
+    # 出错也只吐一行兜底提示、退出码 0：SKILL.md 的注入命令不再依赖 `2>/dev/null`
+    # （PowerShell 下那是个真路径，Windows 上整条命令因此失败、索引表从没注入成功过）。
+    try:
+        text = render_table(build_index(), parse_type_keywords())
+    except Exception:
+        text = FALLBACK
+    sys.stdout.write(text + '\n')
 
 
 if __name__ == '__main__':

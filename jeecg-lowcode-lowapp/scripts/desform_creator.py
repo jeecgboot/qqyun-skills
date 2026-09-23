@@ -277,6 +277,10 @@ _OPTION_TYPES = {'radio', 'select', 'checkbox'}
 # 参数名映射：JSON key → 函数参数名
 _PARAM_MAP = {
     'required': 'required',
+    # 附件/图片的**个数上限**（options.length）。工厂签名里没有它，靠
+    # `desform_utils._VALID_OPTIONS_KWARGS` 透传进 options —— 两处必须同时有，
+    # 少一处就是「打印一行警告然后静默丢弃」。
+    'length': 'length',
     'width': 'width',
     'prefix': 'prefix',
     'dateFormat': 'date_format',
@@ -286,6 +290,14 @@ _PARAM_MAP = {
     'dictCode': 'dict_code',
     'unique': 'unique',
     'precision': 'precision',
+    # 金额/数值控件的**单位**。⚠️ 这两个键 2026-09-20 只加进了
+    # `desform_utils._VALID_OPTIONS_KWARGS`，**漏了这里** —— 而 build_app 的 `选项`
+    # 是经本表翻成工厂 kwargs 的，于是 `选项: {"计划资金": {"unitText": "万元"}}`
+    # 在这一层就被丢掉，控件照旧显示工厂默认的「元」（同组的 `precision` 却落地了，
+    # 所以「小数位对了」不能当判据）。2026-09-21 销售管理实测：3 个「万元」字段全中，
+    # 只能建后补。正是本表开头那句「两处必须同时有」说的情形。
+    'unitText': 'unitText',
+    'unitPosition': 'unitPosition',
     'allowHalf': 'allow_half',
     'fmt': 'fmt',
     'codeType': 'code_type',

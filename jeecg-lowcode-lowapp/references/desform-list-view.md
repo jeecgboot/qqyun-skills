@@ -684,6 +684,15 @@ config_table_base(
 
 > `column_list` 与 `show_column_list` 对同一字段 `show` 冲突时，以 `show_column_list` 的值为准。
 
+> ⚠️ **两份清单必须同格式、同写控件 `key`（2026-09-20 实测）**：`column_list` 与 `show_column_list` 的
+> `field` 都填**控件 `key`**（`get_form_fields` 返回的 `info['key']`），**不是 `model`**。
+> `key` ≠ `model` 去掉控件类型前缀——随机尾段不同，实测同一字段 model `textarea_1789899689181_397922`
+> 对应的 key 是 `1789899689181_131302`；别自己裁字符串，从 `get_form_fields` 的 `key` 取。
+> 两份清单格式不一致（一份 model、一份 key）时，平台按 key 查找 → 该视图**一列都不渲染**（只剩表头，
+> 用户会报「没字段了 / 字段不见了」），接口 `save` / `updateViewConfig` 都不报错。
+> **手搓清单极易踩这条**：自定义列一律用 `{"action":"config_table","fieldNames":[...]}` /
+> `hideFieldNames` / `showAll` 重建（脚本两份一起写、统一成 key），不要直接 PUT 自己拼的 `columnList`。
+
 > **`column_list` 是否"全量"取决于模式**（对齐前端 `columnUtils.ts` 的 `isShowColumn`，2026-09 核对）：
 > - `diy` 模式：`column_list` 是**全量快照**——未列出的字段（含设计器以后新增的字段）**默认隐藏**（前端注释：与后台保持一致）。隐藏某字段必须把它显式写入 `column_list` 并设 `show: false`。
 > - `default` 模式：不存在 `column_list`，未在 `showColumnList` 中列出的字段按默认规则显示。
@@ -807,18 +816,29 @@ from desform_utils import init_api, config_table_quick_filter
 init_api('<api_base>', '<token>')
 
 config_table_quick_filter(view_id, query_list=[
-    {"field": "input_name",    "name": "姓名", "type": "input",  "query_type": "like", "seq": 0},
-    {"field": "select_status", "name": "状态", "type": "select", "query_type": "=",    "seq": 1},
+    {"field": "input_name",    "type": "input",  "queryType": "like", "seq": 0},
+    {"field": "select_status", "type": "select", "queryType": "eq",   "seq": 1},
 ])
 ```
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `query_list` | — | 筛选字段列表，每项包含 `field`、`name`、`type`、`query_type`、`seq` |
+| `query_list` | — | 筛选字段列表，每项 `field`、`type`、`queryType`、`seq`（`query_type` 也收，函数归一成驼峰；`name` 会被丢弃） |
 | `query_button` | `True` | 是否显示查询按钮 |
 | `wait_query` | `False` | 是否等待点击查询后才加载数据 |
 
-> ⚠️ 上例 `type`/`query_type` 键名是 python 层转换后的下划线版；**界面实际存的是驼峰 `queryType`**（python 函数内部已转换）。`query_type` 的值用 `eq`，不是 `"="`。
+> ⚠️ **落库键名必须是驼峰 `queryType`**；值用 `eq`，不是 `"="`。
+> **2026-09-21 事故**：本文档曾写「下划线是 python 层转换后的形态、函数内部已转换」，
+> 但当时函数是**原样透传**——按文档写下划线 → 库里的键真是 `query_type` → 后端
+> `map.get("queryType").toString()` 取到 null → 列表页抛
+> `操作失败，Cannot invoke "Object.toString()" because the return value of "java.util.Map.get(Object)" is null`，
+> **整页渲染中断：表头只剩 `#`/`操作`，左侧筛选与数据全空**（24 张表全中）。
+> 函数现已强制归一，但**改完视图务必回读验收**（见下条）。
+
+> ✅ **视图配置的收尾体检（必做，一条 GET）**：
+> `GET /desform/getColumns?desformCode=<code>&listViewId=<viewId>` —— 这就是列表页加载时调的那个接口。
+> `success=false` 即坏视图（页面会整页报错），**不要以 `updateViewConfig` 返回 success 作为验收**。
+> 另可用 `GET /desform/view/queryById?id=<viewId>` 回读原始记录，核对 `queryList` 的键名形态。
 
 > CLI 一键版（推荐，字段名自动匹配）：`{"action":"config_quick_filter","fieldNames":["创建时间","金额1"]}`——按字段中文名转 model，type/queryType 按下表自动匹配，与界面操作完全一致；已收录控件外的写法见下表，未收录时用 `queryList` 显式传参。
 

@@ -352,7 +352,7 @@ COLOR_CYAN   = 'rgb(0, 188, 212)'
 
 **通用请求参数（POST body / GET query）：**
 - `designFormCode`：表单编码（必填）
-- `viewId`：视图 ID（可选，不传则为全局按钮）
+- `viewId`：视图 ID（全局按钮传空串 `''`；**`/desform/button/save` 不能缺该键**，缺失时旧版后端报 "Id must not be null" 且按钮已写库）
 
 ---
 
@@ -382,9 +382,9 @@ init_api('<api_base>', '<token>')   # 仅普通表单设计器（无租户/应�
 
 ### create_button
 
-> **⚠️ `flowStatus` 必须传 `True`，否则报 "Id must not be null"**
+> **⚠️ "Id must not be null" 的真根因是请求体缺 `viewId`，与 `flowStatus` 无关**
 >
-> 后端在 `flowStatus=True` 时会自动创建一个空 buttonEvent 流程 shell，保存时需要该流程 ID。不传或传 `False` 则 ID 为 null，MongoDB 报错。返回值中 `result.processId` 即为自动创建的空流程 ID；若需绑定已有流程，再调 `update_button` 将 `processId` 替换为目标流程 ID。
+> 后端 `save()` 先写库按钮，再 `findById(viewId)` 维护视图关系；`viewId` 为 null 时抛异常，但**按钮已写库**（盲目重试会产生重复按钮）。`create_button` 在 `view_id=None` 时已自动补 `viewId=''`，直接调接口时须自行带上。返回值中 `result.processId` 为后端自动生成的流程 ID；若需绑定已有流程，再调 `update_button` 将 `processId` 替换为目标流程 ID。需要按钮触发简流时仍要传 `flowStatus: True`。
 
 ```python
 result = create_button(
@@ -397,7 +397,7 @@ result = create_button(
         'note': '向相关人员发送通知',
         'showStatus': 'condition',
         'clickThen': 'form',
-        'flowStatus': True,    # ⚠️ 必须为 True，否则报 "Id must not be null"
+        'flowStatus': True,    # 按钮需要触发简流时传 True
         'conditionType': 'and',
         'conditionsGroup': [...],
         'buttonFormConfig': {

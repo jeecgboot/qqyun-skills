@@ -55,7 +55,7 @@
 
 | 组件 | 关键点 |
 |------|--------|
-| **JPivotTable** | 行=`nameFields`，列=`typeFields`，值=`valueFields`；`isGroup:true`；顶层必有 `pivotTable`（缺则「暂无数据」）；`showColumnTotal/showLineTotal` 实操为 `true`；`controlList`/`unitList` 对**每个**数值字段一条（`key`=fieldName）；`option` 只需 `{title:{show:true,text:'表格'},card:{…}}`（**option.title 固定「表格」**，用户可见名在 `componentName`）；`analysis.compareType:''`；**关联记录行/列与柱/饼相同必须展开**：`localField`+`fieldName=titleField`+顶层 `sourceCode`（旧「不展开」结论作废，2026-09-04 对照手工修盘） |
+| **JPivotTable** | 行=`nameFields`，列=`typeFields`，值=`valueFields`；`isGroup:true`；顶层必有 `pivotTable`（缺则「暂无数据」）；`showColumnTotal/showLineTotal` 实操为 `true`；`controlList`/`unitList` 对**每个**数值字段一条（`key`=fieldName）；`option` 只需 `{title:{show:true,text:'表格'},card:{…}}`（**option.title 固定「表格」**，用户可见名在 `componentName`）；`analysis.compareType:''`；**关联记录行/列与柱/饼相同必须展开**：`localField`+`fieldName=titleField`+顶层 `sourceCode`（旧「不展开」结论作废，2026-09-04 实测） |
 | **DoubleLineBar** | `isGroup:true`，`chart.category:'Line'`；左轴分组=`typeFields`，右轴数值=`assistYFields`，右轴分组=`assistTypeFields`；`yAxis:[{"type":"value"},{"type":"value"}]`；`seriesType=[{series:系列名,type:'bar'},…]`（数组，禁止字符串） |
 | 跨应用 | `add-charts --form-app-name`；config `appId`=表单应用；查字段前切 `X-Low-App-ID` |
 

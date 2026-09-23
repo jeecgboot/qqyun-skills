@@ -357,7 +357,7 @@ $LINK remove-js API TOKEN PAGE_ID --name "图表名"
 $COMP list API TOKEN PAGE_ID
 $COMP edit API TOKEN PAGE_ID --name "组件名" --set "option.showValue=true" --set "option.unit=个"
 $COMP move API TOKEN PAGE_ID --name "组件名" --x 0 --y 17
-# move 改了 --w/--h 后须修回像素 size：width=w*75 height=h*11
+# move 改了 --w/--h 后须修回像素 size：width=w*75 height=h*11-10（格子真实高，非 11h）
 $COMP batch-add API TOKEN PAGE_ID --specs-file BATCH.json   # 仅静态/UI（≥2 个一次 save）
 $COMP delete API TOKEN PAGE_ID --name "组件名"（或 --type JRankingList / --id，按 componentName 匹配，含 JGroup 组内）
 ```

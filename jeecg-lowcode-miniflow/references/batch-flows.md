@@ -27,6 +27,15 @@
 
 父流程必须在子流程 deploy 且注册完成之后才能建，否则 callActivity 找不到定义。
 
+> ✅ **2026-09-20 起这条顺序由 `build_flows.py` 硬性执行**（阶段①.5 闸门）：
+> 子流程全部建完 → 拉一次 `/act/process/list` → 逐条断言 `processKey` 已在引擎注册，
+> **有缺就直接 `sys.exit(1)`，父流程一条都不建**。要带病继续得显式加 `--force`。
+>
+> 为什么做成闸门而不是提示：子流程没注册时，**父流程照样建得成功**（save/deploy 全绿），
+> 错要等运行时调到子流程才抛 `FlowableObjectNotFoundException`。
+> 2026-09-17 实测 22 条踩坑、2026-09-20 又靠流程外脚本补跑一次 ——
+> 「事后补救」这条路已经证伪两次了。
+
 ## 路线：声明式 `flows.py` 优先，但**覆盖不到就必须补齐或手建**
 
 **新建应用的流程优先走 `build_flows.py` + `flow_dsl` 声明式生成**（见 `create-flow.md`）。
@@ -35,9 +44,9 @@
 > ⛔ **2026-09-17 事故：这条「一律走批量」曾是错的，代价是 63 条流程全部不可用。**
 > `build_flows.py` + `flow_dsl` 的**实际覆盖范围比它声称的窄**。实测（52 表进销存应用）：
 > 凡「主表触发 → 取关联多条明细 → 逐行调子流程」这类流程，**引擎一个契约都没发出去**，
-> 而 save/deploy 全绿。对照已知正确产物，缺的是：
+> 而 save/deploy 全绿。对照节点契约（`node-contract.md` §7/§9），缺的是：
 >
-> | 节点 | 正确形态（手建/golden） | build_flows 实际发出 |
+> | 节点 | 正确形态（见 `node-contract.md` §7/§9） | build_flows 实际发出 |
 > |---|---|---|
 > | 取明细 | `selectType=3`（从单条记录获取关联记录）+ `linkFormTableField`=父表 link 的 model + `formTableId=form_start_<父表code>` + `limitNum` **留空** + `getDataType=1` | `selectType=1`、`limitNum=0`、`getDataType=2`、`linkFormTableField` 空 |
 > | 新增单据 | `attr.formModel` **全字段映射** | `formModel` **空**（面板全空） |
@@ -46,14 +55,29 @@
 > | 子流程尾部 | 建完明细后还有「**更新记录**」节点 | 建完明细即结束 |
 > | `get_one` 取值 | 筛选值取「获取节点数据」/「本流程参数」 | 取「工作表事件回显」 |
 >
+> **2026-09-20 复测（52 表进销存，同一批流程）又抓出六个偏移 —— 说明这类「助手名看着对、发出去是另一回事」
+> 是系统性的，不是一次性事故。完整清单 + 修法见 `node-contract.md` §9。**
+>
+> | 项 | 正确形态 | 实际发出 | 面板症状 |
+> |---|---|---|---|
+> | 子流程内取值来源 | `formNodeType:'search'` + `formNodeId`=数据源节点 id | `'getMore'` | 气泡显示「获取多条节点数据」 |
+> | `data_get_one.formTableId` | `form_<本节点id>_<表code>` | `form_start_<表code>` | 更新对象选错 |
+> | `data_update` 来源 | 指向前置 `data_get_one` + `'search'` | `'start'`/`'table'` | 同上 |
+> | `updateFields[]` | 含 `id`/`fieldValue`/`valType`/`valueType` | 缺键 | 更新值显示 `[object Object]` |
+> | 审批流 | `approver → data_update` 直连 | 套排他网关两支 | 更新被包在条件里 |
+> | 审批人 | `appr(who="发起人")` | 写死 `users=["admin"]` | 人事不符 |
+>
+> **因此「按 `node-contract.md` §9 逐节点核对」不是可选项，是这条流水线的必经步骤。**
+>
 > **动手前的三条硬规矩：**
-> 1. 批量生成这类流程前，**先取一个已知正确的同类流程 `processJson` 当基准**
->    （机制：`/act/process/extActProcess/queryById`），逐节点对齐 `attr` 全键；
+> 1. 批量生成这类流程前，**先把 `node-contract.md` §7/§9 的正确形状写进生成器**；
 >    不要凭 `flow_dsl` 助手的名字假设它会发对。
+>    ⛔ 不要走「找一份别人配好的同类流程来仿」这条路 —— **线上不存在现成的对照组**，
+>    正确形状只在契约页里，照着写。
 > 2. **不要用「未覆盖清单」当免责**——检查的是「发出去的 `attr` 对不对」，
 >    不是「助手有没有抛错」。
-> 3. 生成后**必须回读 `processJson` 与基准逐节点 diff**，差异非空即视为失败；
->    `OK:done 建 N / 失败 0` **不等于**配置正确。
+> 3. 生成后**必须回读 `processJson`，逐节点对照 `node-contract.md` §9.1 的清单**，
+>    对不上即视为失败；`OK:done 建 N / 失败 0` **不等于**配置正确。
 
 ### `flow_dsl` 的助手清单（2026-09-16 扩容后）
 
@@ -62,16 +86,32 @@
 | `flow(名称, table=, on=新增/修改/新增\|修改/删除, cond=[(字段,规则,值)], watch=[字段名])` | 主流程；`cond`=触发条件，`watch`=监控字段 |
 | `subflow(名称, context=明细表, params=[变量名])` | 子流程；`params` 声明它要收的流程变量 |
 | `get_one(表, cond=[字段名] 或 [(字段,规则,值)], empty=继续/新增/中止/分支)` | 取单条 |
-| `get_more(表, cond=, sort=, limit=)` | 取多条 |
+| `get_more(表, cond=, sort=, limit=, from_=, name=)` | 取多条。⛔ **`from_` 只认字面量 `"start"`**（=「取本单的关联明细」，发 `selectType=3`）；写字段中文名 / 字段 model 都**不认**，会静默降级成 `getType=1`。**要喂给 `call_sub` 的取多条必须写 `from_="start"`** —— 否则数据对象为空、逐行子流程一行都取不到 |
 | `update(表, {字段: 值})` / `add(表, {字段: 值})` | 改 / 新建 |
 | `approve(名称, users=/roles=)` / `appr(名称, who=发起人/部门/部门负责人)` | **审批**节点；`appr` = 按表达式取审批人 |
 | `fill(名称, users=/roles=/who=)` | **填写**节点（办理人看/改表单） |
-| `gateway(名称, branches=[{name, cond, nodes}])` | 排他分支 |
-| `data_branch(found=[...], missing=[...])` | **数据判断分支**，紧跟 `get_one(empty="分支")` |
-| `compute(名称, "$甲$ - $乙$", {"甲": ref(..), "乙": ref(..)})` + `result(名称)` | **流程内运算** |
+| `gateway(名称, branches=[{name, cond, nodes}])` | 排他分支（**不含条件的那条会自动成兜底支**）。**要「相容分支 / 包含分支 / 包容分支」= inclusive**：照常 `gateway(...)`，再加一行 `g['type'] = 'inclusive'`，然后照常喂 `build_flows`（Resolver 会正常解析条件，产出 `inclusive` + `inclusive_end`）。⚠️ **别自己去调 `build_process_json` 拼**——它只是构建器、不解析中文名与中文规则；且它读的键是 `conditionNodes` 而 `gateway()` 产出的是 `branches`，写错会静默产出**空网关**（现在会直接报错拦住） |
+| `data_branch(found=[...], missing=[...])` | **数据判断分支**，紧跟 `get_one(empty="分支")`。网关名由引擎硬编码为「数据分支」，DSL 已强制，传别的名会被覆盖（2026-09-21 源码定论，见 node-contract 8.3） |
+| `upsert(表, cond, found=[...], missing=[...])` | **按条件定位一行：查到走 found / 没查到走 missing**（台账、库存、余额类回写的标准写法；默认展开成原生 `get_one(empty=分支)+data_branch`） |
+| `compute(名称, "$甲$ - $乙$", {"甲": ref(..), "乙": ref(..)})` + `result(名称)` | **流程内运算**（四则/函数 → `funType: fun`） |
+| `compute_record(名称, source=get_more节点名)` + `result(名称)` | **统计条数**（`funType: record`，数上游 get_more 取回几条） |
 | `call_sub(子流程名, pass_={参数名: ref(..)})` | 调子流程并传参 |
 | `delay(分钟)` / `note(标题, users=, kind=system/email/dingding/weixinqy)` | 延时 / 通知 |
 | `ref(字段, node=节点名)` / `var(变量名)` / `inc()` / `dec()` / `lit()` | 值 |
+| **`record_id(node=add节点名)`** | **上游 `add()` 刚建的那条记录的 id**（`variableValue:"_id"` + `formNodeType:"plus"` 形态，见 `node-contract.md` §2）。用在 `call_sub(..., pass_={"id": record_id(node="添加记录")})`；子流程里 `add(明细表, {"父单关联字段": var("id"), …})` 就能把新建明细行**挂到刚建的父单上**。⚠️ 2026-09-21 前本表漏列它，作者拿 `ref("id"/"_id", node=…)` 硬套 → 字段校验拒绝，「业务单→建凭证单→建明细行」这档整整白探了一轮 |
+
+**⚠️ 照需求原文建，禁止「语义等价」的链路替换（2026-09-20 销售管理实测事故）。**
+需求写「获取多条 → 运算统计条数 → 互斥分支（结果 = 0 / 其他）」，作者觉得「取单条 → 数据分支」是同一语义、
+流程里做不了算术，就换了。两处都错：① 条数统计本来就做得了（`compute_record`）；
+② 那条替代链路在真机上**把流程实例直接中止**（`get_one` 的 `noDataType=3` 在没有后续数据分支时
+结束流程），新增节点一次没跑，而 save/deploy/契约检查全绿。
+**需求里出现的节点名（获取多条 / 统计条数 / 互斥分支…）就是节点类型，照抄。**
+
+**分支条件可以直接用运算节点结果当判据**：`gateway(branches=[{"name": "没有", "cond": [(result("统计条数"), "等于", 0)], "nodes": [add(...)]}])`
+—— 主语写成 `result("节点名")` 而不是字段名。builder 会自动落成 `field="result"` +
+`branchForm={formTableCode: "function-{funType}", formNodeId: <运算节点id>, formNodeType: "function"}`
+（形态见 `miniflow-node-types.md`「四」4.4.1 / gotchas #59）。**别写成字段名**——引擎会按触发行快照取值，
+条件恒判失败、永远走兜底支，而接口全绿。
 
 **审批节点 vs 填写节点（选错就白建）**
 
@@ -82,6 +122,26 @@
 | 什么时候用 | 纯审批：同意 / 不同意 | 「边看单子边处理」、要在节点里改字段 |
 
 业务语言说「审批」时，先确认要不要看/改表单——**要，就用 `fill()`**。
+
+### 构建前的「引擎行为规则」（`flow_rules.py`，`build_flows` / `precheck` 自动执行）
+
+2026-09-21 先按真机黑盒试错写了六条，当晚对照源码逐条核实后修正（表与源码行号见 `scripts/flow_rules.py` 文首）：
+
+| 规则 | 现状 |
+|---|---|
+| 1 数据分支网关名 | **强制「数据分支」**（真因，原「无数据支不执行」是误判）；`--rewrite-databranch` 可选绕行形态 |
+| 2 流程建的行不吃默认值 | 被累加的列自动补 0（旧值为空时引擎 NPE） |
+| 3 累加带小数的值归 0 | **构建器**对 number/integer 目标写 `fieldType=money` 走 BigDecimal；对 formula/summary/link-field 目标累加直接报错 |
+| 4 运算节点取「取单条」结果 | 源码未证实 → 只告警 |
+| 5 网关比较符 | 比较符对称、不再限制；判据是输入行 link-field/summary 快照时告警 |
+| 6 同表同事件多流程 | 源码与对照实验都证明各触发一次 → 只告警提示合并 |
+| 办理人=表单字段 | `fieldType` 必须解到 `select-user`/`select-depart`（引擎只认这两个字面量，他表字段要沿链解到底），解不出报错 |
+
+改写/校正会打印 `NOTE:flow_rules …`（**要看**）；`--no-rewrite` 关改写、`--strict` 告警升级、`--lenient` 降级。
+这些规则只是静态改写与告警，**不构成验收**：流程建对没建对，结构上由 `check_node_contract.py` 判，
+运行起来账对不对**只有端到端冒烟看得见**——而冒烟**默认不跑**（用户明确要求才跑，见
+`lowapp/references/fast-full-chain.md` ⑧-b）。所以默认交付口径是「结构闸门全绿、未做运行验证」，
+别把前者说成后者。
 
 ### 批量 DSL 还**没**覆盖的（要手写 node_config，见 `miniflow-node-types.md`）
 
@@ -121,6 +181,20 @@
    ISO 8601 时长串。现在 `delay(N)` 会转成 `PT{N}M`（整小时/整天走 `P1H`/`P1D` 预置，
    设计器认得）。
 
+5. **条件值 / 写入值写的是显示名**（2026-09-21 用户实测报障，见 `gotchas.md` #105）：
+   `cond=[("入库确认","等于","是")]` 里的「是」是**页面显示名**，表单存的字典值是 `"0"` ——
+   引擎拿 `"是"` 去 Mongo 里比 `"0"`，**恒不匹配、流程静默不触发**；写字段同理（写进去是空的）。
+   **三处都要翻**：主流程 `cond`、**网关分支 cond**（⚠️ 它另起炉灶拼 queryItem，
+   不走 `_cond_items`，最容易漏）、写入（`updateFields` / `formModel`）。
+   已由 `Resolver.field_value()` 收编，认不出的值**直接报错**。
+   提示词里的「是/否/已通过」是**业务语义**，落库前一律要问「这个字段真实存的是什么」。
+
+### 2026-09-22 四应用并行实测后收进构建器的三件事（gotchas #118–#120）
+
+- `call_sub(pass_={参数: 字面量})`：字面量按**子流程里该参数写入的目标字段**翻存储值（字典/选项字段写文案 = 落文案）。前提是子流程先于主流程建（本来就是这个顺序）。
+- 写入 `select-depart` 目标：部门名自动翻成 `[部门id]`；已经是 id 的原样。
+- 条件可写二元组 `("到货日期", "为空")` / `("…", "不为空")`，不必补 `None`。
+
 ### 引擎侧的对应叫法（写 `ref(node=...)` 时要用）
 
 | 节点 type | 变量对象里的 `formNodeType` |
@@ -147,6 +221,20 @@
 - 单条失败**只记录不中断**，整批跑完再统一重试失败项
 - `save` 报 Duplicate key → `startTaskId` 不要等于任何节点 id
 - `deploy` 成功但 callActivity 找不到定义 → 子流程补 `customProcessId` 再 deploy
+
+## 改 / 重建单条流程的收尾（必做三件）
+
+重建会换 `processId`，**引用方不会自动跟**。2026-09-21 实测：用 `--only <流程名>` 重建 2 条后，
+旧记录没删掉、按钮还指着旧 id，应用里多出重名孤儿流，而每一轮验收闸门都显示「全绿」。
+
+1. **删除步骤必带 `pageSize`** —— `extActProcess/list` 不传只回 10 条，目标不在前 10 条就静默不删
+2. **按钮重绑** —— 凡 `processId` == 旧 id 的自定义按钮，`update` 成新 id（`update` 必带 `code`）
+3. **回读三件事** —— 应用内流程总数（按记录的 `lowAppId` 过滤，租户下别的应用会同名）；
+   每个按钮 `processId` 在清单里；不在产出清单里的孤儿流清掉
+
+⚠️ **不要用「某字段为空/长度阈值」判断哪条是空壳流程**。`extActProcess/list` 返回的是
+**精简记录**，`processJson` 根本不在记录里 —— 按长度判会把真流程全判成空壳删光（实测一次删掉 22 条）。
+删除白名单只有一个正确来源：**本次产出的 id 集合**。
 
 ## 输出预算自查
 

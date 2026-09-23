@@ -242,6 +242,8 @@ delete_data(code, data_id, hard=False)
 # hard=True:  物理删除（不可恢复）
 ```
 
+> ⚠️ **删除记录不会结束其简流实例（2026-09-17 实测）**：记录被删（含物理删）后，关联的流程实例仍在跑；待办任务弹窗因取不到记录而**表单区空白**、无法填写完成。平台没有终止实例的 API（`/act` 下无 terminate/deleteInstance 之类；OpenAPI 只暴露 `suspend/{id}`、`close/open/{key}` 等流程**定义级**接口，勿误用——close 会永久拆掉工作表触发注册）。所以造数跑流程后：**先让流程跑完、或提醒用户在「我发起的/待办」里终止实例，再删记录**；不要直接删记录。
+
 ---
 
 ## delete_data_batch

@@ -51,6 +51,7 @@ import os
 import sys
 import tempfile
 import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REFS = os.path.dirname(HERE)
@@ -125,10 +126,29 @@ def index_menus(app_id):
 
 # ---------------- 建一张盘 ----------------
 
+def _validate_page(page):
+    """建之前的规格预校验（失败就整张盘不建，别留半成品）。"""
+    errs = []
+    flts = page.get("filters") or []
+    if len(flts) > 1:
+        # `add-filter` 要求同一面板里的图来自同一张表，所以跨表就会生成多个面板 ——
+        # 盘上出现两组一模一样的「查询/重置」，使用者分不清哪个管哪块
+        #（2026-09-22 进销存 R5 用户报障：采购订单看板 / 财务收支看板各两个面板）。
+        # 这是「一张盘塞了两个主题」的信号，正确做法是拆盘，而不是并排两个面板。
+        errs.append("盘「%s」声明了 %d 个查询面板（%s）—— 一张盘只允许一个。"
+                    "多个面板来自图跨了多张表；请**按主题拆成多张盘**（每盘一张主表 + 一个面板），"
+                    "或只保留主表那一个筛选"
+                    % (page["name"], len(flts),
+                       "、".join(str(f.get("title") or "?") for f in flts)))
+    return errs
+
+
 def build_page(page, workdir, dry_run=False):
     name = page["name"]
     group = page.get("group", "")
-    errs = []
+    errs = _validate_page(page)
+    if errs:
+        return None, errs
 
     rc, out = run_cli(cli("create-page", "--name", name, "--group", group))
     m = None
@@ -214,10 +234,22 @@ def add_page_buttons(page, page_id, workdir):
     name = page["name"]
     errs = []
     btns = page.get("buttons")
-    for i, grp in enumerate([btns] if isinstance(btns, dict) else (btns or [])):
+    groups = [btns] if isinstance(btns, dict) else (btns or [])
+    # ⚠️ 先把**所有**按钮组校验一遍，再动第一组。2026-09-21 进销存实测：两组按钮里第一组加成功、
+    # 第二组因 op 写成别名表外的「跳转」而 FAIL —— 盘上留下一个半成品按钮组件，重跑时
+    # page_has_buttons 判「已有按钮」直接跳过，永远修不好；手工补加又叠出重复组。
+    # 校验失败一个组件都不加，规格改对后重跑就是干净的。
+    pre = _validate_button_groups(groups)
+    if pre:
+        return ["buttons 规格未通过预校验（一个按钮都没加）: " + "；".join(pre)]
+    for i, grp in enumerate(groups):
         if not grp:
             continue
         grp = _resolve_button_pages(grp)
+        if ("x" in grp or "y" in grp) and not grp.get("place"):
+            # 规格给了坐标：add-buttons 默认 place=top 会把同列图表整体下移按钮高度，finalize_page 只搬按钮不搬图
+            # → 重叠（2026-09-22 销售管理 R2）。先追加到底部，第 ③ 趟 finalize_page 按坐标落位
+            grp = dict(grp, place="bottom")
         p = os.path.join(workdir, "btn_%s_%d.json" % (abs(hash(name)) % 100000, i))
         with open(p, "w", encoding="utf-8") as f:
             json.dump(grp, f, ensure_ascii=False, indent=1)
@@ -225,6 +257,38 @@ def add_page_buttons(page, page_id, workdir):
         if "ADDED=" not in out:
             errs.append("buttons[%d]: %s" % (i, out.strip()[-160:]))
         os.remove(p)
+    return errs
+
+
+def _validate_button_groups(groups):
+    """静态校验按钮组：op 必须在 qqy_ops 的别名表里；"page" 点名的看板必须已存在。
+    返回错误列表（空 = 通过）。只读不写，失败不会留下半成品组件。"""
+    try:
+        from qqy_ops import _BTN_OP_ALIASES as aliases          # 同目录，PYTHONPATH 已含 scripts
+    except Exception:                                            # noqa: BLE001
+        aliases = None
+    pages = None
+    errs = []
+    for gi, grp in enumerate(groups):
+        if not grp:
+            continue
+        if not isinstance(grp, dict):
+            errs.append("buttons[%d] 应是对象 {rowNum,btnType,btnWidth,place,buttons:[…]}" % gi)
+            continue
+        for bi, b in enumerate(grp.get("buttons") or []):
+            where = "buttons[%d].buttons[%d]「%s」" % (gi, bi, b.get("title", "?"))
+            op = str(b.get("op") or b.get("operationType") or "").strip()
+            if b.get("page") and not b.get("customPage") and not op:
+                op = "打开页面"
+            if aliases is not None and op and op not in aliases and op.lower() not in aliases:
+                errs.append("%s op=%r 不在别名表（可用：创建记录/打开列表视图/打开页面(跳转)/打开链接/调用业务流程）"
+                            % (where, op))
+            if b.get("page") and not b.get("customPage"):
+                if pages is None:
+                    pages, _g, _r = index_menus(AUTH[3])
+                if not pages.get(b["page"]):
+                    errs.append("%s 指向的看板「%s」不存在（现有：%s）"
+                                % (where, b["page"], "、".join(sorted(pages)[:12])))
     return errs
 
 
@@ -251,6 +315,272 @@ def _resolve_button_pages(grp):
 
 def _looks_like_code(s):
     return bool(s) and all(c.isalnum() or c in "_-" for c in s) and not any("一" <= c <= "鿿" for c in s)
+
+
+def _chart_title(c):
+    """图组件在盘上的标题：`config.option.title.text`（`config.title` 是空的）。"""
+    o = ((c.get("config") or {}).get("option") or {}).get("title") or {}
+    t = o.get("text")
+    return t if isinstance(t, str) else ""
+
+
+# ── 自动排版：规格没给坐标时，按组件类型套标准尺寸并铺满 24 栅格 ──
+#    （2026-09-22 进销存 R5：规格 x/y 全为 None 且 w/h 离谱 —— KPI w=10 h=32、趋势图 w=6，
+#     结果全堆在 x=0 一列、58% 的行宽度不足 24，盘看着很丑）
+KPI_COMPS = {"JNumber", "JIndicator", "JCircle", "JProgress"}
+WIDE_COMPS = {"JPivotTable", "JTable", "JList", "JTimeline", "JMap"}
+GRID = 24
+KPI_W, KPI_H = 6, 12          # 一行四个
+# ⚠️ KPI 卡高度别往大了给。`number.vue` 的数字是在**标题下方那块 body 区**里居中，
+# 不是在整张卡里居中；body 区 = 格子高 - 卡头 42 - 内边距 24。h=16(166px) 时 body 还剩 100px
+# 去放一个 36px 的数字，上下各空一大截，整体重心偏下，看着就是「贴底 + 空荡」
+#（2026-09-22 用户实测截图：标题 430、数字 572、卡底 648）。h=12(122px) 时 body 剩 56px，
+# 刚好包住数字。**改像素公式救不了这个**——手工拖出来的同高卡片一样难看。
+CHART_W, CHART_H = 12, 28     # 一行两个
+WIDE_H = 32
+BTN_MIN_H = 20
+# ⚠️ 按钮组（JCustomButton）**不能低于 20 行**。`customButton/Button.vue` 的 `.btn-area`
+# 写死 `min-height: 200px`（外加 `padding:24px 20px`、空 `.title` 还占 `margin-bottom:12px`），
+# 图标区 72px + 10px + 文字 + 上下 10px ≈ 123px 是**居中在那 200px 里**的。
+# 格子若矮于 200px，设计器不裁剪、撑到 200 看着还行，运行态 `ViewPane` 是
+# `overflow:hidden; height:100%`，于是内容被按 200 居中后下压再裁底 ——
+# 图标和文字整体贴到下半截（2026-09-22 用户对比截图：设计器对、预览错，h=15=155px）。
+# 11h-10 ≥ 200 ⇒ h ≥ 19.1 ⇒ 取 20（210px）。
+FILTER_H = 8
+TITLE_H = 6
+
+
+def _tile_class(comp):
+    if comp in WIDE_COMPS:
+        return "wide"
+    return "kpi" if comp in KPI_COMPS else "chart"
+
+
+def _spec_layout_bad(specs):
+    """规格自带的 x/y/w/h 是否**不合格**（不合格就别尊重它，改用自动铺版）。
+
+    四条判据，都来自真机渲染出来的难看效果（2026-09-22 项目管理 R5）：
+    · 行宽 > 24 → 组件重叠；
+    · 中间有整行没人占 → 页面开天窗（项目看板 y=100~111 空了 12 行）；
+    · 图类组件高度 < 20 → 图例压在图上（项目状态分布饼图 h=15）；
+    · 数字卡高度 > KPI_H → 一个大空框中间一个小数字。
+
+    ⚠️ 最后一条的门槛原先写 18，结果规格给的 h=16 从门槛下溜过去，自动铺版没接管，
+    真机上四张 KPI 全是大空框（2026-09-22 用户连报三次「贴底」）。门槛一律跟 KPI_H 走，
+    别再单独设一个更松的数。
+    """
+    if not specs:
+        return False
+    cov, top, bottom = {}, None, 0
+    for g in specs:
+        try:
+            x, y = int(g.get("x") or 0), int(g.get("y") or 0)
+            w, h = int(g.get("w") or 0), int(g.get("h") or 0)
+        except (TypeError, ValueError):
+            return True
+        cls = _tile_class(g.get("comp"))
+        if cls == "chart" and h < 20:
+            return True
+        if cls == "kpi" and h > KPI_H:
+            return True
+        for yy in range(y, y + max(h, 1)):
+            cov[yy] = cov.get(yy, 0) + w
+        top = y if top is None else min(top, y)
+        bottom = max(bottom, y + h)
+    if any(v > GRID for v in cov.values()):
+        return True
+    return any(yy not in cov for yy in range(top or 0, bottom))
+
+
+def _auto_tile(items, y0):
+    """按「看板该长什么样」重排：**数字卡在上、图居中、明细表垫底**，每行凑满 24。
+
+    两条来自实测的规矩（2026-09-22 进销存 R5，用户连报三次「太丑」）：
+    · **按类型重排，不跟规格顺序**。规格常写成 KPI→图→KPI→表，若只合并「连续同类」，
+      两个数字卡会被图隔开、各自独占一整行 → 900×154 的大白条，中间一个小数字。
+    · **数字卡只有 1~2 个时，竖排在左侧 1/4 宽，右侧留给第一张图**（经典看板排法）；
+      ≥3 个才平铺成一行。数字卡绝不和图**并排等高**，否则又被拉成大空框。
+    """
+    kpis = [c for c in items if _tile_class(c.get("component")) == "kpi"]
+    charts = [c for c in items if _tile_class(c.get("component")) == "chart"]
+    wides = [c for c in items if _tile_class(c.get("component")) == "wide"]
+    out, y = [], y0
+
+    def row(chunk, h):
+        nonlocal y
+        x = 0
+        for k, c in enumerate(chunk):
+            w = (GRID // len(chunk)) if k < len(chunk) - 1 else GRID - x   # 最后一个吃余数，凑满 24
+            out.append((c, x, y, w, h))
+            x += w
+        y += h
+
+    if kpis and len(kpis) <= 2 and charts:
+        # 左：数字卡竖排（各 1/4 宽）；右：第一张图占满剩下的 3/4，高度与整列对齐
+        col_h = CHART_H // len(kpis)
+        for i, c in enumerate(kpis):
+            out.append((c, 0, y + i * col_h, KPI_W, col_h))
+        out.append((charts[0], KPI_W, y, GRID - KPI_W, CHART_H))
+        y += CHART_H
+        charts = charts[1:]
+    else:
+        for i in range(0, len(kpis), 4):
+            row(kpis[i:i + 4], KPI_H)
+    for i in range(0, len(charts), 2):
+        row(charts[i:i + 2], CHART_H)
+    for c in wides:
+        h = max(WIDE_H, int(c.get("h") or 0))
+        out.append((c, 0, y, GRID, h))
+        y += h
+    return out, y
+
+
+def finalize_page(page, page_id):
+    """**整页按规格落位**：文本标题置顶 → 图表/按钮按规格的 x/y/w/h 各就各位。
+
+    三个 CLI 各有各的落位脾气，谁也管不了全页：`add-ui` 追加到数组末尾（渲染到盘底）、
+    `add-buttons` 默认 `place=top` 把**同列**已有组件整体下移、`add-charts` 按自己的顺序排。
+    2026-09-22 四个应用每个都要手写一遍搬运脚本，最严重一例（进销存首页）4 张 KPI 被两组
+    半宽按钮各顶一次，散成 x=6/18/0/12、y=20/40 两排，每排右侧留白 12。
+
+    所以这里不做增量微调，而是**拿规格当权威重排一遍**：图按标题匹配（匹配不上就按同类型出现
+    顺序兜底），按钮组按出现顺序，规格没给坐标的组件保持原样。失败不算建盘失败。"""
+    api, token, tenant, app = AUTH
+    hdr = {"X-Access-Token": token, "X-Tenant-Id": str(tenant), "X-Low-App-ID": str(app)}
+    req = urllib.request.Request(api.rstrip("/") + "/drag/page/queryById?id=" + str(page_id), headers=hdr)
+    res = json.load(urllib.request.urlopen(req, timeout=60)).get("result") or {}
+    tmpl = res.get("template")
+    comps = json.loads(tmpl) if isinstance(tmpl, str) and tmpl else (tmpl or [])
+    if not comps:
+        return "空模板"
+
+    def place(c, x, y, w, h):
+        before = (c.get("x"), c.get("y"), c.get("w"), c.get("h"))
+        c.update(x=x, y=y, w=w, h=h, pcX=x, pcY=y, pcW=w)
+        # ⚠️ 高度必须写**格子的真实像素高**：vue-grid-layout 里 `row-height=1`、`margin=[10,10]`，
+        # 所以一格 = h*1 + (h-1)*10 = 11h-10（`viewEngine/ViewPane.vue`）。
+        # 写成 11h 会多 10px，而敲敲云运行态还比设计器多吃一份 a-card 内边距
+        # （`number.vue` 的 bodyStyle：!isLowApp 才 padding:0），内容就溢出到格子外 ——
+        # 数字贴底、按钮文字被裁（2026-09-22 用户实测：设计器好、运行态坏）。
+        c.setdefault("config", {})["size"] = {"width": w * 75, "height": h * 11 - 10}
+        return before != (x, y, w, h)
+
+    texts = [c for c in comps if c.get("component") == "JText"]
+    others = [c for c in comps if c.get("component") != "JText"]
+    changed = False
+
+    # ① 文本标题：置顶并占位，后面所有组件的 y 以 top_h 为原点
+    top_h = 0
+    for t in texts:
+        h = int(t.get("h") or 10)
+        changed |= place(t, 0, top_h, 24, h)
+        top_h += h
+    if texts and comps[0].get("component") != "JText":
+        changed = True                              # 数组顺序也要改（见文末 out）
+
+    # ①-b 查询面板：`add-filter` 把它插在「它联动的第一张图的 y」上，既不认标题占位、也和首行图压在一起
+    #      （2026-09-22 进销存 R3 九张盘中招）。让它在标题下方各占一整行，其余组件整体顺延。
+    flts = [c for c in others if c.get("component") == "JFilterQuery"]
+    filt_h = 0
+    for fq in flts:
+        h = max(int(fq.get("h") or 8), 1)
+        changed |= place(fq, 0, top_h + filt_h, 24, h)
+        filt_h += h
+    top_h += filt_h                                 # 后面的图与按钮都从这里往下排
+
+    # ①-c 规格给了坐标的按钮组**先落位**：它们通常钉在盘顶，自动铺版的图必须从它们下方开始，
+    #      否则两者都从 y=0 起算、直接压在一起（2026-09-22 进销存 R5 首页实测 10 行重叠）
+    _grps = page.get("buttons")
+    _grps = [_grps] if isinstance(_grps, dict) else (_grps or [])
+    btn_comps = [c for c in others if c.get("component") == "JCustomButton"]
+    btn_fixed, btn_bottom = set(), top_h
+    spec_bottom = top_h                 # 规格**原本**以为按钮排到哪一行
+    for g, c in zip(_grps, btn_comps):
+        if isinstance(g, dict) and ("x" in g or "y" in g):
+            h_raw = int(g.get("h", c.get("h") or BTN_MIN_H))
+            h = max(h_raw, BTN_MIN_H)
+            y = int(g.get("y", 0)) + top_h
+            changed |= place(c, int(g.get("x", c.get("x") or 0)), y, int(g.get("w", c.get("w") or 24)), h)
+            btn_fixed.add(id(c))
+            btn_bottom = max(btn_bottom, y + h)
+            spec_bottom = max(spec_bottom, y + h_raw)
+    # 按钮被 BTN_MIN_H 抬高后，规格里按原高度往下排的图会被顶穿 → 整体下移同样的量
+    btn_shift = max(0, btn_bottom - spec_bottom)
+
+    # ② 图表：规格给了 x/y 就按规格落位；**一个都没给就自动铺版**
+    #    （2026-09-22 进销存 R5：规格 x/y 全 None、w/h 又离谱，原来这一段整个跳过，
+    #     图就保持 add-charts 的原始堆叠 —— 全挤在 x=0 一列、58% 的行宽度不足 24）
+    spec_charts = [g for grp in (page.get("charts") or {}).values() for g in (grp or [])]
+    want = [(g.get("comp"), (g.get("title") or ""), g) for g in spec_charts if "x" in g or "y" in g]
+    chart_comps = [c for c in others if c.get("component") not in ("JFilterQuery", "JCustomButton")]
+    if want and _spec_layout_bad([g for _c, _t, g in want]):
+        want = []                                   # 规格排版不合格 → 丢掉坐标，走自动铺版
+
+    if want:                                        # —— 规格排过版：尊重它
+        pool = list(others)
+        for comp, title, g in want:
+            hit = None
+            if title:
+                hit = next((c for c in pool if c.get("component") == comp and _chart_title(c) == title), None)
+            if hit is None:
+                hit = next((c for c in pool if c.get("component") == comp), None)
+            if hit is None:
+                continue
+            pool.remove(hit)
+            gy = int(g.get("y", 0)) + top_h
+            changed |= place(hit, int(g.get("x", hit.get("x") or 0)),
+                             gy + (btn_shift if gy >= spec_bottom else 0),
+                             int(g.get("w", hit.get("w") or 24)), int(g.get("h", hit.get("h") or 20)))
+        next_y = max([int(c.get("y") or 0) + int(c.get("h") or 0) for c in chart_comps] or [top_h])
+    elif chart_comps:                               # —— 规格没排版：按类型套标准尺寸铺满 24 栅格
+        ordered = []                                # 按规格里的出现顺序排，标题匹配不上就按类型顺序兜底
+        pool = list(chart_comps)
+        for g in spec_charts:
+            t, comp = (g.get("title") or ""), g.get("comp")
+            hit = next((c for c in pool if c.get("component") == comp and _chart_title(c) == t), None) \
+                if t else None
+            hit = hit or next((c for c in pool if c.get("component") == comp), None)
+            if hit is not None:
+                pool.remove(hit)
+                ordered.append(hit)
+        ordered += pool                             # 规格里没点名的挂在后面
+        tiled, next_y = _auto_tile(ordered, btn_bottom)
+        for c, x, y, w, h in tiled:
+            changed |= place(c, x, y, w, h)
+    else:
+        next_y = top_h
+
+    # ③ 没给坐标的按钮组：整行接在图表下面（给了坐标的已在 ①-c 落位）
+    for c in btn_comps:
+        if id(c) in btn_fixed:
+            continue
+        h = max(int(c.get("h") or 0), BTN_MIN_H)
+        changed |= place(c, 0, next_y, 24, h)
+        next_y += h
+
+    # ③-b 规格给了半宽坐标、但那一行最后没人跟它并排的按钮组 → 拉满整行，别留半边空白
+    #     （规格本意是「按钮左半 + 图右半」，而图的坐标若因不合格被丢弃就会排到下一行去）
+    for c in btn_comps:
+        if id(c) not in btn_fixed or int(c.get("w") or 0) >= GRID:
+            continue
+        y0, y1 = int(c.get("y") or 0), int(c.get("y") or 0) + max(int(c.get("h") or 1), 1)
+        share = any(o is not c and int(o.get("y") or 0) < y1
+                    and int(o.get("y") or 0) + max(int(o.get("h") or 1), 1) > y0
+                    for o in comps)
+        if not share:
+            changed |= place(c, 0, y0, GRID, max(int(c.get("h") or 0), BTN_MIN_H))
+    if not changed:
+        return None
+    out = texts + sorted(others, key=lambda c: (int(c.get("y") or 0), int(c.get("x") or 0)))
+    for i, c in enumerate(out):
+        c["orderNum"] = i
+    body = json.dumps({"id": str(page_id), "template": json.dumps(out, ensure_ascii=False)}).encode("utf-8")
+    req = urllib.request.Request(api.rstrip("/") + "/drag/page/edit", data=body, method="POST",
+                                 headers=dict(hdr, **{"Content-Type": "application/json"}))
+    r = json.load(urllib.request.urlopen(req, timeout=60))
+    if not r.get("success"):
+        return "保存失败 %s" % str(r)[:120]
+    return "标题@0 + %d 组件已规整" % len(out)
 
 
 # ---------------- 主流程 ----------------
@@ -305,6 +635,15 @@ def main():
     if not pages:
         raise SystemExit("FAIL:spec 里没有待建页面")
 
+    # ⚠️ 规格预校验要在**删盘之前**：否则 --recreate 先把旧盘删了、再因规格不合格拒建，
+    #    应用里那张盘就凭空消失了（2026-09-22 实测踩到）。
+    bad = [(p["name"], e) for p in pages for e in _validate_page(p)]
+    if bad:
+        for nm, e in bad:
+            log("FAIL:规格预校验 %s" % nm)
+            log("   " + e)
+        raise SystemExit("FAIL:规格预校验未通过 %d 项 —— 未删除、未新建任何盘" % len(bad))
+
     # 菜单索引：一次取全，pageId 用 menuUrl 列
     existing, groups, _ = index_menus(a.app_id)
     if recreate:
@@ -318,6 +657,7 @@ def main():
     t0 = time.time()
     ok = skip = fail = 0
     want_buttons = []          # [(page, pid)]：第 ② 趟统一加按钮
+    done_pages = []            # 本次建成的盘：第 ③ 趟整页规整（标题置顶 / 按钮落位）
     for page in pages:
         name = page["name"]
         # 非破坏：已存在就跳过（可断点续跑）。要重建请用 --recreate
@@ -351,6 +691,7 @@ def main():
         else:
             log("OK:%s pid=%s" % (name, pid))
             ok += 1
+            done_pages.append((page, pid))
             if page.get("buttons"):
                 want_buttons.append((page, pid))
 
@@ -394,6 +735,14 @@ def main():
         else:
             log("OK:分组 全部就位")
 
+    # ③ 趟：整页规整（标题置顶、按钮组按规格坐标）。失败不算建盘失败，只提示
+    for page, pid in done_pages:
+        try:
+            msg = finalize_page(page, pid)
+            if msg:
+                log("OK:finalize %s %s" % (page["name"], msg))
+        except Exception as e:                                # noqa: BLE001
+            log("WARN:finalize %s %s" % (page["name"], str(e)[:120]))
     log("OK:done 建 %d / 跳过 %d / 失败 %d，%.1fs" % (ok, skip, fail, time.time() - t0))
     if fail:
         sys.exit(1)

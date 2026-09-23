@@ -470,7 +470,7 @@ def build_data_update_node(node_config, form_config, level, parent_id=None):
         val = uf.get("val", "")
         # val 直接使用：固定值时为字符串，引用变量时为对象（由调用方传入正确格式）
         # ⚠️ 不要把字符串包装成 {"funText": val, "funContext": {}}，前端无法识别该格式
-        update_fields.append({
+        item = {
             "id": field_id,
             "optType": uf.get("optType", "1"),
             "fieldValue": uf.get("fieldValue", ""),
@@ -478,7 +478,25 @@ def build_data_update_node(node_config, form_config, level, parent_id=None):
             "val": val,
             "fieldType": uf.get("fieldType", ""),
             "type": uf.get("type", uf.get("fieldType", "")),
-        })
+        }
+        # ⚠️ `val` 是**变量对象**（引用字段 / 运算结果 / 系统变量）时，必须同时给
+        # `valueType:3` + `valType:"variable"`——缺了设计器会按**固定字面量**解析，
+        # 值可能不落库（gotchas #58）。而 save/deploy/回读**全绿**，只有真跑才看得出。
+        # 2026-09-20 实测根因：这两个键以前在这里被**整组丢掉**（只搬 optType/val/
+        # field/fieldType/type），于是**所有经 build_flows 建的流程**更新节点里的
+        # 变量引用全是坏的——一次 20 条契约违例里有 15 条是它。
+        if isinstance(val, dict):
+            item["valueType"] = uf.get("valueType", 3)
+            item["valType"] = uf.get("valType", "variable")
+        elif uf.get("valueType") is not None:
+            item["valueType"] = uf["valueType"]
+            if uf.get("valType") is not None:
+                item["valType"] = uf["valType"]
+        # `options` 同样要搬：写**日期字段**（尤其 val 是系统变量 nowDate/nowTime）
+        # 要带 {"format": "yyyy-MM-dd"}，见 example/分支示例.md 的金标样例。
+        if uf.get("options") is not None:
+            item["options"] = uf["options"]
+        update_fields.append(item)
 
     attr = {
         "formType": 2,
@@ -578,12 +596,18 @@ def build_exclusive_gateway(node_config, form_config, level, parent_id=None):
             "level": str(level),
         }
         if not is_default:
-            branch_attr["branchForm"] = {
+            # ⚠️ 字段源默认是「触发行快照」(start/table)，但**条件判据是运算节点结果**时
+            # 必须换成运算节点，否则设计器按 start 解析、运行时也取不到值（gotchas #59 /
+            # node-types「四」4.4.1）。调用方用 branch["branchForm"] 覆盖。
+            bf = branch.get("branchForm") or {
                 "formTableCode": form_config.get("formTableCode", ""),
                 "formNodeId": "start",
                 "formNodeType": "table",
             }
-            branch_attr["formTableCode"] = form_config.get("formTableCode", "")
+            branch_attr["branchForm"] = dict(bf)
+            # formTableCode 必须与 branchForm.formTableCode 一致（否则设计器字段源错位）
+            branch_attr["formTableCode"] = (bf.get("formTableCode")
+                                            or form_config.get("formTableCode", ""))
 
         # 构建分支的子节点链
         child_node = build_node_chain(branch.get("nodes", []), form_config, level + 1, parent_id=branch_id)
@@ -700,8 +724,25 @@ def build_inclusive_gateway(node_config, form_config, level, parent_id=None):
     """构建包含分支（满足条件的分支都执行，可走多个分支）"""
     gateway_id = node_config.get("id", gen_id("Gateway"))
 
+    # ⚠️ 静默故障防线（2026-09-22 销售管理实测）：把 flow_dsl 的网关 config 直接喂
+    # build_process_json 时，条件在 `branches` 键上、而本函数只读 `conditionNodes` ——
+    # 旧行为是**静默产出** conditionNodes:[] 的空网关：save/deploy 全绿、设计器里也显示是个网关，
+    # 但部署后**每条触发记录都卡死在「处理中」**（记录被锁、没有编辑按钮），
+    # 且 tableEvent 流程本来就不进「我的发起」，极易被误判成"流程压根没触发"。
+    _branches_cfg = node_config.get("conditionNodes")
+    if not _branches_cfg:
+        raise ValueError(
+            "build_inclusive_gateway(%r)：conditionNodes 为空 —— 包含分支至少要有一条分支。\n"
+            "  最常见原因：把 flow_dsl 的网关 config 直接喂给了 build_process_json。\n"
+            "  flow_dsl 的 gateway() 产出的是 `branches` 键、且条件是中文名元组（尚未解析），\n"
+            "  必须经 build_flows 的 Resolver 解析后再构建。想改网关类型时正确做法是：\n"
+            "      g = gateway(...); g['type'] = 'inclusive'   # 然后照常喂 build_flows\n"
+            "  若确实要直接调 build_process_json：节点 config 用 `conditionNodes`，\n"
+            "  每个分支自带已解析的 conditionGroup/conditions（model + rule 码）。"
+            % node_config.get("name"))
+
     condition_nodes = []
-    for branch in node_config.get("conditionNodes", []):
+    for branch in _branches_cfg:
         branch_id = branch.get("id", gen_id("flow"))
         is_default = branch.get("isDefault", False)
         priority = branch.get("priorityLevel", 1)
@@ -750,6 +791,18 @@ def build_inclusive_gateway(node_config, form_config, level, parent_id=None):
                 "queryItems": query_items,
             })
 
+        # ⚠️ 静默故障防线：branchType=1 是「条件分支」，没条件就必然行为错乱。
+        # 旧行为是落到下面 content 的 else 支、被当成类默认支（画布显示「X进入此流程」），
+        # 而回读可见 attr.branchType=1 但 conditionGroup=[] —— 条件恒不成立/恒成立，
+        # 属于「save/deploy 全绿、只有数据不对」那一类。
+        if not is_default and not condition_group:
+            raise ValueError(
+                "build_inclusive_gateway(%r) 的分支 %r：branchType=1（条件分支）但条件为空 —— "
+                "条件没有解析出来。\n"
+                "  走 build_flows + flow_dsl 时由 Resolver 负责把中文名/中文规则翻成 model 与 rule 码；\n"
+                "  直接调 build_process_json 时请自己写全 branch['conditions'] 或 branch['conditionGroup']。"
+                % (node_config.get("name"), branch.get("name", "分支")))
+
         branch_attr = {
             "branchType": branch_type,
             "priorityLevel": priority,
@@ -758,12 +811,16 @@ def build_inclusive_gateway(node_config, form_config, level, parent_id=None):
             "level": str(level),
         }
         if not is_default:
-            branch_attr["branchForm"] = {
+            # 同 build_exclusive_gateway：调用方 branch["branchForm"] 可覆盖字段源
+            # （条件判据是运算节点结果时用 function-{funType}，见 gotchas #59）
+            bf = branch.get("branchForm") or {
                 "formTableCode": form_config.get("formTableCode", ""),
                 "formNodeId": "start",
                 "formNodeType": "table",
             }
-            branch_attr["formTableCode"] = form_config.get("formTableCode", "")
+            branch_attr["branchForm"] = dict(bf)
+            branch_attr["formTableCode"] = (bf.get("formTableCode")
+                                            or form_config.get("formTableCode", ""))
 
         child_node = build_node_chain(branch.get("nodes", []), form_config, level + 1, parent_id=branch_id)
 
@@ -1132,7 +1189,17 @@ def _build_query_conditions(conditions):
         }
         for c in conditions
     ]
-    return [{"id": gen_id(), "matchType": "", "queryItems": query_items}]
+    # ⛔ **多条件组必须显式大写 "AND"。**
+    # 留空 "" 时设计器把它渲染成「**或**」—— 而组里几条条件本意是「且」，
+    # 于是「A 且 B」静默变成「A 或 B」，取数范围被放大（2026-09-22 实测：
+    # 「获取模板行」= 项目类型等于 X **丶** 父级为空，空串渲染成「或」后
+    # 变成「项目类型等于 X **或** 父级为空」→ 顶层任务节点把子模板行也当成顶层建了一遍）。
+    # 单条件组留空与 UI 原生样本一致，不要动。
+    # 依据：references/example/定时批量处理逐行通知示例.md「多条件组须大写 'AND'
+    #      （留空 '' 设计器渲染为「或」，仅单行可用）」
+    return [{"id": gen_id(),
+             "matchType": "AND" if len(query_items) > 1 else "",
+             "queryItems": query_items}]
 
 
 def build_get_one_node(node_config, form_config, level, parent_id=None):
@@ -1699,6 +1766,72 @@ def build_opinion_gateway(node_config, form_config, level, parent_id=None):
     }
 
 
+def build_approve_result_node(node_config, form_config, level, parent_id=None):
+    """构建**审批结果分支**（approve_result）。
+
+    审批人点「同意 / 不同意」两个按钮自动分流——**不是**手动挑一条路的意见分支
+    （suggest），两者节点类型与分支项键都不同：
+      · 本节点  `type="approve_result"`、分支 `type=3`、分支 id 前缀 `flow`、**两条分支名固定**
+        「通过 / 否决」，靠 `attr.resultVal` = `"Y"` / `"N"` 区分；
+      · 意见分支 `type="suggest"`、分支 `type=8`、id 前缀 `btn`、分支名就是按钮名。
+
+    必须紧跟在审批节点（approver）之后。`build_node_chain` 会自动给前一个审批节点补
+    `attr.hasResultBranch=true` —— 少了它后端不生成 ApproveResultBranchListener，
+    变量 `approve_result_<节点id>` 从不写入，运行期排他网关直接抛
+    `Unknown property used in expression: ${approve_result_taskXXX == 'Y'}`。
+
+    conditionNodes 示例（两条都要给，否则对应那一支点了没反应）：
+      [{"name": "通过", "resultVal": "Y", "nodes": [...]},
+       {"name": "否决", "resultVal": "N", "nodes": [...]}]
+    """
+    gateway_id = node_config.get("id", gen_id("Gateway"))
+
+    condition_nodes = []
+    for i, branch in enumerate(node_config.get("conditionNodes", [])):
+        branch_id = branch.get("id", gen_id("flow"))
+        child_node = build_node_chain(branch.get("nodes", []), form_config,
+                                      level + 1, parent_id=branch_id)
+        result_val = branch.get("resultVal") or ("Y" if i == 0 else "N")
+        cn = {
+            "name": branch.get("name") or ("通过" if result_val == "Y" else "否决"),
+            "type": 3,
+            "isDefault": False,
+            "id": branch_id,
+            "pid": gateway_id,
+            "status": -1,
+            "error": False,
+            "addable": True,
+            "deletable": False,
+            "attr": {
+                "branchType": 2,
+                "priorityLevel": branch.get("priorityLevel", i + 1),
+                "conditionGroup": [],
+                "showPriorityLevel": True,
+                "approveResultBranch": True,
+                "resultVal": result_val,
+            },
+            "content": branch.get("content") or ("通过进入此流程" if result_val == "Y"
+                                                 else "否决进入此流程"),
+            "errorContent": None,
+        }
+        if child_node is not None:
+            cn["childNode"] = child_node
+        condition_nodes.append(cn)
+
+    return {
+        "id": gateway_id,
+        "name": node_config.get("name", "审批结果分支"),
+        "type": "approve_result",
+        "status": -1,
+        "childNode": None,
+        "addable": True,
+        "error": False,
+        "conditionNodes": condition_nodes,
+        "attr": {"level": str(level)},
+        "pid": parent_id or "",
+    }
+
+
 def build_data_branch_gateway(node_config, form_config, level, parent_id=None):
     """
     构建数据判断分支（data_branch）。
@@ -1741,7 +1874,9 @@ def build_data_branch_gateway(node_config, form_config, level, parent_id=None):
 
     return {
         "id": gateway_id,
-        "name": node_config.get("name", "数据判断"),
+        # 引擎 BaseDataDelegate.noDataExecute() 只认 name == "数据分支"（MiniDesConstant.DATA_BRANCH_NAME），
+        # 名字不对 → 取不到数据时直接终止实例并标「已完成」。传别的名一律覆盖，不接受自定义。
+        "name": "数据分支",
         "type": "databranch",
         "status": -1,
         "childNode": None,
@@ -1843,6 +1978,19 @@ def build_operation_node(node_config, form_config, level, parent_id=None):
         source_task_id = node_config.get("sourceTaskId", "")
         ftc = node_config.get("formTableCode", form_config.get("formTableCode", ""))
         ftn = node_config.get("formTableName", form_config.get("formTableName", ""))
+        # 根 formTableCode 为空（subEvent / manual 流程）时回到源节点取表 code+名。
+        # 缺这一步就会拼出 `form_<节点id>_`（尾部缺表 code）：save/deploy/回读全绿，
+        # 但设计器解析不到该数据源（2026-09-20 实测）。
+        if not ftc or not ftn:
+            src = _dsl_node_of(form_config, source_task_id)
+            ftc = ftc or src.get("formTableCode") or src.get("linkFormTableCode") or ""
+            ftn = ftn or src.get("formTableName") or src.get("linkFormTableName") or ""
+        if source_task_id and not ftc:
+            raise ValueError(
+                "运算节点「%s」的 sourceTaskId=%r 溯不到表 code：node_config 和 form_config 都没有 "
+                "formTableCode，源节点也没在 DSL 里声明 id。继续拼会发出 `form_<节点id>_` 这种残缺 "
+                "formTableId，请显式给 formTableCode / formTableName"
+                % (node_config.get("name") or "统计条数", source_task_id))
         ftid = node_config.get("formTableId", f"form_{source_task_id}_{ftc}" if source_task_id else "")
         get_data_type = node_config.get("getDataType", 1)
         fun_context = {
@@ -1853,7 +2001,12 @@ def build_operation_node(node_config, form_config, level, parent_id=None):
             "formTableName": ftn,
         }
         fun_text = node_config.get("funText", ftid)
-        node_content = None
+        # 卡片文案：生产数据是「<节点名>：<源工作表名>」（如 `统计数据条数：采购申请`）。
+        # ⚠️ 这里**不能**留 None：本函数末尾的兜底是 `fun_text[:40] + "..."`，而 record 的
+        # funText 恰好就是 `form_<get_more节点id>_<表code>` → 画布卡片**直接露原始 id**
+        # （2026-09-20 用户截图：「统计客户联系人条数」卡片副标题是 form_task1789898...）。
+        node_content = node_config.get("content") or (
+            "%s：%s" % (node_config.get("name") or "统计条数", ftn) if ftn else None)
     elif formula:
         # 方式一：从 formula 中自动提取字段 ID（格式：类型_时间戳_随机数）
         field_ids = list(dict.fromkeys(
@@ -2257,6 +2410,8 @@ def build_node(node_config, form_config, level, parent_id=None):
         return build_get_more_sysinfo_node(node_config, form_config, level, parent_id)
     elif node_type in ("opinion", "suggest"):
         return build_opinion_gateway(node_config, form_config, level, parent_id)
+    elif node_type == "approve_result":
+        return build_approve_result_node(node_config, form_config, level, parent_id)
     elif node_type == "data_branch":
         return build_data_branch_gateway(node_config, form_config, level, parent_id)
     elif node_type == "operation":
@@ -2302,6 +2457,40 @@ def _level_of(node, node_id):
     return _level_of(node.get("childNode"), node_id)
 
 
+def _index_dsl_nodes(config):
+    """收集 DSL 里**声明了 id** 的节点配置：{id: node_config}。
+
+    用途：运算节点（funType=record）要拼 `form_<源节点id>_<表code>`，而 subEvent /
+    manual 流程的根 `formTableCode` 是空的，只能回到源节点自己身上取表 code。
+    2026-09-20 实测：取不到时就拼出 `form_<节点id>_`（尾部缺表 code），
+    save/deploy/回读全绿，但设计器解析不到该数据源。
+    """
+    out = {}
+
+    def walk(o, depth=0):
+        if depth > 20 or not isinstance(o, (dict, list)):
+            return
+        if isinstance(o, list):
+            for x in o:
+                walk(x, depth + 1)
+            return
+        if o.get("id") and o.get("type"):
+            out.setdefault(str(o["id"]), o)
+        for v in o.values():
+            if isinstance(v, (dict, list)):
+                walk(v, depth + 1)
+
+    walk(config)
+    return out
+
+
+def _dsl_node_of(form_config, node_id):
+    """按 id 取 DSL 节点配置（供运算节点回溯源表 code/name）。"""
+    if not node_id:
+        return {}
+    return (form_config.get("_dsl_nodes") or {}).get(str(node_id)) or {}
+
+
 def build_node_chain(nodes, form_config, start_level=1, parent_id=None):
     """将节点列表构建为链式结构（通过 childNode 连接）"""
     if not nodes:
@@ -2320,11 +2509,17 @@ def build_node_chain(nodes, form_config, start_level=1, parent_id=None):
                     "data_branch 必须紧跟在 get_one 节点之后，不能作为第一个节点"
                 )
             prev = nodes[i - 1]
-            if prev.get("type") != "get_one":
+            # 「取多条」后接数据分支也是**合法**形态：数据分支由取数基类
+            # `BaseDataDelegate.noDataExecute()` 触发，「取多条」走同一条无数据路径。
+            # 提示词给项目管理子流程的顺序就是「①取本条任务(get_one) → ②取父任务(get_more)
+            # → ③数据分支」，且该分支判的是 **② 有没有取到父任务**。
+            # 2026-09-22 项目管理 R6 实测（flow_rules 的同名规则已同步放宽）。
+            if prev.get("type") not in ("get_one", "get_more"):
                 raise ValueError(
-                    f"data_branch 前置节点必须是 get_one，当前前置节点类型为: {prev.get('type')}"
+                    f"data_branch 前置节点必须是 get_one 或 get_more，当前前置节点类型为: {prev.get('type')}"
                 )
-            if prev.get("emptyAction", prev.get("noDataType", 0)) != 3:
+            if prev.get("type") == "get_one" and \
+                    prev.get("emptyAction", prev.get("noDataType", 0)) != 3:
                 raise ValueError(
                     "data_branch 前置 get_one 的 emptyAction 必须设为 3（中止流程，或继续执行查找结果分支；2=新增记录后继续，勿混用）"
                 )
@@ -2342,6 +2537,14 @@ def build_node_chain(nodes, form_config, start_level=1, parent_id=None):
             root = node
             current = node
         else:
+            # 挂「意见分支」的审批节点必须 hasResultBranch=true（2026-09-21 实测）：
+            # 保持模板默认 False 时，后端**不生成 ApproveResultBranchListener**，
+            # 变量 approve_result_<节点id> 从未写入，运行期排他网关表达式直接抛
+            # `任务执行失败: Unknown property used in expression:
+            #  ${approve_result_taskXXX == 'Y'}`（审批刚发起就报，用户面前就崩）。
+            prev = _get_convergence_child(current) or current
+            if node.get("type") == "approve_result" and isinstance(prev, dict)                     and prev.get("type") == "approver":
+                prev.setdefault("attr", {})["hasResultBranch"] = True
             # 若前一个节点有聚合子节点，将新节点接在聚合子节点之后
             conv = _get_convergence_child(current)
             if conv is not None:
@@ -2412,6 +2615,10 @@ def build_process_json(config):
         "formTableCode": form_table_code,
         "formTableName": form_table_name,
         "formTableId": form_table_id,
+        # DSL 节点索引：运算节点(funType=record) 在根表 code 为空（subEvent/manual）时，
+        # 靠它回到源节点取表 code —— 否则发出 `form_<节点id>_`（见 _index_dsl_nodes）。
+        # 私有键，form_config 只被逐键读取、不会被展开进 payload。
+        "_dsl_nodes": _index_dsl_nodes(config),
     }
 
     start_task_id = config.get("startTaskId", gen_id("task"))
@@ -2624,7 +2831,13 @@ def build_process_json(config):
         form_table_list = []
         if form_table_code:
             form_table_list.append({
-                "formTableId": form_table_id,
+                # ⚠️ formTableList 的 start 条目**必须**带 `form_start_<code>`，即使
+                # `form_table_id` 被传成 None：下游 data_update 的「**选择更新对象**」是拿
+                # `attr.formTableId` 去 formTableList 里匹配条目的，匹配不上就**退化成
+                # 显示原始 id**（设计器里看到的是一串 `form_start_t785fd02`，用户会当成配错了）。
+                # 「buttonEvent 的 formTableId 必须为 null」说的是**根 attr**（触发方式那格），
+                # **不是**这里 —— 两者共用一个变量就会一起变 None。2026-09-20 实测。
+                "formTableId": form_table_id or f"form_start_{form_table_code}",
                 "nodeId": "start",
                 "nodeName": start_node_name,
                 "nodeType": "table",
@@ -2643,6 +2856,22 @@ def build_process_json(config):
             "nodeType": "variable",
         })
     form_table_list.extend(_extra_tables)
+
+    # ⚠️ 运算节点（nodeType=function）不能这样 append 到「流程参数」之后——
+    # 登记顺序 = 设计器对下游节点**可引用数据源**的解析顺序，排在流程参数之后会让
+    # 设计器解析不到运算结果（gotchas #58）。契约要求它**紧跟 start 条目**
+    # （check_node_contract 对此判 BAD：fis[0] 必须 == si+1）。
+    # 2026-09-20 实测：「更新机会编号（报销用）」落成 [start, 流程参数, function] 被判违例。
+    # 注：子流程的锚点条目由 build_flows 的**回填**事后插到 index 0，此处找不到 start，
+    # 故只处理表事件类主流程；子流程侧顺序不在本条契约范围内。
+    _si = next((i for i, e in enumerate(form_table_list)
+                if e.get("nodeId") == "start"), None)
+    if _si is not None:
+        _fns = [e for e in form_table_list if e.get("nodeType") == "function"]
+        if _fns and form_table_list[_si + 1:_si + 1 + len(_fns)] != _fns:
+            _others = [e for e in form_table_list if e.get("nodeType") != "function"]
+            _pos = next(i for i, e in enumerate(_others) if e.get("nodeId") == "start")
+            form_table_list = _others[:_pos + 1] + _fns + _others[_pos + 1:]
 
     # 从 config 或 config["attr"] 中取触发方式专属字段
     _extra = config.get("attr", {})
@@ -3037,7 +3266,17 @@ def save_flow(api_base, token, config, process_json, flow_id='', update_count=No
         'customProcessId': config.get('customProcessId', ''),
         'lowAppId': config.get('lowAppId', ''),
         'startType': config.get('startType', 'manual'),
+        # 简流内 data_add / data_update 默认**不触发**目标表的 tableEvent 流程（create-flow.md 129 行）。
+        # 「上游流程建的单据也要起下游流程」时置 "1"。以前只能建完再单独打 saveFlow 补，且每次
+        # 重存都被冲回 "0"（2026-09-21 进销存两次踩到）；现在随 config 一起发，重存也保得住。
+        'triggerOtherProcess': str(config.get('triggerOtherProcess', '0') or '0'),
     }
+
+    # 子流程（subEvent）修改保存时不带 customProcessId 会把它冲空 → BPMN 退回 `<process id="process">`，
+    # 主流程 callActivity 找不到定义、实例卡死，而 save/deploy/契约闸门全绿（2026-09-22 项目管理 R2）。
+    # gotchas #47：子流程的 customProcessId 就是它自己的 DB id。
+    if flow_id and not form_data['customProcessId'] and str(config.get('startType') or '') == 'subEvent':
+        form_data['customProcessId'] = str(flow_id)
 
     extra_headers = {'X-Miniflowexclusionfieldmode': 'true'}
     low_app_id = config.get('lowAppId', '')
@@ -3123,9 +3362,70 @@ def fetch_form_fields(api_base, token, form_code, tenant_id=''):
         if ftype == 'link-record':
             meta['options'] = {'sourceCode': opts.get('sourceCode'),
                                'titleField': opts.get('titleField')}
+        elif ftype == 'link-field':
+            # ⚠️ 必须带 `fieldType`：他表字段的**条件族**（决定设计器给哪些运算符）看的是
+            # 它**指向的那个控件**的族，不是 `link-field` 自己。此前这里不带 options，
+            # 上层无从判定、只能把 link-field 一律当 `input` —— 指向文本控件时碰巧对，
+            # 指向 select-depart 时设计器按文本族给运算符、`属于`(in) 不在列表里 →
+            # 下拉退化成显示原始码 `in`（2026-09-20 实测，见 build_flows.Resolver.family / gotchas #104）。
+            meta['options'] = {'fieldType': opts.get('fieldType'),
+                               'showField': opts.get('showField'),
+                               'saveType': opts.get('saveType')}
         elif ftype in ('select', 'radio', 'checkbox') and opts.get('options'):
             meta['options'] = [o.get('value') for o in opts['options'] if o.get('value') is not None]
         out[name] = meta
+    # ⚠️ `/desform/api/fields/<code>` **不带隐藏控件**（`options.hidden=true` 的字段整个不返回）。
+    # 而简流恰恰经常要写这些隐藏字段 —— 本项目「任务」表就靠 `父模板行`（隐藏）、
+    # `__HAS_CHILD`（隐藏）和 `上级任务占位`（隐藏）三件套把父子关系接起来。
+    # 缺了它们，build_flows 直接报「任务 里没有字段 父模板行」、流程根本建不出来。
+    # 兜底：补读一次设计 JSON，把接口漏掉的控件按同名补进来（不覆盖已有条目）。
+    try:
+        design = _fetch_design_widgets(api_base, token, form_code, tid)
+        for name, meta in design.items():
+            out.setdefault(name, meta)
+    except Exception as e:                                    # noqa: BLE001
+        print(f'[warn] fetch_form_fields({form_code}) 补读隐藏字段失败: {e}', file=sys.stderr)
+    return out
+
+
+def _fetch_design_widgets(api_base, token, form_code, tid):
+    """从设计 JSON 里取**全部**控件（含 hidden），返回 {中文名: {model,type,options}}。"""
+    # ⚠️ 参数名是 **`desformCode`**（写 `code` 会 success=false 且**不报错**）
+    path = '/desform/queryByCode?desformCode=' + urllib.parse.quote(form_code)
+    resp = api_request(api_base, token, path, method='GET',
+                       extra_headers={'X-Tenant-Id': tid} if tid else None)
+    form = resp.get('result') or {}
+    raw = form.get('desformDesignJson') or '{}'
+    design = json.loads(raw) if isinstance(raw, str) else raw
+    out = {}
+
+    def walk(nodes):
+        for w in (nodes or []):
+            if not isinstance(w, dict):
+                continue
+            if isinstance(w.get('list'), list):
+                walk(w['list'])
+            if isinstance(w.get('columns'), list):
+                for col in w['columns']:
+                    walk((col or {}).get('list'))
+            name, ftype = w.get('name'), w.get('type')
+            if not name or not ftype or ftype in ('card', 'divider', 'tabs', 'grid', 'text'):
+                continue
+            opts = w.get('options') or {}
+            meta = {'model': w.get('model'), 'type': ftype}
+            if ftype == 'link-record':
+                meta['options'] = {'sourceCode': opts.get('sourceCode'),
+                                   'titleField': opts.get('titleField')}
+            elif ftype == 'link-field':
+                meta['options'] = {'fieldType': opts.get('fieldType'),
+                                   'showField': opts.get('showField'),
+                                   'saveType': opts.get('saveType')}
+            elif ftype in ('select', 'radio', 'checkbox') and opts.get('options'):
+                meta['options'] = [o.get('value') for o in opts['options']
+                                   if isinstance(o, dict) and o.get('value') is not None]
+            out.setdefault(name, meta)
+
+    walk(design.get('list'))
     return out
 
 

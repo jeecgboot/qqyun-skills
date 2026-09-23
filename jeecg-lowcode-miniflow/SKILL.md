@@ -1,9 +1,10 @@
+# JeecgBoot 简流设计器
+
+
 ---
 name: jeecg-lowcode-miniflow
 description: JeecgBoot 简流（MiniFlow）设计器 AI 自动创建器。Use when user asks to create/design a mini flow (简流), or says "创建简流", "生成简流", "新建简流", "简流设计器", "工作表触发流程", "低代码简流", "敲敲云简流", "miniflow", "miniDesFlow", "MiniFlow". Triggers when user describes a lightweight approval flow tied to a desform table (工作表事件触发 / 工作表联动流程), or needs to create workflow through the MiniFlow designer API. Also triggers when user wants to add approval flow to an existing desform form without BPMN. 改已有简流时只读本文件「修改已有简流」；新建只读 create-flow.md；**定时触发（壳/扫描/公告）按正文路由直跑 runner，自定义周期 → references/custom-cycle.md**。禁止打开 miniflow_creator.py / node-types / gotchas / example；查+建/改+save+deploy 同一脚本一次跑，禁止先探查再做、禁止跑通后再开"惯例核对"轮；凭证只用本轮消息或本会话已有值，禁止全盘搜、禁止翻其他 skill。
 ---
-
-# JeecgBoot 简流设计器
 
 将自然语言转为简流 JSON，经 API 创建或修改。脚本：`<skill_base_dir>\scripts\miniflow_creator.py`。
 
@@ -20,6 +21,16 @@ description: JeecgBoot 简流（MiniFlow）设计器 AI 自动创建器。Use wh
 > **因此：生成流程前必须读 `references/node-contract.md`（节点必填键一览）。**
 > 它与「提速」冲突时**一律以它为准**。写完不算完 —— **必须回读 `processJson` 逐节点核对**，
 > `OK:done` / `全部启用` **不是**验收。
+> ⚠️ **信号唯一性也要查**：同一个信号（工作表事件触发）只能被**一个** processKey 声明。
+> 重复创建流程会在引擎里留下多个 key 的定义同时声明同一信号，运行期
+> `SignalProcessStartListener` NPE、整条流程回滚（gotchas #110）。
+> > ⚠️ **子流程的 start 节点也要查**：被 `callActivity` 调起的子流程，`start.attr.subFormTableObject`
+> 必须是主流程 callActivity 那份**同一份数据对象**（`formTableId` 非空，形如 `form_<⑥节点id>_<表code>`），
+> 且 `attr.formTableId/formTableCode/formTableName` 同步。留成空壳 `{"nodeTypeMain": null}` 时，
+> 子流程第一个取数节点查 0 行、`flow_has_data=0` 直奔结束 —— 症状像「条件写错了」，其实错在数据对象（gotchas #111）。
+> 交付前必须**回读断言**：子流程 `start.attr.subFormTableObject.formTableId` **非空、且等于主流程 callActivity 那份**；
+> 对不上就是没建完 —— 修法＝把 callActivity 那份数据对象原样抄进 start 节点，存盘 + 重新部署 + 再回读。
+> 
 > 建完**必须跑** `scripts/check_node_contract.py --api-base … --token … --tenant-id … --app-id …`：
 > 它逐节点回读 `processJson` 对照 `references/node-contract.md`，违例非 0 即退出码 1。
 > 2026-09-17 实测：它在我这里报 36 条违例，而同一次 `build_flows` 报的是「建 63 / 失败 0」。
@@ -220,6 +231,7 @@ pj['formTableList'] = [e for e in (pj.get('formTableList') or []) if e.get('node
 
 `getType` / `selectType`：`1`=从工作表查多条；`3`=从单条记录的关联字段取多条；`4`=从 data_add 取刚新增的记录。  
 `fetchMode`：`"cache"` → `getDataType=1`（执行到此节点时缓存）；`"realtime"` → `getDataType=2`（每次使用实时获取）。  
+⚠️ **该 getMore 被下游 `data_add` 批量新增（addDataType=2）消费时，必须 `getDataType=1`**——写 2 时 save/deploy/实例结束全绿，批量新增却迭代不到行、一行不建（2026-09-17 二分实测：1→建 2 行，2→建 0 行）。**两处都要 1**：上游 getMore 自身 + 下游 data_add 的 `attr.formTableSourceGetDataType`（2026-09-20 同一节点再验：上游=1+下游=2 → 建 1 单 0 明细；上游=2+下游=1 → 同样 0 明细；两处都=1 → 明细全建）。
 `limitCount` / `limitNum`：最多条数，`0`=不限制。  
 `sortField` + `sortType`：`"asc"` / `"desc"`。
 

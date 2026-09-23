@@ -849,7 +849,7 @@ def mk_cfg(app_id, form_code, form_name, form_type, chart_type, title,
         'chartData': '[]',
         'background': '#FFFFFF',
         'borderColor': '#E8E8E8',
-        'size': {'width': w * 75, 'height': h * 11},
+        'size': {'width': w * 75, 'height': h * 11 - 10},
         'seriesType': copy.deepcopy(_SERIES_TYPE_ARRAY) if _is_pivot_or_map else [],
     }
     if chart_type in MAP_TYPES:

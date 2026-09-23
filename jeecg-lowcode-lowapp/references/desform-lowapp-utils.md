@@ -280,7 +280,7 @@ edit_worksheet('2042516351720214529', menu_name='客户信息', icon_type='ant-d
 
 ### `sort_worksheets(order_info)`
 
-重排应用内工作表顺序。必须包含**所有**工作表（不含分组）。
+重排应用内工作表顺序。必须包含**所有**工作表（不含分组）。底层是 `changeOrder`（按 id 改 `orderNum`），只是原语 —— **要保证导航顺序用下面的 `apply_menu_order`**（它还处理分组顺序、NULL parentId 与回读）。
 
 ```python
 sort_worksheets([
@@ -289,6 +289,25 @@ sort_worksheets([
     {'id': '2042516438139654145', 'orderNum': 3},
 ])
 ```
+
+---
+
+### `apply_menu_order(order, app_id=None, dry_run=False, missing='error')`
+
+按给定顺序重排**分组与工作表/看板**，写完回读，幂等（已符合就不发请求）。**要保证菜单顺序就用它，别手拼 `sort_worksheets`。**
+
+```python
+r = apply_menu_order([('市场及线索管理', ['市场活动记录', '线索池', '线索']),
+                      ('客户及商机管理', ['公海池', '客户'])])
+assert not r['problems'], r['problems']      # {'changed': [...], 'problems': [...]}
+```
+
+- 没点名的分组/菜单保持相对顺序、排在点名项之后；点名的名字不存在或不在该分组 → 记入 `problems`、**不动真机**（`missing='skip'` 则忽略不存在的名字）。
+- 内部三步：分组 `parentId` 的 NULL 归一成空串（`PUT /online/lowAppMenu/edit`）→ 菜单、分组各发一次 `changeOrder`（该接口按 id 改 `orderNum`，**分组同样适用**）→ 回读核对。
+
+### `check_menu_order(menu_list, expected=None)`
+
+纯函数、不联网，返回问题列表（空 = 通过）。不给 `expected` 只查「排序号重复/为空、分组 parentId 混用 NULL 与空串」；给了再按**接口返回顺序**核对分组顺序与组内顺序。
 
 ---
 

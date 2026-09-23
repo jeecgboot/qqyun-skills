@@ -51,6 +51,7 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
 
 | 多张互不依赖的基础表 | 脚本内部并行调 `desform_creator.py`，不要自己再写一遍 |
 | 工作表分组 | 表建完 `create_worksheet_group` + `move_worksheet_to_group`；或直接 `forms[].group=分组中文名`。**分组不存在时脚本自动创建**（2026-09-15 修复：原行为 SystemExit 整批失败），返回拿不到 id（首个分组迁移路径）会自动重试拉列表；不要打开 `desform-lowapp.md` 全文 |
+| ⚠️ **分组顺序** | 自动创建的分组**按创建时序乱序**，不会跟规格里的声明顺序（2026-09-20 进销存实测：规格写「经营看板→基础数据→客户管理→销售管理→采购管理→库存管理→财务管理」，建出来是「库存管理→财务管理→采购管理→经营看板→…」）。**收尾必须重排**：`sort_worksheets([{'id': 分组id, 'orderNum': 1}, …])` —— 该函数签名写的是「工作表」，但**传分组 id 一样生效**（实测），一次调用即按 orderNum 升序。回读 `get_menus().menuList` 里 `type=='group'` 的顺序核对 |
 
 ### 建后补丁契约速查（公式 / 关联字段带出 / 流水号 / 隐藏，一张表拿全，禁止分轮 inspect）
 
@@ -70,15 +71,29 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
   → 换到标题字段时：要么改走 `update_widget` 原地改类型（保留 model），要么
   **用原 `key`/`model` 重新挂上去**复原（`add_widget` 收完整控件 dict，key/model 可覆盖）。
   2026-09-16 实测：给「收款项」「付款项」换单选控件，两张表的标题链一起悬空。
+- **补档位 = 改控件 `type` 本身，不是只改 `options`；且禁止整块覆盖 `options`**（2026-09-20 实测事故）：规格（`app-spec.md`）表达得了的只有 `静态下拉/字典/单选/多选/编号`，这三类档位建后必补——①「下拉但选项来自某表某字段」→ `type='select'` + `options.remote='linkData'` + `linkDataConfig`（只挂 linkData 仍是文本框）；②「日期时间」→ 仍是 `date` 控件，补 `designType/type='datetime'` + `format='yyyy-MM-dd HH:mm:ss'`；③「他表字段存值」→ 工厂 `LINK_FIELD` 的 `save_type` 被白名单丢弃、恒 `view`，必须整单改 `options.saveType='save'`（见 `desform-link-record.md` §七）。
+  **写法铁律**：逐键 `update`（如 `o['type']='datetime'`），**禁止 `w['options'] = 新控件['options']` 整块覆盖**——实测整块覆盖把 22 个日期字段的 `format/timestamp` 全清空，只剩 `{hidden,autoWidth}`，存档与回读全绿，只有人打开表单才看得出。
 - **读字段清单的响应层级**：`/desform/api/fields/<code>?group=true` 的字段在
   **`result.fields`** 这层（`{desformCode, titleField, desformName, id, fields:{中文名:{model,key,type}}}`）。
   在 `result` 顶层找字段名 → 一场空，会误报一片「字段不存在」的假缺口。
-- **流水号自定义规则**：`AUTONUMBER(name, prefix='', date_format='yyyyMMdd')` 带 prefix 时**恒插 create_date 段**；「GH-+4位流水」这类**无日期**规则、或日期段不在前缀后（如 `YZSQ-yyyyMMdd-####`）时，建后整单覆盖 `options.numberRules` 段数组：text 段 `{"type":"text","text":"GH-","value":"GH-"}`；日期段 `{"type":"create_date","format":"yyyyMMdd","dateFormat":"yyyyMMdd","formatCustom":"yyyyMMdd"}`；流水段 `{"type":"number","mode":1,"start":1,"reset":0,"length":4,"continue":false}`。段顺序=编号拼接顺序。
+- **流水号自定义规则**：`AUTONUMBER(name, prefix='', date_format='yyyyMMdd')` 带 prefix 时**恒插 create_date 段**；「GH-+4位流水」这类**无日期**规则、或日期段不在前缀后（如 `YZSQ-yyyyMMdd-####`）时，建后整单覆盖 `options.numberRules` 段数组：text 段 `{"type":"text","text":"GH-","value":"GH-"}`；日期段 `{"type":"create_date","format":"yyyyMMdd","dateFormat":"yyyyMMdd","formatCustom":"yyyyMMdd"}`；流水段 `{"type":"number","mode":2,"start":1,"reset":0,"length":4,"continue":false}`。段顺序=编号拼接顺序。
+  - ⚠️ **补不补零只由 `mode` 决定，`length` 单独写没用（2026-09-20 实测事故）**：`mode:1` = 自然数（`1,2,3…`，**`length` 被完全忽略**）、`mode:2` = 指定位数（`0001,0002…`）。规格或 `app-spec.md` 的 `编号:[前缀,位数,是否含日期]` 里**只要给了位数**（「4 位流水号」「补零」「0001 起」）→ **必须 `mode:2`**；只有需求明说「不要补零、1,2,3 递增」才写 `mode:1`。⚠️ auto-number 控件的**工厂默认流水段就是 `mode:1` + `length:4`，照抄默认值即错**——落库后编号形如 `JH-26-2` 而不是 `JH-26-0002`，且 save/回读全绿、只有人翻开数据才看得出（前缀 / 日期 / 起始值 / 不重置全对，只有位数没生效）。
+  - ⚠️ **日期段要「自定义格式」时 `format` 必须写 `custom`**：面板的格式下拉绑定 `rule.format`，合法值只有 `yyyyMMdd`/`yyyyMM`/`MMdd`/`yyyy`/`custom`。写 `format:"YY-"` 时后端仍按 `dateFormat` 渲染出 `26-`（**输出是对的**），但设计器面板该下拉**显示空白**，看着像没配。要 `YY-` 这类自定义格式 → `{"type":"create_date","format":"custom","formatCustom":"YY-","dateFormat":"YY-"}` 三键同写。
+- **`radio` → `select`（存量表补丁；新建直接用 `静态下拉`，2026-09-20 实测）**：规格现已有 `静态下拉` 档（→ select），**新建表写它即可**，本节是给「已用 `静态单选` 建错、要改回来」的表用的。曾经的缺口：`静态单选` 固定落 `radio`、`静态多选` 固定落 `checkbox`，`字典` 那档又要求选项来自应用字典，于是「不绑字典的静态下拉」无档可写、建出来是一排横排单选钮，`precheck` 不报错（它只认字段名、不看控件偏好）。补救三步：
+  ① **键集照抄本应用一个真实 `select` 控件的 `options`**（别凭记忆手写），再抽掉字典专属键 `dictCode`/`dictCodeAppId`/`isDictItem`/`remoteOptions`/`remoteFunc`、`remote` 置 `false`；
+  ② **⚠️ 每个选项项必须补 `label`**——`radio` 的项是 `{value,itemColor}`、**没有 `label`**，`select` 的是 `{label,value,itemColor}`。只改 `type` 不补 `label`，下拉**空白**，而 save 返回 success、回读 `options` 也非空，只有人打开新增页才看得出。补法 `{'itemColor':o.get('itemColor'),'label':o.get('label') or o.get('value'),'value':o.get('value')}`；
+  ③ 回填 `defaultValue`/`required`/`hidden`/`hiddenOnAdd`/`readonly`/`disabled`/`fieldNote`/`placeholder`，再设 `multiple`（需求同时写「可多选」才 `true`）/`filterable:false`/`clearable:true`/`showLabel:true`。
+  **改完必须同步简流**：被流程分支条件 / `data_update.updateFields` / `data_add.formModel` 引用的，里面存的 `type`/`valType`/`fieldType` 还是 `radio`，要一并改 `select` 并重新 save+deploy。回读断言：`type=='select'` 且**选项 `label` 缺失数 0**。
+  **根因（改 `SELECT()` 工厂前必读）**：工厂用 `show_label = any("label" in o for o in options_list)` 决定 `showLabel`，而 `_make_options_list` 对**纯字符串列表**只产出 `{value, itemColor}`（无 `label`）→ 静态 select 落库 `showLabel:false` 且选项无 `label`，前端下拉空白。已在 `SELECT()` 里对静态选项（`not dict_code`）统一 `setdefault("label", value)` 修掉；`RADIO`/`CHECKBOX` 不走这条、行为不变。
 - **引用「控件本身」用 `key`，引用「字段」用 `model` —— 混了不报错，只在设计器里显示「字段已删除」**（2026-09-16 一次性踩了三处，都是 save 全绿、只有人打开面板才看得出）：
+  ⚠️ **key / model 的归属以本表为准；更细的分类与前端源码依据见 `desform-widget-options.md` 汇总节**（`WidgetConfigMixins.js` 核实过：控件下拉 `value=控件key`、`model=控件model`）。任何**操作步骤类**文档（如 `desform-link-record.md`「二-a」转换、`fast-full-chain.md`「③-b」）与这两处冲突时，**以这两处为准**，并顺手把那边改掉。
+  2026-09-21 实测教训：照「二-a」把汇总 `linkTable` 同步成了新 model，面板「关联表」下拉解析不到、直接显示原始串 `sub_table_design_…`，而 save/回读/precheck/契约检查全绿、运行时求和也正常——**只有打开设计器面板才看得见**。
+
   | 配置项 | 填什么 |
   |--------|--------|
   | 汇总 `options.linkTable`（源=**关联记录**） | 该 link-record 的 **`key`**（`1693451000559_843595`），**不是** `link_record_xxx` model |
-  | 汇总 `options.linkTable`（源=**设计子表**） | 子表 **model** `sub_table_design_xxx` |
+  | 汇总 `options.linkTable`（源=**工作表子表**，即 `link-record` + `isSubTable`） | **仍是 `key`** —— 控件类型还是 `link-record`，转换只改 `model` 不改 `key`，**转换时别去动这个键**（2026-09-21 实测） |
+  | 汇总 `options.linkTable`（源=**设计子表** `sub-table-design`） | 子表 **model** `sub_table_design_xxx` |
   | 他表字段 `options.linkRecordKey` | 主表 link-record 的 **`key`** |
   | 他表字段 `options.showField` / 汇总 `options.field` / 汇总筛选 `filter.rules[].model` / 公式 `expression` 里的 `$x$` / 业务规则 `rules[].model`+`actions[].value` | **字段 model** |
   | 默认值点分引用 `$<X>.<字段model>$` | `X` = 关联记录控件的 **`key`** |
@@ -92,6 +107,35 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
   - 写「**新增时隐藏**」→ `options.hiddenOnAdd=True`（新增表单隐藏、编辑/审批环节可见）。
   - ⚠️ 「**默认隐藏（审批环节内填写）**」也归**前者**（`hidden=True`）——括号里的「审批环节内填写」**不等于** hiddenOnAdd：这类字段在审批节点由**简流的节点字段权限**（`extActProcessNodePermission` 的 ruleType=1 status="1" 显示）放出来，不要靠 hiddenOnAdd 兜——✅ **2026-09-16 实测确认**：字段设 `hidden=True` 后，在配了「显示+可编辑」权限的审批节点里**照常可见可填**（节点权限盖过表单级 hidden）。
   - 两类混在同一张字段清单里时逐条看措辞，禁止一律按一种处理。
+
+### 六条「接口全绿但业务跑不通」的坑（2026-09-20 进销存实测）
+
+- **他表字段（link-field）必须 `saveType='save'`**：工厂建出来默认 `'view'`（仅显示）→ **值不落库**，
+  流程拿它当定位键（仓库编码/产品编码/单据号）时恒取空值。改法走**整单设计保存**（`query_form` →
+  改控件 `options.saveType='save'` → `save_design_from_file`）；`update_widget` 改不动
+  （`desform-link-record.md` §七「关键注意」第 2 条）。需求写「仅显示」才留 `view`。回读 `options.saveType == 'save'`。
+
+  > ⚠️ **2026-09-20 进销存实测：这条不是「个别字段」问题，是「全表」问题。**
+  > 47 张表建完，**所有**带出字段（仓库名称/编码、产品名称/编码、单号、客户名称…）全是 `view`，
+  > 用户打开设计器一眼看到「这些应该自动带出，不要让用户手填」。
+  > **批量化修法**（比逐字段点 UI 快，也比逐个 `update_widget` 可靠）：
+  > 遍历「应用菜单 → 每张表 `query_form` → 递归取全部控件（**必须走 `panes[].list` 与子表 `columns[].list`**）
+  > → 凡 `type=='link-field'` 的控件，`options.saveType='save'` → `save_design_from_file` + `save_auth_from_design`
+  > → 回读断言每表 `link-field` 数 == `saveType=='save'` 数」。
+  >
+  > **改完必须同步流程**：控件类型变了，流程里存的 `type`/`valType`/`fieldType` 是旧值
+  > （见 miniflow `node-contract.md` §9.3）——**这是「字段侧 + 流程侧」两处，只改一处 = 静默故障**。
+
+  > ⚠️ **把手工输入框换成他表字段**（「仓库名称/编码」这类要求自动带出的字段，建表时是普通 `input`）：
+  > 用 `LINK_FIELD(字段名, 主表 link-record 控件的 key, 目标表被带出字段的 model, 原控件类型)`
+  > 造出正确形状的控件，**再把它的 `key`/`model` 覆盖成原控件的 `key`/`model`**，就地替换回设计树。
+  > **绝不能换 key/model** —— 换了两侧 `twoWayModel`、上游关联引用、已建流程的字段引用一起断。
+- **关联记录 + 它带出的他表字段放同一块**（同一 card / 同一 divider 区段），顺序「关联控件 → 带出字段」。
+- **双向关联成对写 `twoWayModel`**：两边互指对方 link-record 的 model；只写一侧 = 明细挂不上单据。
+- **选项控件开彩色**：`radio`/`checkbox`/`select` 设 `options.useColor=true`，`itemColor` 取系统 20 色之一。
+- **只有 2 个选项的用 `radio`/`checkbox`，不用 `select`**（`单据确认` 是/否这类）；3 个以上才用下拉。
+- **`divider` 标题居左**：`options.titleAlign='left'`。
+- **关联记录「表格」模式 `showFields` ≥ 4 个业务列**。
 
 ### fields.type 合法码速查（2026-09-15 实测）
 
@@ -129,7 +173,15 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
 
 > ⚠️ **2026-09-14 实测（人事OA 30 表）：job 建表全绿但可能静默丢个别字段**（入职审批丢「试用期(月）」整数、转正申请丢「部门负责人」选人，无报错）。**建表后必须立刻回查**：逐表 `query_form` 用 `get_form_fields` 比对 job 里 `fields[].name`，缺的字段当场用工厂函数（`INTEGER`/`USER`/`INPUT`…）+ `add_widget` 补，不要等后续补丁/简流按名取 model 才 KeyError（彼时要多花一轮定位+回补）。字段多的 job（>10 表）必查。
 
-> 提示：`link` 产出的是普通 many 关联（明细区为外链表格）。要「子表作为单独工作表 / 已有工作表作为子表」的样式（明细控件 `isSubTable:true` + model `sub_table_design_<key>`，样例：工作表 主.子），建完后按 `references/desform-link-record.md`「二-a」转换。
+> ⛔ **`link` 产出的是普通 many 关联（明细区为外链表格）—— 需求写「子表」时这不是终点。**
+> 「子表作为单独工作表 / 已有工作表作为子表」= 明细控件顶层 `isSubTable:true` + `model` 改 `sub_table_design_<控件key>`
+> + **两侧 `twoWayModel` 互指**，**建完必须再跑一遍转换**（4 步 + 自查见 `references/desform-link-record.md`「二-a」，
+> 样例：工作表 主.子）。`add_link_record.py` 同此。
+>
+> ⚠️ **判据是需求原文有没有「子表」二字，不是控件长得像不像。** `显示:"表格"` 落库是 `showType:"table"`，
+> 明细区本身就是一张表格 —— **看着就是子表，设计器面板里仍叫「关联记录」**（顶层无 `isSubTable`、
+> `model` 还是 `link_record_*`）。2026-09-20 实测：16 表应用 53 个关联控件 `isSubTable` **0 个**，
+> 需求里明确写过「子表」，`save`/回读/`precheck` 全绿，只有用户打开设计器才发现。
 
 ## 禁止（再犯就是 6 分钟）
 

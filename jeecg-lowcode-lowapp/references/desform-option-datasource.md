@@ -133,6 +133,8 @@ dict_id, items = query_or_create_dict('leave_type', '请假类型', [...])
 
 启用方式：在控件设计 JSON 中同时设置 `options.remote = "linkData"` 和 `options.linkDataConfig`。
 
+> ⚠️ 本节只决定**选项从哪来**，不改变控件类型——挂在 `input` 上仍是单行文本（带联想），要「下拉」控件本身必须是 `select`（2026-09-20 实测：`linkDataConfig` 配全但 `type=input`，界面是文本框，save/回读全绿）。
+
 ```json
 {
   "options": {

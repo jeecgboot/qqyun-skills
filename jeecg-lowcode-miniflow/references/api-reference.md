@@ -77,6 +77,9 @@ X-Tenant-Id: <tenantId>
 X-Low-App-ID: <lowAppId>
 ```
 > 返回 `result.records[]`（`processName`/`lowAppId`/`id`=流程记录 DBid）。实测 0.1s，**只含该应用下的流程**——按应用列流程、或诊断「流程列表慢」用这个。
+> ⚠️ **必须显式传 `pageSize`**：不传只回 **10 条**，会误判「缺流程」并建重复（2026-09-20 实测多建 15 条）。
+> ⚠️ **返回的是精简记录，`processJson` 不在记录里** —— 取定义走 `queryById`（见上）。
+> **禁止用「某字段为空 / 长度阈值」判断哪条是空壳流程**：`processJson` 恒缺，按长度判会把真流程全判成空壳（2026-09-21 实测一次删光 22 条）。
 > ❌ `/act/process/list` 是**引擎定义列表**，**不带应用过滤**（带了 `X-Low-App-ID` 头也返回租户内全部定义），定义多时很慢（457 条实测 3–5s、响应 154KB）——不要拿它当应用流程列表、也不要拿它的耗时当「列表页慢」的证据；它只用于查引擎 key/version（如 subEvent 发布校验，见 SKILL.md subEvent 段）。
 
 **查询部门树（获取 deptId）：**
@@ -184,7 +187,7 @@ Content-Type: application/json
 
 ### 第一步：创建按钮（POST /desform/button/save）
 
-> ⚠️ **`flowStatus: true` 是必须字段！** 不传或传 `false` 会报 **"操作失败，Id must not be null"**。
+> ⚠️ **必须带 `viewId` 键（全局按钮传 `''`）！** 缺该键旧版后端会报 **"操作失败，Id must not be null"**，且按钮已写库（勿盲目重试，见 gotchas #11）。`flowStatus: true` 是触发简流所需，与该报错无关。
 
 ```python
 button_data = {

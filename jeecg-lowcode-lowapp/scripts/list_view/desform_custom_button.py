@@ -450,6 +450,10 @@ def run(action: str, cfg: dict, app_id: str) -> None:
     if action == 'update':
         if not button_id:
             raise ValueError('update 必须提供 id/buttonId')
+        # 兼容 {"changes": {...}} 写法：以前这个键会被原样发给后端，接口回 success 但什么都没改
+        # （2026-09-21 实测：18 个按钮绑流程全部静默失败）。摊平到顶层，顶层同名键优先。
+        if isinstance(cfg.get('changes'), dict):
+            cfg = dict(cfg.pop('changes'), **cfg)
         label = pick(cfg, 'label')
         if label and not check_button_label(code, label, button_id=button_id):
             raise ValueError('按钮名称已存在: %s' % label)

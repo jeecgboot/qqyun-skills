@@ -22,24 +22,66 @@ link-field/link-record，纯语义。剥掉语义类只推断叶子后，准确�
     near_names(["设备名称","设备编码"], "巡检设备名称")  -> ['设备名称']
 """
 
-__all__ = ["infer", "near_names", "resolve", "hint", "LEAF_TYPES"]
+__all__ = ["infer", "near_names", "resolve", "hint", "normalize_containers", "LEAF_TYPES"]
 
 # infer() 可能返回的全部叶子类型（都与 desform_creator._TYPE_MAP 对齐）
 LEAF_TYPES = (
     "input", "textarea", "number", "integer", "money", "date", "time",
     "phone", "email", "select-user", "select-depart", "area-linkage",
-    "imgupload", "file-upload", "capital-money",
+    "imgupload", "file-upload", "capital-money", "rate",
 )
 
+#: 规格里 `类型` 映射可用的**中文类型名** → 叶子类型。
+#  只覆盖叶子类型：需要选项/关联/汇总的（下拉、关联记录、汇总、公式…）请用
+#  `静态下拉` / `静态单选` / `links` / `summaries` 那些既有声明，它们带得出额外配置。
+TYPE_CN = {
+    "单行文本": "input", "多行文本": "textarea", "金额": "money",
+    "大写金额": "capital-money", "数字": "number", "整数": "integer",
+    "日期": "date", "时间": "time", "手机号": "phone", "邮箱": "email",
+    "选择用户": "select-user", "选择部门": "select-depart",
+    "地区": "area-linkage", "附件上传": "file-upload", "图片上传": "imgupload",
+    # 评分（星级）。需求里「客户重要程度（评分，默认 0）」这类字段名推不出来，
+    # 而 `desform_creator._TYPE_MAP` 早就有 'rate': RATE —— 只是规格无处声明，
+    # 于是落成单行文本、只能建后就地改类型（2026-09-21 销售管理实测 2 个字段）。
+    "评分": "rate",
+    # 开关（布尔）。`desform_creator._TYPE_MAP` 早就有 'switch': SWITCH，只是规格无处声明，
+    # 名字推不出来，需求点名了就得能写死。
+    "开关": "switch",
+}
+
+
+def explicit(type_name):
+    """把规格 `类型` 里的中文类型名翻成叶子类型。**认不出就报错**，不静默兜底。
+
+    存在的意义：`infer()` 是**猜**名字，业务上完全可能出现它猜不对的名字
+    （2026-09-20 实测：`技术协议` 推成单行文本 —— 它其实是附件上传）。
+    在此之前规格**没有任何显式指定类型的口子**，猜错了只能建完表再单独改控件，
+    属于「只能事后补丁」的一类坑。现在在规格里写一行 `类型` 即可。
+    """
+    t = TYPE_CN.get((type_name or "").strip())
+    if not t:
+        raise ValueError(
+            "规格「类型」里的 %r 不是可用的类型名；可用：%s"
+            % (type_name, "、".join(TYPE_CN)))
+    return t
+
 # 顺序即优先级：越具体越靠前，命中即返回。
-# 每条 = (关键词元组, 类型)。命中规则是「任一关键词是 name 的子串」。
+# 每条 = (关键词元组, 类型)。命中规则：
+#   · 普通关键词 = 「是 name 的**子串**」就命中
+#   · `*X` = 「name **以 X 结尾**」才命中（后缀锚定，见下方「合同」）
 _RULES = (
     # —— 大写金额 —— 必须排在「金额」之前：`合同金额大写` 同时含「金额」与「大写」，
     # 排后面会被 money 抢先命中（回归里就是这么错的）。
     (("大写",), "capital-money"),
     # —— 文件类 ——
     (("图片", "拍照", "照片"), "imgupload"),
-    (("附件", "回执", "回单", "证书", "合同"), "file-upload"),
+    # ⚠️ 「合同」必须是**后缀**匹配，不能是子串 —— 2026-09-20 实测事故：
+    # 子串匹配把「合同金额」「合同税率」「销售合同名称」「销售合同号」「合同相对方」
+    # 全推成了附件上传（本规则优先级高于下面的 金额/税率/文本），于是
+    # `机会目录.销售合同额(元)` 这个**求和汇总实际在对一个附件字段求和**，
+    # 而接口、建表、契约检查全部正常。业务表单里「XX合同」才是附件，
+    # 「合同…」开头的都是合同的属性字段。
+    (("附件", "回执", "回单", "证书", "*合同"), "file-upload"),
     # —— 联系方式 ——
     (("手机", "电话"), "phone"),
     (("邮箱",), "email"),
@@ -82,7 +124,7 @@ def infer(name, first=False):
     if not n:
         return "input"
     for keys, typ in _RULES:
-        if any(k in n for k in keys):
+        if any((n.endswith(k[1:]) if k.startswith("*") else k in n) for k in keys):
             return typ
     if any(k in n for k in _PRICE_CHARS):
         return "money"
@@ -177,3 +219,96 @@ def hint(cands, name):
     """把 near_names 的结果拼成一句可直接读的提示；无候选返回空串。"""
     hits = near_names(cands, name)
     return ("（是否想写：%s）" % "、".join(hits)) if hits else ""
+
+
+# ---------------- 容器（Tabs） ----------------
+
+def normalize_containers(form):
+    """规格表单的 `容器` → 规范形态 + 错误清单。**纯解析，不联网。**
+
+    为什么要有它：规格语言以前**根本没有「容器」这个概念**——每个字段只有
+    「一个名字 → 一个平铺控件」这一条出路。需求写「跟进记录、拜访记录、机会目录
+    用多 tab」时，作者只能把三个控件平铺建出来、事后再手工搬，而且**没有任何东西
+    会告诉你 tab 没建**（2026-09-18 实测：应用建完是三个平铺的关联记录，接口全绿、
+    预检通过，直到用户回头问「Tabs 布局空间可以加吗」）。
+
+    规格写法::
+
+        "容器": [
+          {"名称": "关联明细",
+           "页签": ["跟进", "拜访/出差", "机会"],   // 字符串 = 页签名就是字段名
+           "新增时隐藏": true}
+        ]
+
+    `页签` 的元素两种写法：
+      · `"跟进"`                      → 页签名 = 字段名，该页签装这一个控件
+      · `{"相关记录": ["跟进", "机会"]}` → 一个页签装多个控件
+
+    Returns:
+        `(containers, errors)`；errors 非空时 containers 里**只保留解析成功的部分**
+        （调用方应把 errors 当致命错误处理）。
+    """
+    name = (form or {}).get('名称') or '?'
+    raw = (form or {}).get('容器')
+    out, errs = [], []
+    if raw is None:
+        return out, errs
+    if not isinstance(raw, list):
+        errs.append('表「%s」的 `容器` 要写成数组 [{名称, 页签, ...}]，现在是 %s'
+                    % (name, type(raw).__name__))
+        return out, errs
+    owner = {}                      # 字段名 → 已经认领它的容器（查重复点名）
+    seen_c = set()
+    for i, c in enumerate(raw):
+        if not isinstance(c, dict):
+            errs.append('表「%s」容器[%d] 不是对象' % (name, i))
+            continue
+        cname = (c.get('名称') or '').strip()
+        if not cname:
+            errs.append('表「%s」容器[%d] 没写「名称」' % (name, i))
+            continue
+        if cname in seen_c:
+            # 重名容器在真机上表现为**第二个被静默跳过**（幂等判定按名字匹配）
+            errs.append('表「%s」有两个同名容器「%s」——同名的只会建出第一个'
+                        % (name, cname))
+            continue
+        seen_c.add(cname)
+        panes, labels = [], set()
+        for j, p in enumerate(c.get('页签') or []):
+            if isinstance(p, str):
+                label, flds = p, [p]
+            elif isinstance(p, dict) and len(p) == 1:
+                label, flds = list(p.items())[0]
+                flds = [flds] if isinstance(flds, str) else list(flds or [])
+            else:
+                errs.append('表「%s」容器「%s」的页签[%d] 形态无法识别：%r'
+                            '（要么写字段名，要么写 {"页签名": ["字段", ...]}）'
+                            % (name, cname, j, p))
+                continue
+            label = (label or '').strip()
+            if not label:
+                errs.append('表「%s」容器「%s」的页签[%d] 没有名字' % (name, cname, j))
+                continue
+            if label in labels:
+                # 页签的 name 就是 label，重名 → Tabs 里两个页签同名
+                errs.append('表「%s」容器「%s」有两个同名页签「%s」' % (name, cname, label))
+                continue
+            labels.add(label)
+            flds = [f for f in flds if f]
+            if not flds:
+                errs.append('表「%s」容器「%s」的页签「%s」没点名任何字段'
+                            % (name, cname, label))
+                continue
+            for f in flds:
+                if f in owner:
+                    errs.append('表「%s」的「%s」同时被容器「%s」和「%s」点名'
+                                % (name, f, owner[f], cname))
+                else:
+                    owner[f] = cname
+            panes.append((label, flds))
+        if not panes:
+            errs.append('表「%s」容器「%s」没有任何可用的页签' % (name, cname))
+            continue
+        out.append({'name': cname, 'panes': panes,
+                    'hiddenOnAdd': bool(c.get('新增时隐藏'))})
+    return out, errs

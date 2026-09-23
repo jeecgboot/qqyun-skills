@@ -85,8 +85,8 @@ py qqy_ops.py add-charts … --form-name "库存聚合" --specs-file SPECS.json
 ### 聚合图维度 = 聚合输出本地列（2026-09-08 实测教训）
 
 - **dim 只绑聚合输出本地列**：行表头/分组列原词（如「关联仓库-实时库存」）+ 公式数值字段名（`库存合计c793b` 型）。点名维度若**只存在于关联记录源表单**（如对「关联仓库」传源表里的「仓库名称」）→ 脚本回退写 `LINK_DIM {localField: link列, fieldName: 源表字段id, sourceCode}`；但聚合结果行的 key 只有本地列（link_record 列 / 公式列），**没有源表 input id** → 前端匹配不到数据列，维度设置渲染不出字段。
-- 正确形态（对照用户手修）：`nameFields` 绑本地列本身 `fieldName==localField`，显示文本走 link 列元数据 `options.titleField`（=源表标题字段 id，如仓库名称）——由聚合表字段元数据自带，勿人为拼 sourceCode 链。
-- 新图非默认色：`add-charts` 的 `--oral` 颜色词未落库（实测 `ORAL_APPLIED` 只 comp/dim/val，`itemStyle.color` 空）→ 加图后补 `set-chart-color`（浅紫 `#673bb7` = 用户手修值）。
+- 正确形态（实测）：`nameFields` 绑本地列本身 `fieldName==localField`，显示文本走 link 列元数据 `options.titleField`（=源表标题字段 id，如仓库名称）——由聚合表字段元数据自带，勿人为拼 sourceCode 链。
+- 新图非默认色：`add-charts` 的 `--oral` 颜色词未落库（实测 `ORAL_APPLIED` 只 comp/dim/val，`itemStyle.color` 空）→ 加图后补 `set-chart-color`（浅紫 `#673bb7` = 实测值）。
 - **排序坑（2026-09-08 实测）**：`set-chart-sort` 按数值列（公式/输出列，fieldName=`库存合计69c48` 型 = 中文名+calcId 前 5 位）排序时，**不要把该 fieldName 写进 `sorts.name`**——前端数据面板/渲染不认 calcId 后缀键，落盘后整图白屏，设计器手工保存会清空 name（保留 type/前 N）才恢复。`set-chart-sort` 已内置回退：聚合表（`config.type=aggregation`）value 侧排序自动留空 name、仅保留 type 与前 N 并打 `NOTE=`；精确排序列需在设计器数据面板手选。按维度列（nameFields 本地列）排序行为未验证。
 
 ## 接口

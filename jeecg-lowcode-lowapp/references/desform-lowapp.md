@@ -145,7 +145,9 @@ apps = data['apps']  # [{id, appName, ...}]
 | `get_menus(app_id=None)` | 查询应用内所有菜单（工作表+分组） |
 | `get_worksheet_groups(app_id=None)` | ⚡ 只查分组（语法糖，返回 `{count, groups}`） |
 | `edit_worksheet(menu_id, menu_name=None, icon_type=None)` | 修改工作表名称/图标 |
-| `sort_worksheets(order_info)` | 重排工作表顺序 |
+| `sort_worksheets(order_info)` | 重排工作表顺序（原语） |
+| `apply_menu_order(order)` | ⚡ 保证导航顺序：分组顺序 + 组内顺序，写完回读、幂等（建完应用必跑） |
+| `check_menu_order(menu_list, expected=None)` | 只读检查：排序号重复/为空、分组 parentId 混用、顺序是否符合期望 |
 | `delete_worksheet(menu_id)` | ⚠️ 删除工作表（含所有数据） |
 
 **工作表分组（应用内）**

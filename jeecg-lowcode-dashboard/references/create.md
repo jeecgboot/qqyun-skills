@@ -68,13 +68,53 @@ $QQY add-charts API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
 | 关联记录作 dim | specs 写中文名（如「关联物料」）；脚本展开 `localField`+`fieldName=titleField`+`sourceCode`。只写 `link_record_*` → 空数据 |
 | 表单名 | 易子串冲突 → 精确名或 `--form-code`。点名多表但 dim/val 只在一张 → 绑有维值的那张，禁 `--form-name A,B` |
 | 过滤联动透视 | 透视 `option.title` 固定「表格」；`charts` 可用 componentName 或「表格」 |
-| `move` 后 size | 须像素 `width=w*75` `height=h*11` |
+| `move` 后 size | 须像素 `width=w*75` `height=h*11-10`（**不是 `11h`**，见下） |
 
 ## 总进度图 JTotalProgress
 
 **禁止 `add-charts`**（编辑卡死）。`comp/add`+`saveCompToPage`。`nameFields:[]`；`valueFields`=进度值；`option` 仅 `{series:[进度条,轨道条],targetValue}`；`chart`=`{subclass:'JTotalProgress',category:'HorizontalBar'}`。未说本月 → `queryRange=all`。细节 → `charts-special.md` §1。
 
 ## 按钮 / 查询面板
+
+> ### ⚠️ `add-buttons` 报 412 时的兜底：直接写页面模板（2026-09-20 实测）
+>
+> `add-buttons` 传 `{"title":"客户","op":"创建记录","form":"客户"}` 会返回
+> **`412` + 一串表单名/表单code 的清单**（那是候选列表，不是错误说明），重试无用。
+> 此时**不要再试参数组合**，直接克隆一个**线上手工配好的自定义按钮组件**、替换 `chartData` 后整页保存。
+>
+> **组件骨架**（`componentName: '自定义按钮'`，`config.dataType: 1`）：
+> ```jsonc
+> {
+>   "componentName": "自定义按钮",
+>   "i": "<唯一id>", "orderNum": 0, "x":0,"y":0,"w":24,"h":16,
+>   "pcX":0,"pcY":0,"pcW":24,"visible": true,
+>   "config": {
+>     "dataType": 1, "borderColor":"#E8E8E8", "background":"#FFFFFF", "url":"", "timeOut":0,
+>     "size": {"width": 1800, "height": 176},
+>     "option": {"btnDirection":"column","btnStyle":"solid","rowNum":4,"title":"",
+>                "btnType":"graphical","btnWidth":"divide",
+>                "card":{"rightHref":"","size":"default","extra":"","title":""}},
+>     "chartData": [ /* 按钮数组，见下 */ ]
+>   }
+> }
+> ```
+>
+> **两种按钮的字段不同，混写就 412**：
+>
+> | op | `operationType` | 必填键 |
+> |---|---|---|
+> | 新建记录 | `"1"` | `desformId` + `worksheet:{label, type:"form", value:<表code>, key:<表code>, desformId}` |
+> | 打开页面 | `"3"` | `customPage:{label, value:<pageId>, key:<pageId>}`（**没有** worksheet/desformId，按钮的 `worksheet` 留空串） |
+>
+> 两者共有的键：`color / openMode:"2" / appInfo:{type:"current"} / icon / bizFlow:"" / btnId /
+> title / click:{type:"1", message:{cancelTitle…}} / view:"" / href:{isParam:false,params:[],url:""} / defVal:[]`。
+> `desformId` 用 `get_form_id(表code)[0]` 取；`pageId` 用 `get_menus().menuList` 里 `type=='drag'` 那行的 **`menuUrl`** 列。
+> 配色没点名时按位置轮换 `#ED4B82 #9c27b0 #64b5f6 #83c683 #ff8a66 #ff9800`。
+>
+> **整页保存接口：`POST /drag/page/edit`**（**是 POST，PUT 返回
+> `405 不支持PUT请求方法，支持以下POST`**），body `{"id": <pageId>, "template": "<JSON字符串>"}`
+> —— `template` 是**字符串**不是对象，且要带 `X-Tenant-Id` + `X-Low-App-ID`（=应用 ID）。
+> 保存后 `queryById` 回读、数 `config.chartData` 长度。
 
 - `add-buttons`；布局口语写进 specs（图形/圆角/均分/每行N），脚本解析；`place=top|bottom`
 - 已点名：缺打开页 pageId / 业务流程 flowId 才各查一次 → 一条 `add-buttons`。`op` 别名：`创建记录`/`打开列表视图`/`打开页面`+pageId/`打开链接`+url/`调用业务流程`+flowId。外部打开 → `openMode:"2"`。`customPage`/`bizFlow` 须 `{label,value,key}`
@@ -88,7 +128,7 @@ $QQY add-charts API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
   `#ED4B82`，用户报「按钮的颜色和图表都一样」。想固定某色 → specs 里给该按钮写 `"color"`。
 - **页首要有分区标题**：模版首页在按钮/统计块之间插 `JText`（`w=24 h≈10`）做分节，
   只用图堆出来的盘会「没有层次」。走 `add-ui --comp 文本 --style 大标题,整行`。
-- **仅当用户要查询面板**才 `add-filter`；`charts` 须同一 `tableName`；`mode`「包含」=`2`；默认 `place=above`；`saveCompToPage.template` 须 JSON **字符串**。CLI **不接受** `--form-code` / `--form-name` / `--oral`（表单从 charts 推断）。骨架：`{title,place:"above",charts:["折线"],conditions:[{field:"名称",mode:"包含"}]}`
+- **仅当用户要查询面板**才 `add-filter`，且**一盘最多一个**；`charts` 须同一 `tableName`；`mode`「包含」=`2`；默认 `place=above`；`saveCompToPage.template` 须 JSON **字符串**。CLI **不接受** `--form-code` / `--form-name` / `--oral`（表单从 charts 推断）。骨架：`{title,place:"above",charts:["折线"],conditions:[{field:"名称",mode:"包含"}]}`
 - **已有盘同时加图+查询** → `add-charts`（叠 dim/val）出 `ADDED=` 后立刻 `add-filter --specs-file`，中间禁 Read/grep；≠ `create-dashboard --layout-file`
 - **已有面板改匹配/默认值** → `edit-filter`（≠ add-filter、≠ 图筛选）
 
@@ -105,11 +145,72 @@ $QQY edit-filter API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
 | 匹配方式 | `conditionFields.condition`+`rule`（`1/EQ`·`2/LIKE`·`5/LLIKE`·`6/RLIKE`）+ `chartData[].queryMode` |
 | 默认值 | `chartData[].defVal` + `conditionFields.val`/`fieldValue` |
 
-**跨表** → **每表一次**同表 `add-filter`（串行）；透视匹配 **「表格」**；select「包含」常落成 EQ → 强制 `LIKE`/`condition=2`/`queryMode=2`。同结构盘字面量（产品名+省份名那张）→ `examples/gold-product-province-filter.md`。
+**跨表** → 技术上要**每表一次**同表 `add-filter`，但 ⛔ **一张盘只准一个查询面板**：两个面板就是两组一模一样的「查询/重置」并排，使用者分不清哪个管哪块（2026-09-22 进销存 R5 用户连报两次）。需要筛两张表 = 这张盘塞了两个主题，**按主题拆成两张盘**（每盘一张主表 + 一个面板），别并排两个。`build_dashboards.py` 已按此预校验，声明 >1 个 filters 时整张盘不建并报错。透视匹配 **「表格」**；select「包含」常落成 EQ → 强制 `LIKE`/`condition=2`/`queryMode=2`。同结构盘字面量（产品名+省份名那张）→ `examples/gold-product-province-filter.md`。
 
 > ⚠️ **一条 `filters[]` 里的 `charts` 必须全在同一张表**。想让一页里两张表的图都受筛选 →
 > 写**两条** `filters`（每条一张表）。写成一条跨表 → `add-filter` 失败、整张盘记 `FAIL`。
 > 2026-09-16 实测踩过。
+
+## 批量建盘 `dashboards.json`（≥5 张盘 · **schema 权威页**）
+
+> 2026-09-21 实测（16 张盘进销存应用）。此前本页与 `pitfalls-core` 只写「读声明式 `dashboards.json`」，
+> **从没写过 schema** —— 作者只能照 `create-dashboard --layout-file` 的形状猜，猜错后整批失败且 `--dry-run` 假绿。
+
+```jsonc
+{"pages": [
+  {"name": "盘名", "group": "分组名",
+   "ui": [{"comp": "文本", "text": "该盘的用途描述（一句业务话术，非盘名）",
+           "style": "大字号,居中,整行"}],
+   "charts": {                                   // ⚠️ 对象，不是数组
+     "<表单编码>": [ {"comp":"JNumber","title":"…","x":0,"y":0,"w":6,"h":17,"val":"…"},
+                     {"comp":"JLine","title":"…","x":0,"y":17,"w":24,"h":32,
+                      "dim":"订单签订日期","val":"销售订单金额(含税)/元","dateGroup":"3","queryRange":"all"} ]
+   },
+   "filters": [ {"title":"查询条件","place":"above",
+                 "charts":["图标题"],             // 按标题点名
+                 "conditions":[{"field":"字段中文名","mode":"包含"}]} ],
+   "buttons": [                                  // 可选；一组写 dict、多组写 list（首页常见左右两组）
+     {"rowNum":4,"btnType":"button","btnWidth":"divide","place":"top",
+      "buttons":[{"title":"新建客户","op":"创建记录","form":"客户"}]},
+     {"rowNum":4,"btnType":"button","btnWidth":"divide","place":"top",
+      "buttons":[{"title":"库存看板","op":"跳转","page":"库存统计看板"}]}   // page=看板名，脚本第②趟自动换 pageId
+   ]
+  }
+]}
+```
+
+`buttons[].buttons[].op` 只认 `qqy_ops._BTN_OP_ALIASES` 里的写法：**创建记录 / 打开列表视图 / 打开页面（=跳转、跳转看板、打开看板）/ 打开链接 / 调用业务流程**。
+`btnType` 写 `button`（纯按钮）或 `graphical`（图形）；`btnWidth: divide` = 每行等分。
+写错 op 或 `page` 点名的看板不存在 → 脚本**预校验拦下、一个按钮都不加**（2026-09-21 起），修好规格重跑即可。
+
+```bash
+PYTHONIOENCODING=utf-8 PYTHONPATH="$SKILL_REFS:$SKILL_REFS/scripts" \
+python "$SKILL_REFS/scripts/build_dashboards.py" --api-base URL --token TOKEN \
+  --tenant-id N --app-id A --spec dashboards.json \
+  [--only 盘名,盘名] [--recreate 盘名,盘名] [--dry-run]
+```
+
+**四条实测硬约束：**
+
+| 约束 | 症状 / 后果 |
+|---|---|
+| **`charts` 必须是以「表单编码」为键的对象**。写成数组、或拿表单**名**当键 → 整批失败，报 `'list' object has no attribute 'items'` | 16 张盘全挂 |
+| ⛔ **`--dry-run` 不校验这一条，是假绿** —— 数组写法它照样打印 `OK:plan 盘名 → 图 N 表 / 查询 M`（它走的是只做计数的另一条路径）。**schema 不确定时先跑「一页一图」的最小 spec**，别一次铺满 | 代价从 1 张放大到 16 张 |
+| `ui` 项的键只有 `comp` / `text` / `style`。多写 `color` → 被当 `--color` 转发给 `add-ui` → `unrecognized arguments` → **整个 `ui` 段失败、该盘 FAIL**（其余盘不受影响） | 整批 FAIL |
+| `ui` 组件**追加在 `template` 数组末尾**，会渲染到盘底；`add-buttons` 忽略 `x/y`、固定落 (12,0)。**2026-09-22 起 `build_dashboards.py` 第 ③ 趟 `finalize_page` 自动收尾**：JText 搬到下标 0、其余组件整体下移、按钮组按规格 `x/y/w/h` 落位（日志 `OK:finalize 盘名 …`）。不要再手写搬运脚本；只对**已有盘**补标题时才需要手搬 | 盘标题跑到盘底（`app_audit` 报「盘标题不在数组下标 0」）、按钮组叠在图上 |
+| **`buttons` 多组时，任何一组失败都不能留半成品**：早先版本是逐组加、加到哪组失败算哪组，成功的那组已经落在盘上；重跑时 `page_has_buttons` 判「已有按钮」跳过，永远修不好，手工补加又叠出重复组。2026-09-21 起先预校验全部组（op 别名、`page` 是否存在）再加，失败一个都不加 | 首页 3 个按钮组（1 个多余）、排宽和 ≠ 24 |
+
+`filters[].charts` 按**图标题**点名。同一页两张图标题互为子串（「对账数量」vs「对账数量2」）会判
+**同名多张**、整盘 FAIL → 标题取**互不为子串**的名字。
+
+> ⚠️ **同一份看板规格往往有两份、键还不同，改一处必须同步改另一处**（2026-09-21 实测）：
+> - `dashboards.json`（喂本脚本）：`charts` 按**表单编码**分组
+> - `app_spec.json`（喂 lowapp 的 `precheck` / `app_audit`）：`pages[].charts` 按**中文表名**分组
+>
+> 键写错，`precheck` 会报「看板「X」引用了不存在的表 `t5b96408`」。
+> 更危险的是反过来：**`build_dashboards` 对「该表不存在的字段名」不报错、静默丢掉那个维度** ——
+> 只改 `app_spec.json` 会让静态闸门转绿而 **live 盘照旧是错的**。字段名改动两份都要改，且改完
+> `--only <盘名> --recreate <盘名>` 重建。
 
 ## 批量建盘失败后怎么办（`build_dashboards.py`）
 
@@ -214,6 +315,26 @@ $QQY delete-agg API TOKEN --tenant-id TID --app-name APP --name "聚合名"
 ## 布局
 
 24 列；`config.size` = `w×75` / `h×11`。一行 3 KPI → 各 w=8 同 y；柱/折半行 w=12 h≈32。同行 w 合计宜=24。JNumber 无对比 h≈17；有环比/同比 h≥30。
+
+### 排版三条硬规则（2026-09-20 实测）
+
+- **同一排必须等高**：一排里所有组件 `h` 取该排最大值，全排统一。禁止数字卡 `h=17` 与柱状图 `h=32` 并排。
+- **宽度只用标准档位** `6 / 8 / 12 / 24`；禁止 15/24、9/24 这类非标准宽度（垂直边对不齐）。
+  **每排 `w` 之和正好 = 24**，`y` 连续不重叠。
+- **每张盘第 1 行放一个整行「文本」组件做盘标题**：`w=24`，内容 = 该盘的**用途描述**（一句业务话术，非盘名），
+  字号 `28`、居中、颜色每盘自取。`add-ui --comp 文本 --text "…" --style 大字号,居中,整行`。该文本之上不再放别的组件。
+  > ⚠️ **2026-09-20 实测：标题会跑到盘底。** `add-ui` / `create-page` 建的文本组件是**追加到
+  > `template` 数组末尾**的，而页面的渲染顺序就是**数组下标**（组件的 `config.size` 只有
+  > `width`/`height`，**没有 x/y**，坐标在顶层 `x/y/w/h/pcX/pcY/pcW`，但排序以数组为准）。
+  > → 标题要置顶，必须**整页搬数组**：`queryById` 取 `template` → 把文本组件 `insert(0, …)`
+  > 或插在查询面板之后 → `POST /drag/page/edit` 整页保存（见上方按钮兜底段的接口说明）。
+  > 只调 `add-ui` 的 `--style 整行` **不会**把它放到顶部。
+  > 验收：回读 `template`，文本组件的下标必须是 0 或 1（1 = 排在查询面板之后）。
+
+### 绑字段时不要二次加工
+
+要统计的字段**本身就是金额/数值字段**（如 `销售订单金额(含税)/元`，它自己已是汇总/公式）时，
+**直接绑该字段、口径选求和**。**禁止**再手工拼一个计算值公式。
 
 ## 硬禁令（结构后果）
 

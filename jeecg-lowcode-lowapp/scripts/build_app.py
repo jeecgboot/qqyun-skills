@@ -16,8 +16,11 @@
     ② 建壳    52 张表的标量字段，分片 ≤12 表/批 —— 避免打满后端 20 连接池
     ③ 补丁    跨表关联 / 他表 / 汇总 / 字典绑定 / 自动编号 / 公式（每表一次读改写）
     ④ 布局    按业务分节重排（divider 段标题 + card 每卡 ≤3 字段）
+              → 再把规格 `容器` 点名的字段 MOVE 进 Tabs（Tabs 固定落表单末尾）
               ★ 必须在补丁**之后**：补丁是「一个字段一张卡」地追加，
                 字段没齐就排 = 白排（2026-09-17 实测的布局事故）
+              ★ 两小步的**内部顺序也不能反**：先分节、后装容器。反过来的话
+                容器字段不在任何分节里，会被分节重新分卡**摊平出来**
     ⑤ 灌数    测试数据（★ **必须排在流程之前**，见下）
     ⑥ 流程    简流，先子后主
     ⑦ 看板    应用内看板
@@ -52,7 +55,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from spec_infer import infer                                   # noqa: E402
+from spec_infer import infer, explicit, normalize_containers    # noqa: E402
 
 if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -96,7 +99,19 @@ def split_fields(form, spec):
     links = {l.get('字段'): l for l in (spec.get('links') or []) if l.get('表') == name}
     carried = {c for l in (spec.get('links') or []) if l.get('表') == name
                for c in (l.get('带出') or [])}
+    # 「带出映射」：**本表控件名 ≠ 目标表字段名** 的他表字段。`带出` 只能建出与目标表
+    # 同名的控件，于是「销售换货」要从「仓库信息」带出两个仓库的名称/编码时，
+    # 一组要叫「换货入库仓库名称/编码」、另一组要叫「换货出库仓库名称/编码」，
+    # 同名会互相顶掉 —— 规格此前表达不了，只能建完手改。写法：
+    #   {"带出映射": {"换货入库仓库名称": "仓库名称", "换货入库仓库编码": "仓库编码"}}
+    carried |= {c for l in (spec.get('links') or []) if l.get('表') == name
+                for c in (l.get('带出映射') or {})}
     sums = {s.get('字段') for s in (spec.get('summaries') or []) if s.get('表') == name}
+    # 「中转字段」：隐藏的取值信封，**必须留给补丁阶段建** —— 它的默认值是
+    # `$<父关联控件 key>.<父表字段 model>$`，那两个 id 建壳时还不存在。
+    # 漏进建壳清单会**静默**建出一个不带默认值的空 input，补丁阶段再 `if find_widget: continue`
+    # 直接跳过 —— 表现是「字段在、但是空的」，流程照样取不到值（2026-09-21 加）。
+    relay = set((form.get('中转字段') or {}).keys())
     dicts = form.get('字典') or {}
     multisel = set(form.get('多选') or [])
     # 静态选项：**不绑应用字典**的多选/单选（如 产品权限：销售/采购/赠送）。
@@ -105,25 +120,63 @@ def split_fields(form, spec):
     # 2026-09-17 建 52 表应用实测踩到：产品权限静默变成文本框，只能事后补丁改控件。
     static_multi = form.get('静态多选') or {}
     static_one = form.get('静态单选') or {}
+    # 「下拉单选」：静态写死的 select。规格原先**表达不了这一档** —— `静态单选` 固定落
+    # radio、`字典` 那档又要求选项来自应用字典，于是需求写「下拉单选」时作者只能写
+    # `静态单选`，建出来是一排横排单选钮。2026-09-20 实测：16 表应用里 25 个「下拉单选」
+    # 字段（跨 10 张表）全部中招，precheck 不报（它只认字段名、不看控件偏好）。
+    static_sel = form.get('静态下拉') or {}
     nums = form.get('编号') or {}
     formulas = form.get('公式') or {}
+    # 「日期粒度」：日期控件的档位（year/month/quarter/week/date/datetime_s/datetime_sf/datetime）。
+    # 2026-09-20 加：此前**整条链路都不透传** —— 创建器 job 认 `dateType`
+    # （desform_creator 把 `dateType` 映射到工厂的 `date_type`），但 build_app 从不写它，
+    # 于是所有日期字段一律落成 `options.type='date'`（年月日）。需求写「**年份**」的
+    # （机会年份）会显示年月日；写「**日期时间**」的（外出时间/回来时间）也只剩年月日。
+    # 两类都是用户一眼能看出、接口却全绿的偏差。
+    dates = form.get('日期粒度') or {}
+    # 「显式类型」：`infer()` 是猜名字，猜错时规格此前**没有补救的口子**，只能建完表
+    # 再单独改控件。这里给一个 {字段名: 中文类型名} 的映射，**优先于 infer**。
+    # 只覆盖叶子类型；下拉/关联/汇总/公式各有自己的声明键。
+    explicit_types = form.get('类型') or {}
+
+    # ⚠️ `必填` / `选项` 以前**在规格里根本表达不了**，于是在这里被丢掉：
+    # `required` 在 spec→建壳 的整条链路上**没有任何消费者**，`f('客户名称','input',
+    # required=True)` 是纯装饰；控件级选项（附件个数上限那类）同理，连写的地址都没有。
+    # 表现是**静默**的：应用照建，只是字段不是必填、附件没有上限，接口零报错。
+    # 2026-09-18 实测：全应用 10 个 `required=True` 字段全是空操作。
+    # 建壳器那边一直是支持的（`_PARAM_MAP` 里有 required/multiple），缺的只是把值传下去。
+    must = set(form.get('必填') or [])
+    extras = form.get('选项') or {}
 
     shell, patch = [], []
     for f in form.get('字段') or []:
-        if f in links or f in carried or f in sums:
+        if f in links or f in carried or f in sums or f in relay:
             patch.append(f)
-        elif f in dicts:
-            shell.append({'name': f, 'type': 'checkbox' if f in multisel else 'select'})
+            continue
+        if f in dicts:
+            d = {'name': f, 'type': 'checkbox' if f in multisel else 'select'}
         elif f in static_multi:
-            shell.append({'name': f, 'type': 'checkbox', 'options': static_multi[f]})
+            d = {'name': f, 'type': 'checkbox', 'options': static_multi[f]}
+        elif f in static_sel:
+            d = {'name': f, 'type': 'select', 'options': static_sel[f]}
         elif f in static_one:
-            shell.append({'name': f, 'type': 'radio', 'options': static_one[f]})
+            d = {'name': f, 'type': 'radio', 'options': static_one[f]}
+        elif f in dates:
+            # type 固定 date，具体档位交给 dateType（创建器翻译 → 工厂 date_type → options.type）
+            d = {'name': f, 'type': 'date', 'dateType': dates[f]}
         elif f in nums:
-            shell.append({'name': f, 'type': 'auto-number'})
+            d = {'name': f, 'type': 'auto-number'}
         elif f in formulas:
-            shell.append({'name': f, 'type': 'formula'})
+            d = {'name': f, 'type': 'formula'}
+        elif f in explicit_types:
+            # 显式类型优先于 infer()：名字猜错了就在这里纠正（如「技术协议」是附件上传）
+            d = {'name': f, 'type': explicit(explicit_types[f])}
         else:
-            shell.append({'name': f, 'type': infer(f)})
+            d = {'name': f, 'type': infer(f)}
+        if f in must:
+            d['required'] = True
+        d.update(extras.get(f) or {})       # 控件级选项（precheck 按白名单校验过）
+        shell.append(d)
     return shell, patch
 
 
@@ -251,7 +304,44 @@ def stage_shell(spec, a, work):
                                '--config', p], '建壳')
     got = count_forms(a)
     log('[2/7 建壳] 期望 %d / 实际 %d' % (len(forms), got))
-    return 0 if got >= len(forms) else 5
+    if got < len(forms):
+        return 5
+    return rc_menu_order(spec, a, '建壳')
+
+
+def menu_order_of(spec):
+    """规格 → [(分组, [菜单名...])]。
+
+    给了 `菜单顺序` 用它；没给就按 `forms` 的书写顺序（分组按首次出现）。
+    `forms` 的书写顺序**不影响建表**（关联/汇总都在补丁段才建），所以两种写法等价 ——
+    `菜单顺序` 只在「想按依赖顺序写 forms、又要另一个菜单顺序」时才需要。
+    """
+    mo = spec.get('菜单顺序')
+    if mo:
+        pairs = mo.items() if isinstance(mo, dict) else [(x.get('分组'), x.get('工作表') or []) for x in mo]
+        return [(g or None, list(ns)) for g, ns in pairs]
+    order = {}
+    for f in spec.get('forms') or []:
+        order.setdefault(f.get('分组') or None, []).append(f['名称'])
+    return list(order.items())
+
+
+def rc_menu_order(spec, a, stage):
+    """建表是并行的，菜单排序号天然错乱且会重复 —— 每次建完都强制按规格重排并回读。
+
+    2026-09-21 实测事故：24 表 6 分组应用，分组与组内顺序全乱，而建壳/补丁/闸门全绿
+    （当时没有任何一环核对顺序，只核对了「表在不在对的分组里」）。
+    """
+    from desform_lowapp_utils import init_lowapp, apply_menu_order
+    init_lowapp(a.api_base, a.token, a.tenant_id, a.app_id)
+    # 建壳时看板还没建：点名了看板名不算错，等看板段建完再排一次
+    r = apply_menu_order(menu_order_of(spec), a.app_id, missing='skip' if stage == '建壳' else 'error')
+    for c in r['changed']:
+        log('   OK:menu-order %s' % c)
+    for p in r['problems']:
+        log('   FAIL:menu-order %s' % p)
+    log('[%s] 菜单顺序 %s' % (stage, '回读不符 %d 处' % len(r['problems']) if r['problems'] else '已按规格排好（回读一致）'))
+    return 5 if r['problems'] else 0
 
 
 def stage_patch(spec, a, work):
@@ -266,15 +356,74 @@ def stage_patch(spec, a, work):
     return rc
 
 
-def stage_layout(spec, a, work):
-    """按业务分节重排所有表的布局（divider 段标题 + card 每卡 ≤3 字段）。
+def stage_containers(spec, a, work):
+    """第④段后半：把规格 `容器` 点名的控件搬进 Tabs 容器。
 
-    规格里没有 `layouts` 就跳过——不硬造分组，免得把顺序排乱。
+    ⚠️ **必须紧跟在分节之后**。分节会把字段重新分卡，容器再从中把点名的控件摘走；
+    顺序反过来（先装容器、再分节）时，容器字段不在任何分节里，会落进 `rest` 被
+    **重新分卡摊平出来** —— 容器还在，里面的控件没了。
+
+    这一步以前根本不存在：规格语言里没有「容器」，需求写「XX 用多 tab」时只能把控件
+    平铺建出来、事后再手工搬，且**交付时没有任何东西会告诉你 tab 没建**。
+    """
+    todos = []
+    for f in (spec.get('forms') or []):
+        cons, errs = normalize_containers(f)
+        for e in errs:
+            log('FAIL:[4/7 布局] %s' % e)
+        if errs:
+            return 5
+        if cons:
+            todos.append((f.get('名称'), f.get('code'), cons))
+    if not todos:
+        return 0
+
+    from desform_utils import (init_api, query_form,
+                               save_design_from_file, group_into_tabs)
+    init_api(a.api_base, a.token)
+    made = 0
+    for name, code, cons in todos:
+        try:
+            design = json.loads(query_form(code)['desformDesignJson'])
+        except Exception as e:                                    # noqa: BLE001
+            log('FAIL:[4/7 布局] 取不到表「%s」的设计：%s' % (name, str(e)[:90]))
+            return 5
+        try:
+            rep = group_into_tabs(design, cons)
+        except KeyError as e:
+            log('FAIL:[4/7 布局] 表「%s」%s' % (name, e))
+            return 5
+        if rep['skipped']:
+            log('OK: %s 容器已存在，跳过：%s' % (name, '、'.join(rep['skipped'])))
+        if not rep['made']:
+            continue
+        p = os.path.join(work, 'tabs_%s.json' % code)
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(design, fh, ensure_ascii=False)
+        try:
+            save_design_from_file(code, p)
+        except Exception as e:                                    # noqa: BLE001
+            log('FAIL:[4/7 布局] 表「%s」容器保存失败：%s' % (name, str(e)[:90]))
+            return 5
+        made += 1
+        for cname, flds in rep['moved'].items():
+            log('OK: %s 容器「%s」装入 %d 个控件：%s'
+                % (name, cname, len(flds), '、'.join(flds)))
+    log('[4/7 布局] 容器：%d 张表新建 / %d 张已有' % (made, len(todos) - made))
+    return 0
+
+
+def stage_layout(spec, a, work):
+    """按业务分节重排所有表的布局（divider 段标题 + card 每卡 ≤3 字段），
+    再把规格 `容器` 点名的字段装进 Tabs。
+
+    规格里没有 `layouts` 就跳过分节（不硬造分组，免得把顺序排乱）—— 但**容器照装**：
+    两者是独立的规格键，只写 `容器` 不写 `layouts` 是合法的。
     """
     layouts = spec.get('layouts')
     if not layouts:
-        log('[4/7 布局] 规格里没有 layouts，跳过（表单保持默认排布）')
-        return 0
+        log('[4/7 布局] 规格里没有 layouts，跳过分节（表单保持默认排布）')
+        return stage_containers(spec, a, work)
     lp = os.path.join(work, 'layout.json')
     with open(lp, 'w', encoding='utf-8') as fh:
         json.dump(layouts, fh, ensure_ascii=False)
@@ -288,15 +437,19 @@ def stage_layout(spec, a, work):
                          '--tenant-id', a.tenant_id, '--app-id', a.app_id,
                          '--config', lp, '--spec', a.spec], '布局')
     log('[4/7 布局] %s' % ('完成' if rc == 0 else '有缺口（见上面逐表输出）'))
+    # 容器**必须紧跟分节**：分节重新分卡 → 容器再从中摘走点名的控件（见 stage_containers）
+    rc |= stage_containers(spec, a, work)
     return rc
 
 
 def stage_data(spec, a, work):
-    # `--rows 0` = 明确不要测试数据 → 整段跳过。
+    # `--rows` 默认 **0**（= 不灌数）。**只有用户在提示词里明确要求**
+    # （「灌测试数据」「造示例数据」「填几条演示数据」…）才传 `--rows N`。
+    # 理由：灌数是最贵的一段（要触发级联写、要抽样回读 52 张表），
+    #       而多数交付并不需要库里有数据 —— 看板/报表打开时实时查库，空盘也正确。
     # 不跳的话它仍会全量读 52 张表做「抽样回读」，纯浪费一轮（2026-09-16 实测）。
-    # 交付要求是「不需要灌入测试数据」时，本段不应产生任何读。
     if not a.rows:
-        log('[5/7 灌数] --rows 0：不灌测试数据，整段跳过')
+        log('[5/7 灌数] 未要求灌数（--rows 0，默认）：整段跳过')
         return 0
 
     # ⚠️ 硬闸门：**流程已存在时不许灌数**。
@@ -407,7 +560,7 @@ def stage_pages(spec, a, work):
                          '--spec', dp], '看板')
     got = count_pages(a)
     log('[6/7 看板] 期望 %d / 实际 %d' % (len(pages), got))
-    return rc
+    return rc or rc_menu_order(spec, a, '看板')          # 新建的看板也是菜单，建完再排一次
 
 
 # ---------------- 回读计数 ----------------
@@ -461,7 +614,11 @@ def main():
     ap.add_argument('--flows', default='',
                     help='flows.py（flow_dsl 写的 63 条流程）。不给则看 spec 里的 flows 数组')
     ap.add_argument('--create-app', action='store_true', help='应用不存在则自动创建')
-    ap.add_argument('--rows', type=int, default=3, help='每表灌几行')
+    # ⚠️ 默认 0 = **不灌数**。只有用户提示词明确要求灌数才传 N。
+    # 别为了「让看板有东西看」擅自灌 —— 那是用户没要求的数据污染。
+    ap.add_argument('--rows', type=int, default=0,
+                    help='每表灌几行；**默认 0 = 不灌数**。仅当用户在提示词里明确要求'
+                         '（灌测试数据/示例数据/演示数据）时才传 N')
     ap.add_argument('--data-budget', type=int, default=DATA_BUDGET,
                     help='灌数总预算秒数（默认 %d）。超了按尽力而为收工，不阻塞交付；'
                          '0 = 不限时。' % DATA_BUDGET)
@@ -526,6 +683,8 @@ def main():
                len(spec.get('summaries') or []), n_flow,
                '（来自 %s）' % os.path.basename(a.flows) if a.flows else '',
                len(spec.get('pages') or [])))
+        for g, ns in menu_order_of(spec):
+            log('   菜单 %s：%s' % (g or '（未分组）', '、'.join(ns)))
         for f in job['forms'][:2]:
             log('   例 %s titleIndex=%s 建壳字段=%d 类型=%s'
                 % (f['name'], f['titleIndex'], len(f['fields']),
@@ -554,6 +713,10 @@ def main():
             return rc
     log('OK:全部完成 %.1fs  —— %s'
         % (time.time() - t0, ' / '.join('%s %.1fs' % (n, d) for n, d in spent)))
+    # 规格表达不了的档位（子表/记录范围/默认值/按钮流/按钮/视图/导航/开关）别现场手写补丁脚本
+    log('NEXT: 还有规格写不下的需求 → references/postbuild-kit.md，写配置后一条命令：')
+    log('      python scripts/postbuild_run.py --api-base … --token … --tenant-id %s --app-id %s --dir <配置目录>'
+        % (a.tenant_id, a.app_id))
     return 0
 
 

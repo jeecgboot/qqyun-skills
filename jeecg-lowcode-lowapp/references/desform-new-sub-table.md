@@ -234,7 +234,7 @@ for i, (cname, fac) in enumerate([('名称', SUB_INPUT), ('手机', SUB_PHONE), 
     cont['columns'][i]['list'] = [w[0]]     # ⚠️ 列里要放**解包后的 dict**，不是元组
 ```
 
-### 五个要点（漏一个就出静默故障）
+### 六个要点（漏一个就出静默故障）
 
 1. **先建空壳拿 key，再填列**：`make_sub_table(名, [], column_number=N)` → `(容器, key)`；
    列数必须等于 `column_number`（`span` 自动 = 24/N），填第 i 列用 `columns[i]['list'] = [...]`
@@ -245,6 +245,15 @@ for i, (cname, fac) in enumerate([('名称', SUB_INPUT), ('手机', SUB_PHONE), 
    `design['config']['hasWidgets']` 里补 `sub-table-design`
 4. **保存前本地自检**：递归扫 design，任何 `tuple`、或 `columns[].list` 里的非 dict 项 → 直接放弃保存
 5. `export_design_json` → 改 → `save_design_from_file` → `save_auth_from_design`
+6. **⛔ `SUMMARY()` / `FORMULA()` 返回的「已经是包好的 card」** —— 与 `SUB_*`（返回 `(widget, key, model)` 三元组、
+   要取 `[0]`）**不是一套形态**。按 `SUB_*` 的习惯再自己包一层 card，会得到 `card → card → 控件` 的双层嵌套，
+   后果**静默**：`save_design_from_file` 照常回「设计JSON保存成功」、递归按 `name` 找控件也**找得到**
+   （2026-09-22 销售管理实测）。
+   只有 `regroup_layout.py` 会露馅：它只往 card 里看一层 → 报「字段『X』在这张工作表里找不到」，
+   且它打印的「表里现有控件名」只列**顶层**控件，看着像字段全丢了。
+   → **判定与修法**：回读设计，凡 `len(list)==1 且 list[0].type=='card'` 的 card，用内层替换外层（解包一层），再跑 `regroup_layout.py`。
+   → **通用纪律**：`make_sub_table` 返回 **2 元组**、`SUB_*` 返回 **3 元组**、`SUMMARY`/`FORMULA` 返回**裸 card** ——
+   三种形态各不相同，写整单补丁前**先打印一次实际返回值确认形状**，别按上一个工厂的习惯套。
 
 ### 验证
 

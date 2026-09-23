@@ -56,10 +56,13 @@ def create_button(form_code: str, button: dict, view_id: str = None) -> dict:
         payload['viewId'] = view_id
     else:
         payload.setdefault('allView', True)
+        # viewId 必须显式传空串：缺失时旧版后端 save() 会执行 findById(null)，
+        # 报 "Id must not be null"，且按钮已先写库（产生孤儿按钮）。
+        payload['viewId'] = ''
 
     result = _post('/desform/button/save', payload)
     if not result.get('success'):
-        # 此环境存在已知问题：按钮实际写库成功，但 Flowable 进程壳创建失败导致返回 false。
+        # 兜底：旧版后端在 viewId 为 null 时按钮已写库但接口返回 false。
         # 反查是否已创建，避免调用方误判后重试产生重复按钮。
         label = button.get('label', '')
         existing = _get(f'/desform/button/list?designFormCode={form_code}')

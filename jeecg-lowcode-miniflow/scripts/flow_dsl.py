@@ -85,12 +85,15 @@ creator 侧多数已实现，只是没有 DSL 助手）：
 
 __all__ = [
     "flow", "subflow", "get_one", "get_more", "update", "add", "approve",
-    "appr", "fill", "gateway", "data_branch", "compute", "call_sub", "delay",
+    "appr", "fill", "gateway", "data_branch", "compute", "compute_record",
+    "call_sub", "delay",
     "calc", "note", "ref", "lit", "inc", "dec", "var", "result", "START",
-    "record_id",
+    "record_id", "upsert", "DATA_BRANCH_NAME",
 ]
 
 START = "start"
+#：引擎硬编码的数据分支网关名（MiniDesConstant.DATA_BRANCH_NAME），见 data_branch() 说明
+DATA_BRANCH_NAME = "数据分支"
 
 #：表达式取人的三个内置选项：显示名 → (expressionsIds, expressionsNames)
 #  ⚠️ 名称与 id 必须成对，别自己拼——写「获取发起人」却绑 `${applyUserDeptLeaderId}`，
@@ -190,6 +193,11 @@ def flow(name, table, on="新增", cond=None, watch=None, nodes=None, **kw):
     watch 是**监控字段**（只对 on 含「修改」的流程有意义）：后端先比对新旧值，
     只有这几个字段真的变了才继续校验 cond。不写 = **任何一次修改只要满足 cond 就触发**。
 
+    trigger_other=True：本流程用 add()/update() 写出去的记录**也触发目标表自己的流程**
+    （落库 `triggerOtherProcess="1"`；默认 "0" = 引擎内部写入绕过工作表事件）。
+    凡是「业务单 → 建凭证单 → 凭证单自己再确认/记账」这种链，发起方那条主流程必须开它，
+    否则下游流程永远不起、而 save/deploy/契约检查全绿（2026-09-21 进销存实测）。
+
         flow("销售出库-更新库存", table="销售出库", on="修改",
              watch=["产品出库确认"],                      # 只有它变了才算
              cond=[("产品出库确认", "等于", "确认")],       # 且它等于「确认」才跑
@@ -231,6 +239,13 @@ def get_one(table, cond=None, empty="继续", name=None, fields=None):
 def data_branch(name=None, found=None, missing=None):
     """**看上一次「取单条数据」找到了没有**，分两支往下走。
 
+    ⚠️ **网关名字由引擎硬编码为「数据分支」，不可自定义**（2026-09-21 对照源码定论）：
+    `BaseDataDelegate.noDataExecute()` 取不到数据时只认下一节点 `name.equals("数据分支")`
+    （`MiniDesConstant.DATA_BRANCH_NAME`），名字不对就 `stopProcessInstanceById` 终止实例并标「已完成」——
+    这就是此前被误判成「引擎的无数据支不执行」的现象（当时默认名是「数据判断」）。
+    设计器 `FlowNode/Add/index.vue` 建此节点也写死 `name: "数据分支"`。
+    本函数忽略传入的 `name`，构建器与契约闸门都会校验这个名字。
+
     必须**紧跟在** `get_one(..., empty="分支")` 后面——引擎是按查找结果分流的。
     支路名用 `missing`（不叫 `empty`），免得和 `get_one` 的 `empty=`（未查到时的动作）
     在同一个节点列表里撞名。
@@ -242,8 +257,30 @@ def data_branch(name=None, found=None, missing=None):
             add("库存实时统计", {...}),
         ]),
     """
-    return {"type": "data_branch", "name": name or "数据判断",
+    return {"type": "data_branch", "name": DATA_BRANCH_NAME, "_alias": name,
             "found": found or [], "missing": missing or []}
+
+
+def upsert(table, cond, found=None, missing=None, name=None):
+    """**按条件定位一行：查到 → 走 found；没查到 → 走 missing**（台账 / 库存 / 余额类回写的标准写法）。
+
+        upsert("库存实时统计",
+               cond=[("仓库编码", "等于", var("仓库编码")), ("产品编码", "等于", ref("产品编码"))],
+               found=[update("库存实时统计", {"其他入库数量": inc(ref("本次入库数量"))})],
+               missing=[add("库存实时统计", {"仓库编码": var("仓库编码"), "产品编码": ref("产品编码"),
+                                          "其他入库数量": ref("本次入库数量")})])
+
+    与 `get_one(empty="分支") + data_branch()` 等价，只是把「查到 / 没查到」写在一处。
+    默认展开成 `get_one(empty="分支") → data_branch(网关名「数据分支」)`（引擎原生形态）。
+    ⚠️ 2026-09-21 曾把它展开成「取多条→统计条数→判 0」，那是对「无数据支不执行」的误判所做的绕行——
+    真因是网关名默认「数据判断」不等于引擎硬编码的「数据分支」（见 `data_branch()` 说明）。
+    绕行形态仍可用 `build_flows --rewrite-databranch` 得到（多两个节点，只在引擎版本确有该缺陷时用）。
+
+    两个连带规则也由 `flow_rules` 兜住：`missing` 里 `add()` 没写的「会被累加的列」自动补 0
+    （流程建的行不吃表单默认值，空值上累加不生效）；累加值取自公式字段时自动前插运算节点。
+    """
+    return {"type": "upsert", "table": table, "cond": cond or [], "found": found or [],
+            "missing": missing or [], "name": name or ("查%s" % table)}
 
 
 def compute(name, expr, fields, decimals=2):
@@ -264,6 +301,25 @@ def compute(name, expr, fields, decimals=2):
             "fields": fields or {}, "decimals": decimals}
 
 
+def compute_record(name, source, decimals=0):
+    """统计条数节点（落库 funType=record）——数**上游 `get_more()` 取回了几条**。
+
+    source 是那个 `get_more()` 节点的名字（不是表名）。结果是整数，用
+    `result(name)` 引用。
+
+        get_more("客户联系人", cond=[("手机号", "等于", ref("手机号"))], name="查联系人")
+        compute_record("统计联系人条数", source="查联系人")
+        gateway(branches=[{"name": "没有", "cond": [(result("统计联系人条数"), "等于", 0)],
+                           "nodes": [add(...)]}], default=[update(...)])
+
+    ⚠️ 与 `compute()` 的区别：`compute` 是四则/函数运算（funType=number/fun），
+    本助手是**计数**。二者落库的 `formTableCode` 不同（`function-record` vs
+    `function-fun`），互不通用。
+    """
+    return {"type": "operation", "name": name, "fun_type": "record",
+            "source": source, "decimals": decimals}
+
+
 def get_more(table, cond=None, sort=None, limit=0, from_=None, name=None):
     """取多条 =。from_ 取某节点结果，不传则直接查表。"""
     return {"type": "get_more", "table": table, "cond": cond or [],
@@ -271,8 +327,22 @@ def get_more(table, cond=None, sort=None, limit=0, from_=None, name=None):
             "name": name or ("获取多条%s" % table)}
 
 
-def update(table, mapping, name=None, source=START):
-    """更新[表]:字段。mapping = {字段名: 值}；值是字符串/数字=固定值，`ref(...)`=引用。"""
+def update(table, mapping, name=None, source=None):
+    """更新[表]:字段。mapping = {字段名: 值}；值是字符串/数字=固定值，`ref(...)`=引用。
+
+    **`source` 不传 = 自动绑到前面最近的、取同一张表的 `get_one()`。**
+    设计器里「更新记录」的「更新对象」就是「取单条数据」的结果，不是触发行：
+
+        get_one("库存实时统计", cond=[...])          # 查到哪一行
+        update("库存实时统计", {"结存数量": inc(...)})   # 就更新那一行  ← source 自动
+
+    显式传 `source=START` 表示「确实要更新**触发流程的那一行**」——
+    审批流写回单据状态（`start → approver → update(触发表, {...})`）就是这种，
+    这时没有前置 get_one，自动绑定也自然落回 START。
+
+    ⚠️ 早先本函数默认 `source=START`，于是上面那个最典型的 `get_one → update` 写法
+    被落成「更新触发行」：设计器面板「更新对象」显示错、运行时更新不到刚查到的那行。
+    """
     return {"type": "data_update", "table": table, "mapping": mapping,
             "source": source, "name": name or ("更新%s" % table)}
 
@@ -334,7 +404,7 @@ def appr(name, who="发起人"):
 def gateway(name=None, branches=None, default=None):
     """网关→分支。branches = [{name, cond:[(字段,规则,值)], nodes:[...]}, ...]
     规则用中文别名：等于/不等于/大于/大于等于/小于/小于等于/包含/属于/为空/不为空。
-    最后一个不给 cond 的分支视为默认分支。
+    最后一个不给 cond 的分支视为默认分支；也可以写 `default=[...]`，等价于追加一支不带 cond 的「其他情况」。
 
     ⚠️ **被判字段是「流程中途才填」的（新增页隐藏、审批/填写节点内填）时，本助手建出来的
     分支恒判失败、永远走默认支** —— 网关的 `attr.branchForm.formNodeId` 由 builder 固定写
@@ -342,8 +412,14 @@ def gateway(name=None, branches=None, default=None):
     「产出该值的 edit/approver 节点 id」+ `formNodeType:"table"`**（save 前改，部署后改要走
     重建），规则与实测见 gotchas #89。触发时就有值的字段（新增页可填）不受影响。
     """
+    brs = list(branches or [])
+    if default is not None:
+        # `default=[...]` 以前只是挂着的键：precheck 不算出口、builder 不建支 → 「只有 1 个出口」
+        # （2026-09-22 销售管理 R2 实测）。现在直接落成最后一支不带条件的「其他情况」
+        brs.append({"name": "其他情况",
+                    "nodes": list(default) if isinstance(default, (list, tuple)) else [default]})
     return {"type": "exclusive", "name": name or "条件分支",
-            "branches": branches or [], "default": default}
+            "branches": brs, "default": None}
 
 
 def record_id(node=None):
@@ -380,7 +456,11 @@ def call_sub(sub_name, multi=True, pass_=None, name=None, via=None):
 
 
 def delay(minutes=1, name=None):
-    """延时 N 分钟。"""
+    """延时 N 分钟。
+
+    ⚠️ 延时/定时节点靠后端异步作业执行器触发；本机/单机环境没起执行器时实例会**永远**停在延时节点
+    （bpm 状态 2、无 endTime，2026-09-22 项目管理 R2 实测）。`data_add` 逐条新增本来就是同步写库，
+    「等它写完」不需要延时；只有真正的业务等待才用本助手，并在冒烟里核对实例有 endTime。"""
     return {"type": "time", "minutes": minutes, "name": name or ("延时%d分钟" % minutes)}
 
 

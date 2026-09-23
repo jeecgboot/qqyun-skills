@@ -367,6 +367,16 @@ FORMULA('预计完成时间', mode='DATEADD',
 | `ISBLANK(v)` | 是否为空 | `ISBLANK($field$)` → `true/false` |
 | `INCLUDE(s,sub)` | 是否包含 | `INCLUDE('hello','ell')` → `true` |
 
+> ⚠️ **字典 / 单选 / 下拉字段在公式里要用数值比较**（2026-09-22 进销存真机 A/B 实测）。
+> 这类字段落库是**选项序号串** `"0"` / `"1"`，但公式里 `IF($账向$=='0', …)` 这种**字符串比较恒假**，
+> 写 `IF($账向$==0, …)`（数值比较）才成立。症状是该公式恒取 else 分支、列里一片 0，而接口与闸门全绿。
+> 他表字段带出的字典值同理。
+
+> ⚠️ **公式不要引用同表的另一个公式**（嵌套公式）。引擎把公式延后求值，
+> API / 流程建的行上外层一律拿到内层的**旧值（0）**，不限于「被流程更新的表」
+> （2026-09-22 进销存：盘点明细、入库明细、价格表都中招，落 0 让下游 `>0` 条件恒不成立）。
+> 一律展开成只引用基础字段的单层公式；`precheck.py` 会对所有嵌套公式提示。
+
 ### 高级函数（第 5 类，查询工作表）
 
 | 函数 | 说明 |
@@ -383,7 +393,9 @@ LINKAGET({"appId":"...","desformCode":"target_code","matchType":"AND",
 ```
 
 - config（查询配置 JSON）与 queryItems 之间是 **` ,  `（逗号 + 两个空格）**，编辑器内联配置标签的正则依赖此分隔符，手工拼写时不要改动；配置完整字段（appId/desformCode/matchType/operation/rules/linkages/sorts/isMultiple/maxRecordCount）与 operation 取值（FIRST/LAST/CUSTOM_SORT/COUNT/MAX/MIN/AVG/SUM/IGNORE）详见 `desform-linkage-query.md`。
-- 运行机制：条件中引用的 `$model$`（valueType=field 的规则，value 为当前表字段）先被替换为当前表单值 → POST `/desform/data/aDefVal/linkaget` → 结果回填当前字段（operation=COUNT 时结果直接是数量）。
+- 运行机制：表达式文本里的 `$model$` 先被替换为当前表单值 → POST `/desform/data/aDefVal/linkaget` → 结果回填当前字段（operation=COUNT 时结果直接是数量）。
+- ⚠️ **同一句里两个位置的字段引用写法相反（2026-09-20 UI 产物核实）**：内嵌 config 的 `rules[].value`（`valueType:"field"`）存**裸 model**，判断标准与关联记录 `options.filters`、`desform-linkage-query.md` §四完全一致（这三处同规则）；而第二参数 queryItems 的 `val` 写 `$本表字段model$` 且**不带引号**。写错时设计器面板看着正常、保存/回读全绿，但新增页不回填/结果恒为空。
+  正确形态：`LINKAGET({…,"rules":[{"model":"源表字段model","rule":"EQ","valueType":"field","value":["本表字段model"],"sqParam":{"type":"input","rule":"eq"}}],…} ,  [{"field":"源表字段model","type":"input","rule":"eq","val":$本表字段model$}])`
 
 ---
 

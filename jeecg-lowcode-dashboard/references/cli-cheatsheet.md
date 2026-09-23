@@ -125,7 +125,7 @@ py "$COMP" edit API TOKEN PAGE_ID --name "组件名" --set "option.showValue=tru
 py "$COMP" add API TOKEN PAGE_ID --comp "JBar" --title "柱形图" --x 0 --y 0 --w 12 --h 30   # 仅静态/UI
 py "$COMP" batch-add API TOKEN PAGE_ID --specs-file BATCH.json   # ≥2 个一次 save
 py "$COMP" move API TOKEN PAGE_ID --name "组件名" --x 0 --y 17
-# move 改了 --w/--h 后须修回像素 size：width=w*75 height=h*11
+# move 改了 --w/--h 后须修回像素 size：width=w*75 height=h*11-10（格子真实高，非 11h）
 py "$COMP" edit API TOKEN PAGE_ID --name "组件名" --set "size.width=900" --set "size.height=352"
 py "$COMP" switch-type API TOKEN PAGE_ID --name "基础柱形图" --to "JLine"
 # QQY 已有统计图同命令：--name=componentName --to=JLine/JBar/…；打印 SWITCHED=

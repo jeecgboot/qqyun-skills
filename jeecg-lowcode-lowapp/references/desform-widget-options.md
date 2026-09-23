@@ -822,13 +822,16 @@ className: `form-auto-number` | icon: `icon-hashtag`
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `type` | string | 规则类型：`"number"` 序号 / `"create_date"` 日期 / `"text"` 固定文本 / `"field"` 字段引用 |
-| `mode` | number | number 时：`1` = 自然数（1,2,3...），`2` = 指定位数（0001,0002...） |
+| `mode` | number | number 时：`1` = 自然数（1,2,3...），`2` = 指定位数（0001,0002...）。**要补零只能靠这个，`length` 不决定补不补零** |
 | `start` | number | number 时：起始值（默认 1） |
 | `reset` | number | number 时：重置规则 `0`=不重置 / `1`=每天 / `2`=每周 / `3`=每月 / `4`=每年 |
-| `length` | number | number 时（mode=2）：指定位数（如 4 → 0001） |
+| `length` | number | number 时（**仅 mode=2 生效**）：指定位数（如 4 → 0001）。mode=1 时写了也被忽略 |
 | `continue` | boolean | number 时（mode=2）：超出指定位数时是否继续递增 |
-| `dateFormat` | string | create_date 时：日期格式（如 `"yyyyMMdd"`） |
+| `dateFormat` | string | create_date 时：日期格式（如 `"yyyyMMdd"`）。自定义格式时须与 `format:'custom'`+`formatCustom` 同写 |
 | `value` | string | text 时：固定文本内容；field 时：引用字段 model |
+
+> ⚠️ **要「N 位补零流水号」必须 `mode:2`（2026-09-20 实测事故）**：`mode:1` 时 `length` **被忽略**，编号输出 `JH-26-2` 而不是 `JH-26-0002`。控件的**工厂默认流水段是 `mode:1` + `length:4`**——直接照抄默认值就会踩（save / 回读全绿，只有人翻数据才看得出）。规格写「4 位流水号 / 补零 / 0001 起」→ `{"type":"number","mode":2,"start":1,"reset":0,"length":4,"continue":false}`。
+> ⚠️ **日期段自定义格式**：面板的格式下拉绑定 `rule.format`，合法值只有 `yyyyMMdd`/`yyyyMM`/`MMdd`/`yyyy`/`custom`。自定义格式（如 `YY-`）必须三键同写 `{"type":"create_date","format":"custom","formatCustom":"YY-","dateFormat":"YY-"}`；`format` 直接写 `"YY-"` 时后端输出仍对（走 `dateFormat`），但**面板该下拉显示空白**，看着像没配。
 
 ## select-user — 用户组件
 
@@ -1057,7 +1060,7 @@ className: `form-ocr` | icon: `icon-ocr-a`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `linkTable` | string | `""` | **汇总源控件**——⚠️ 取值**按控件类型分两种**：<br>① 汇总源是**关联记录**（link-record）→ 填该控件的 **`key`**（如 `1693451000559_843595`），**不是** `link_record_xxx` model；填 model 时设计器解析不了，面板的筛选条件会显示成「**字段已删除**」（2026-09-16 实测：线上参照落库值 `linkTable=1693451000559_843595`，同控件 `model=link_record_1693451000559_843595`）。<br>② 汇总源是**设计子表**（sub-table-design）→ 填子表 **model**（`sub_table_design_xxx`） |
+| `linkTable` | string | `""` | **汇总源控件**——⚠️ 取值**按控件类型分两种**：（**症状**：写错时汇总**恒为空**、且不报错，父表里依赖它的公式/校验跟着错——2026-09-21 第三版实测「合同金额和应收金额不等」误报就是它）<br>① 汇总源是**关联记录**（link-record）→ 填该控件的 **`key`**（如 `1693451000559_843595`），**不是** `link_record_xxx` model；填 model 时设计器解析不了，面板的筛选条件会显示成「**字段已删除**」（2026-09-16 实测：线上参照落库值 `linkTable=1693451000559_843595`，同控件 `model=link_record_1693451000559_843595`）。<br>② 汇总源是**设计子表**（sub-table-design）→ 填子表 **model**（`sub_table_design_xxx`） |
 | `field` | string | `""` | 子表列/源表列 model（如 `money_xxx`）。**例外**：`inner-record-count` 时填 `"inner-record-count"`，见下方 |
 
 > **⚠️ `inner-record-count` 的结构与其他汇总不同：**
@@ -1067,8 +1070,16 @@ className: `form-ocr` | icon: `icon-ocr-a`
 | `inner-record-count` | **`"inner-record-count"`** | **`""`** | 统计子表行数，不引用任何数据列 |
 | 其他所有类型 | 子表列 model | `"inner-sum"` / `"inner-average"` / ... | 引用子表具体列 |
 | `summary` | string | `""` | **值类**：填汇总类型（如 `"inner-sum"`）；**统计类**：填 `""`（留空） |
-| `filter` | object | `(见说明)` | 过滤条件对象，含 `enabled`/`rules`/`matchType`；`enabled: true` 时仅对满足条件的子表行汇总 |
+| `filter` | object | `(见说明)` | 过滤条件对象，含 `enabled`/`rules`/`matchType`；`enabled: true` 时仅对满足条件的子表行汇总。**⚠️ 见下方红框：服务端重算时这个条件会被忽略** |
 | `filter.enabled` | boolean | `false` | 是否启用过滤 |
+
+> ⛔ **「带条件的汇总」在服务端重算时条件被完全忽略（2026-09-22 项目管理 R4 实测）。**
+> 按上表形状把 `filter` 写对、设计器面板也显示正常，但只要新增一条子记录触发服务端重算，
+> 汇总就按**全部行**算：给合同加一条「待确认 600000」的收款登记后，「已确认收款」从 360000 跳成 960000。
+> `save` / 回读 / `precheck` / `check_node_contract` / `app_audit` / `postbuild_verify` **六道全绿**，
+> 只有造真实数据对账才看得见，且会连累下游所有引用它的公式。
+> **替代写法**：① 在子表里加一个「计入合计」的公式列（满足条件取值、否则取 0），对那一列做**无条件**求和；
+> ② 或把不同状态拆成各自的关联/子表，各自汇总。
 | `filter.rules` | array | `[]` | 过滤规则数组，每项含 `model`/`rule`/`valueType`/`value` |
 | `filter.matchType` | string | `"AND"` | 多条规则的逻辑关系（`AND`/`OR`） |
 | `hidden` | boolean | `false` | 是否隐藏 |
@@ -1526,5 +1537,5 @@ className: `form-dict` | icon: `icon-dict`
 4. **imgupload / file-upload**：`multiple`/`autoWidth` 等不在 creator make_widget 白名单（建表时静默忽略并告警）——要改必须建表后走 `update_widget`/整单改（见 SKILL.md 行宽度与补丁经验）。
 5. **radio/checkbox/select**：源码默认自带静态选项 `[选项1/2/3]`（带 itemColor）；`advancedSetting.defaultValue` 恒为 `customConfig:true + valueSplit:","`，手写 JSON 勿漏（与上文备注一致）。
 6. **hand-sign（手写签名）**：源码仅 `disabled/required/hidden` 三键；`width:'100%'`/`height:'200px'` 是 desform_utils 工厂附加，UI 面板无。
-7. 其余控件默认值已逐一核对与上表一致，要点：number `defaultValue:0`、integer/money `undefined`（money width '180px'/unitText '元'/precision 2/placeholder '请输入金额'）、input/textarea width '100%'、formula mode `'SUM'` decimal 2 thousand true、auto-number 规则 `[{type:'number',mode:1,start:1,reset:0,length:4,continue:false}]` + generateOnAdd true、ocr type 'normal'、area-linkage areaLevel 3、select-user `customReturnField:'username'`、select-depart / select-depart-post `customReturnField:'id'`、人员/部门/角色 `dataAuthType:'member'`、org-role placeholder '选择组织角色'。
+7. 其余控件默认值已逐一核对与上表一致，要点：number `defaultValue:0`、integer/money `undefined`（money width '180px'/unitText '元'/precision 2/placeholder '请输入金额'）、input/textarea width '100%'、formula mode `'SUM'` decimal 2 thousand true、auto-number 规则 `[{type:'number',mode:1,start:1,reset:0,length:4,continue:false}]` + generateOnAdd true（**这是工厂/UI 默认态，不是可用态**：`mode:1` 不补零、`length` 被忽略；要「4 位流水」必须改 `mode:2`，见上文 auto-number 节）、ocr type 'normal'、area-linkage areaLevel 3、select-user `customReturnField:'username'`、select-depart / select-depart-post `customReturnField:'id'`、人员/部门/角色 `dataAuthType:'member'`、org-role placeholder '选择组织角色'。
 8. **auto-number 的 `numberRules` 段对象必须带 UI 渲染依赖的辅助键（2026-09-03 实测，对照 UI 手工配置「自动编号-01」及 ConfigItem.vue 源码）**：text 段要 `{type:'text', value:'AIC', text:'AIC'}`——**面板 `v-model` 绑定的是 `rule.text`**，缺 text 是「设置没生效」的真正原因，value 为后端兼容键同写；create_date 段要 `{type:'create_date', dateFormat:'yyyyMMdd', formatCustom:'yyyyMMdd', format:'yyyyMMdd'}`——**面板绑定 `rule.format`**（下拉 yyyyMMdd/yyyyMM/MMdd/yyyy/custom），`formatCustom` 仅 format='custom' 时显示，dateFormat 为后端兼容键，三键同写；number 段 `{type:'number', mode:1|2, start, reset, length, continue}` 无附加键（面板位数限 2~6，超出后 continue=false 时从 0 重新编号）。**缺 text/format 键时接口 success 但面板读不到段内容**。`AUTONUMBER(prefix=..., date_format=...)` 工厂已按此补全（2026-09-03），creator JSON 支持 `dateFormat` 参数；引用字段段 `{type:'field', model:'<他字段model>'}` 只存在于 UI 面板，需手工 `update_widget` 整组 rules 写入（先拖 UI 参照抄键集合）。

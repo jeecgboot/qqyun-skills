@@ -6,7 +6,7 @@
 {
   "sourceCode": "",              // 源表单 desformCode（必填）
   "showMode": "single",          // "single" 单条 / "many" 多条
-  "showType": "card",            // "card" 卡片 / "select" 下拉 / "table" 表格
+  "showType": "card",            // "card" 卡片 / "select" 下拉 / "table" 表格  ⚠️ 自关联（指向本表）只能写 card：没有「树」这一档，树形=卡片模式自带
   "titleField": "",              // 源表标题字段 model（必填）
   "showFields": [],              // 额外展示的字段 model 列表
   "allowView": true,             // 允许查看
@@ -34,6 +34,8 @@
 ## 二、showType 三种模式
 
 > **组合约束（2026-09-09 UI 核对）：卡片、下拉单选/多选均可；表格仅多选。** 反组合（单选+表格）面板不提供，勿配。
+
+> **自关联（表单数据树）例外：两侧一律 card。**「显示方式」面板只有 卡片/下拉/表格，**没有「树」**；树形是 card 自带的展开效果。详见 `desform-self-tree.md`。
 
 | 特性 | card（卡片） | select（下拉） | table（表格） |
 |------|-------------|--------------|-----------|
@@ -67,8 +69,41 @@
 **从创建脚本产出的普通 many 关联转换：**
 1. 主表侧明细控件：`model` 改 `sub_table_design_<原key>`、顶层加 `isSubTable:true`、`options.showType="table"`
 2. 子表回指字段对齐 `single`+`card`，`options.twoWayModel` = 主表侧新 model
-3. 主表对该明细列求和的汇总字段 `options.linkTable` 同步为新 model；**用户在界面手工重绑汇总后 linkTable 落库为明细控件 key（无前缀）**——两种写法都存在，以界面最后一次保存为准
+3. ⛔ **主表汇总字段的 `options.linkTable` 不要动，保持明细控件的 `key`（无前缀）**。
+   转换后控件类型**仍是 `link-record`**（只是多了 `isSubTable`），**不是 `sub-table-design`**，
+   所以设计器面板按 **key** 匹配 —— `fast-create.md`「引用控件本身用 key，引用字段用 model」那张对照表才是准的。
+   ⚠️ 本条 2026-09-21 前写的是「同步为新 model」，**那是错的**：改成 `sub_table_design_…` 后
+   面板「关联表」下拉解析不到，直接把原始串显示出来（用户截图报障：显示 `sub_table_design_178997331005` 而不是「商机明细」）；
+   而 `save` / 回读 / `precheck` / 契约检查**全绿**，运行时求和也正常，只有打开设计器面板才看得见。
+   建表脚本本来就写的是 key，**转换这一步不要碰它**。
 4. model 改名后 `save_auth_from_design(主表code)` 重刷字段权限（auth 按 model 存）
+
+**⚠️ 主表侧控件的 `twoWayModel` 是必写项（2026-09-20 实测；2026-09-21 第三版补充：漏写还会让**父表汇总恒为空**——从父表新增的子记录回指字段为空串，汇总找不到它，「合同金额和应收金额不等」这类校验就误报；且**每对互指的关联控件都要两边都写**，别只登记其中一对）**：漏写时，编辑父记录 → 子表「添加记录」，
+弹窗里回指字段**带不出当前父记录**（运行时 `JLinkRecord.buildFormConfig` 仅在**父侧** `twoWayModel` 非空时
+才预填 `defaultVal=[当前记录id]`；只写子表侧不算数）。值 = 子表回指字段的 **model**——
+实测 model 后缀与 key 可不等（`link_record_…736625` vs key `…862617`），勿用 key。
+存量补齐：逐个子表控件与子表回指字段配对后
+`update_widget(父表code, {'options': {'twoWayModel': '<子表字段model>'}}, model='<子表控件model>')`，
+改完 `queryByCode` 回读两侧互指。
+
+**转换后自查（缺一项就是没转成，2026-09-20 实测归总）：**
+
+- 主表侧：`isSubTable is True`、`model.startswith('sub_table_design_')`、**`model` 后缀 == 控件 `key`**、`options.showType == 'table'`
+- 子表回指字段：`options.showMode == 'single'` + `options.showType == 'card'`（两条都要）、`options.twoWayModel == 主表新 model`
+- **互指**：主表 `options.twoWayModel` == 子表回指字段 `model`。**两侧都要写，只改主表侧是"半转"**
+  —— 主表侧 `isSubTable`/`model` 都对、回读主表全绿，但 `twoWayModel` 还是空串，子表侧不知道回指谁。
+  2026-09-20 实测：转换脚本漏写主表 `options.twoWayModel`，靠回读才发现 `twoWayModel=''`。
+- ⚠️ 4 步都要走**整单 `save_design_from_file`**（顶层键 `update_widget` 删不掉/加不全）；
+  **回存前把全表字典控件的 `options.remote` 置回 `'dict'`** —— 导出态恒为 `false`，直接回存会把绑定态冲成静态数据
+  （见 SKILL.md「select/radio/checkbox 绑定应用级字典」）。
+- ⚠️ `model` 改名**前**先扫全应用 + 简流里有没有引用旧 model；改**后** `save_auth_from_design(主表code)` 必跑。
+  汇总 `options.linkTable` 存的是**控件 key（无前缀）**，而 key 在转换中不变，所以它**不在**换名波及范围内，**不要跟着改**（见上方第 3 步）。
+
+> ⚠️ **判据是需求原文有没有「子表」二字，不是控件长得像不像。** `显示:"表格"` 落库是 `showType:"table"`，
+> 明细区本身就是一张表格 —— 顶层无 `isSubTable`、`model` 还是 `link_record_*` 时，**看着就是子表，
+> 设计器面板里仍叫「关联记录」**。2026-09-20 实测：16 表应用 53 个关联控件 `isSubTable` **0 个**，
+> 而提示词里明确写了「子表，关联工作表「客户联系人」」；`save`/回读/`precheck` 全绿，
+> 只有用户打开设计器才发现。（根因：规格 `links` 无「子表」档位，见 `app-spec.md`「子表：关联工作表」。）
 
 ## 二-b、filters vs search：建表时调用场景（先看这张表）
 
@@ -385,6 +420,14 @@ ws, k, m = LINK_RECORD('客户', source_code, title_model,
 
 **className**: `form-link-field`，**icon**: `icon-field`
 
+**布局**：link-field 必须与它所属的 link-record 控件放在**同一个 card / 同一 divider 区段**内，
+顺序「关联控件 → 带出字段」，中间不插别的字段。
+
+> ⛔ **`saveType` 默认必须给 `"save"`**：工厂 `LINK_FIELD` 建出来落 `"view"`（仅显示）→ **值不落库**，
+> 流程拿它当定位键时恒取空值。改法走**整单设计保存**（`query_form` → 改控件 `options.saveType='save'`
+> → `save_design_from_file`）；**`update_widget` 改不动**（见下方「关键注意」第 2 条）。
+> 需求写「仅显示」才留 `"view"`。回读 `options.saveType == "save"`。
+
 ### saveType 区别
 
 - `view`：运行时动态查询展示，数据始终最新
@@ -457,6 +500,8 @@ SUB_LINK_FIELD(name, parent_key, link_record_key, show_field,
 | 下拉模式筛不了 | `showType=select` 没有用户筛选 UI | 用户筛选只在卡片/表格选择弹窗；下拉只有关键字 |
 | `search.rule` 写成 `EQ`/`LIKE` | 查询设置用的是 superQuery 小写 | 只用 `eq` / `like` |
 | 把记录范围/查询设置配成列表筛选 | 调错场景 | 这两项是**建表时**写在关联记录控件上的，见「二-b」 |
+| 子表「添加记录」弹窗带不出父记录 | 主表侧子表控件 `options.twoWayModel` 为空 | 补成子表回指字段的 model，见「二-a」 |
+| 记录范围不生效（选择弹窗不过滤） | `filters[].rules[].model` 或 `value[]` 引用了**已不存在的字段 model**（悬空引用，运行时整条规则被跳过） | 用目标表真实 model 重写该行（源表字段 + 本表字段），整单保存；改前先扫全量 `filters` 校验 model 能否解析到字段 |
 
 ## 十二、标题字段是「两层」结构（2026-09-04 实测：改一处不联动另一处）
 

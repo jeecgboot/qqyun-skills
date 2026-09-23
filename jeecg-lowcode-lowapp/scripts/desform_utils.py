@@ -467,6 +467,17 @@ _VALID_OPTIONS_KWARGS = {
     'unique', 'readonly', 'inline', 'showLabel', 'useColor',
     'filterable', 'clearable', 'precision', 'allowHalf',
     'allowScan', 'scanEditable',
+    # ⚠️ 工厂签名里**没有**这两个参数，但 `options` 里有 —— 不放进白名单，
+    # `FILE('附件', multiple=True, length=10)` 会在 make_widget 里被判成
+    # 「非白名单参数」**打印一行警告后静默丢弃**，附件上限就没了。
+    # 2026-09-18 加：配合 build_app 的 `选项`（规格里的控件级选项透传）。
+    'multiple', 'length',
+    # ⚠️ 金额/数值控件的**单位**（2026-09-20 加）：需求写「金额，2 位小数，**单位：万元**」
+    # 时规格要能声明。工厂对 money 默认 `unitText='元'`，不放进白名单则
+    # `选项: {"计划资金": {"unitText": "万元"}}` 会被判「非白名单参数」→ **静默丢弃**，
+    # 控件照旧显示「元」（用户实测报「单位是万元，怎么还是元」）。
+    # `unitPosition` 控制单位在前/在后（suffix/prefix）。
+    'unitText', 'unitPosition',
 }
 
 # 敲敲云（lowApp）设计器左侧面板不展示的控件（Container.vue QQYUN-3641 / OA 整组）
@@ -1185,6 +1196,14 @@ def SELECT(name, options, required=False, width=100, multiple=False, dict_code=N
            placeholder='',
            *, wrap=True, is_sub=False, parent_key=None, col_width='150px', **kw):
     options_list = _make_options_list(options, field_name=name) if options else []
+    # ⚠️ 静态选项必须补 label（2026-09-20 实测定论，用户报障）：`_make_options_list`
+    # 对纯字符串列表只产出 {"value","itemColor"}（无 label），而 select 的下拉文案取自
+    # label —— 结果是**下拉空白**；且 show_label 会被算成 False，进一步关掉标签显示。
+    # save 返回 success、回读 options 也非空，只有人打开新增页才看得出。
+    # 绑字典时下面会把 options 清空重填，不受影响；RADIO/CHECKBOX 不走这里，行为不变。
+    if options and not dict_code:
+        for o in options_list:
+            o.setdefault("label", o.get("value"))
     show_label = kw.pop('showLabel', None)
     if show_label is None:
         show_label = any("label" in o for o in options_list)
@@ -1796,13 +1815,15 @@ def MARKDOWN(name, required=False, **kw):
     return w, k, m
 
 
-def TABS(tab_labels=None, tab_type='border-card', position='top'):
+def TABS(tab_labels=None, tab_type='border-card', position='top', active_name=None):
     """标签页容器控件（不需要 card 包裹）
 
     Args:
         tab_labels: 标签页名称列表，默认 ['Tab1', 'Tab2']
         tab_type: 标签样式 'border-card'|'card'|''
         position: 标签位置 'top'|'bottom'|'left'|'right'
+        active_name: 默认激活的页签名。**不传 = 激活第一个页签**
+            （`options.activeName` 留空会让打开时哪个页签都没选中，2026-09-18 用户实测报障）
 
     Returns:
         (widget_dict, key, model) — 向 panes[i]['list'] 中添加子控件
@@ -1824,6 +1845,8 @@ def TABS(tab_labels=None, tab_type='border-card', position='top'):
             "name": label, "label": label, "rowNum": 1,
             "hidden": False, "hiddenOnAdd": False, "list": []
         })
+    # 没点名就激活第一个页签：空串等于「没指定」，打开时可能一个都不选中
+    active = active_name or (panes[0]["name"] if panes else "")
     w = {
         "type": "tabs", "name": "Tabs",
         "className": "form-tabs", "icon": "icon-tab",
@@ -1832,7 +1855,7 @@ def TABS(tab_labels=None, tab_type='border-card', position='top'):
         "key": key, "model": f"tabs_{key}",
         "panes": panes,
         "options": {
-            "width": "100%", "activeName": "",
+            "width": "100%", "activeName": active,
             "type": tab_type, "position": position,
             "hidden": False,
         },
@@ -1886,6 +1909,12 @@ def LINK_RECORD(name, source_code, title_field, show_fields=None,
     if is_self:
         # valueSplit 在 advancedSetting 内，make_widget 已生成，直接覆盖
         w["advancedSetting"]["defaultValue"]["valueSplit"] = ""
+        # engine-contract C6：自关联要写**三处**——顶层 isSelf（上面的 extra）、
+        # advancedSetting 的 valueSplit（上一行）、以及这里的 options 两个键。
+        # 只写顶层时：设计器当通用树控件；`hidden:true` 的隐藏控件（任务表「上级任务占位」）
+        # 会在列表里**露成一列**（表头直接写控件名）；父级回写/树展开也认不到它。
+        w.setdefault("options", {})["isSelf"] = True
+        w["options"]["valueSplit"] = ""
     if is_sub:
         w["subOptions"]["width"] = col_width
         return w, k, m
@@ -1898,12 +1927,23 @@ def LINK_RECORD(name, source_code, title_field, show_fields=None,
 
 
 def LINK_FIELD(name, link_record_key, show_field, field_type='input',
-               field_options=None, width=100,
+               field_options=None, width=100, save_type='view',
                *, wrap=True, is_sub=False, parent_key=None, col_width='150px', **kw):
-    """他表字段控件（与 link-record 配对使用）"""
+    """他表字段控件（与 link-record 配对使用）
+
+    Args:
+        save_type: `'view'`（默认，动态展示、**不保存**）/ `'save'`（保存快照）。
+            ⚠️ **需求说「存储数据模式 / 存储数据」时必须传 `'save'`** —— 这不只是存不存值：
+            ① **`view` 的字段不能作流程条件**（筛选条件 / 分支条件都不行），设计器不给选、
+               引擎运行时也不匹配（gotchas #86，2026-09-11 用户定论）；
+            ② `view` 的值是动态算的，`save` 才落快照（`desform-data-utils.md` 字段表）。
+            此前本函数**写死 `view` 且不收参数**，需求写「存储数据」的字段只能建完再手改
+            `w['options']['saveType']='save'`；2026-09-20 销售管理实测：12 个需求标「存储数据」
+            的他表字段全部落成了 `view`，其中 2 个还被拿去当条件（设计器显示原始 model）。
+    """
     opts = {
         "linkRecordKey": link_record_key, "showField": show_field,
-        "saveType": "view", "fieldType": field_type,
+        "saveType": save_type, "fieldType": field_type,
         "fieldOptions": field_options or {},
         "width": "100%", "defaultValue": "", "readonly": False,
         "disabled": False, "hidden": False, "hiddenOnAdd": False,
@@ -1937,6 +1977,13 @@ def FORMULA(name, mode='CUSTOM', expression='', fields=None,
     """
     mode = mode.upper()
     _DATE_MODES = {'DATEIF', 'DATEADD', 'NOW_DATEIF', 'PAST_NOW_DATEIF'}
+    # 预定义 mode（SUM/AVERAGE/MAX/MIN/PRODUCT）落库的 `expression` 是**操作数并排写**
+    # （`$f1$$f2$`），不是手写算式 —— 见 references/desform-formula-function.md「预定义 mode」。
+    # 漏了它 = `expression` 空串：save/deploy/字段权限全绿，**界面上却是个不出值的空占位**
+    # （2026-09-22 用户截图报障「人员成本小计」空白，就是只传 fields 没传 expression）。
+    # 这里按 fields 自动补齐，与 SUB_PRODUCT 的拼法一致。
+    if not expression and fields and mode in ('SUM', 'AVERAGE', 'MAX', 'MIN', 'PRODUCT'):
+        expression = ''.join('$%s$' % m for m in fields)
     opt_type = 'date' if mode in _DATE_MODES else 'number'
     opts = {
         "type": opt_type, "mode": mode, "expression": expression,
@@ -3308,7 +3355,9 @@ def _apply_half_layout(widgets):
         wtype = _get_widget_type(item)
         inner = _get_inner_widget(item)
 
-        if inner and _is_half_suitable(wtype):
+        # 表格模式的关联记录 / 设计子表同样要独占整行（见 is_wide_widget 的说明），
+        # 半行路径原来只看类型码，会把它们两两配对压成 50%。
+        if inner and _is_half_suitable(wtype) and not is_wide_widget(inner):
             # 适合半行布局
             _set_autowidth(inner, 50)
             if isinstance(item, tuple):
@@ -3359,6 +3408,29 @@ GROUP_WIDE_TYPES = {
     'hand-sign', 'file-upload', 'imgupload', 'textarea', 'divider', 'text',
     'buttons', 'border-card',
 }
+
+
+def is_wide_widget(w):
+    """该控件是否必须**独占整行**。
+
+    `GROUP_WIDE_TYPES` 只认类型码，于是漏掉一类：**表格模式的关联记录**
+    （`link-record` + `options.showType == 'table'`）。它内部渲染的是整张明细表，
+    按每卡 N 个均分会被压成 1/N 宽，表头和列全挤在一起——2026-09-18 实测：
+    一个 16 表应用里 18 个这样的控件全被压成 33%，用户报「关联记录表格模式需要独占一行」。
+
+    ⚠️ **只对 `showType=table` 生效**：卡片/下拉模式的关联记录仍是普通字段宽，
+    把它们也顶成整行会把表单拉得很长（用户没要求，别顺手改）。
+
+    设计子表除类型码外再用 `columns` 兜一层：子表控件在某些路径下类型码不统一，
+    但它一定带 `columns`。
+    """
+    if not isinstance(w, dict):
+        return False
+    if w.get('type') in GROUP_WIDE_TYPES:
+        return True
+    if w.get('type') == 'link-record':
+        return (w.get('options') or {}).get('showType') == 'table'
+    return bool(w.get('columns')) and w.get('type') != 'card'
 
 
 def _group_flatten(item):
@@ -3441,7 +3513,7 @@ def apply_group_layout(widgets, sections, per_card=3):
         models.extend(meta)
 
     def put(w, k, m, buf, meta):
-        if w.get('type') in GROUP_WIDE_TYPES:
+        if is_wide_widget(w):
             flush(buf, meta)
             del buf[:], meta[:]
             top.append(w)
@@ -3461,6 +3533,12 @@ def apply_group_layout(widgets, sections, per_card=3):
             for i, (w, k, m) in enumerate(flat):
                 if i in taken:
                     continue
+                # ⚠️ 只认**字段控件**：divider 没有 model，却是唯一会与字段**同名**的元素
+                # （分节标题常直接取自字段名，如「客户状态」分节 ↔ 客户状态字段）。
+                # 不排掉它，查找会先抓到上游留下的旧 divider，把它当字段收下放到顶层，
+                # 分节再插一个新的 → 又一对重复，同时真字段被挤到最后（2026-09-18 实测）。
+                if w.get('type') == 'divider':
+                    continue
                 if w.get('name') == fname:
                     hit = i
                     break
@@ -3474,7 +3552,13 @@ def apply_group_layout(widgets, sections, per_card=3):
                 del buf[:], meta[:]
         flush(buf, meta)
 
-    rest = [(w, k, m) for i, (w, k, m) in enumerate(flat) if i not in taken]
+    # ⚠️ **旧 divider 必须丢掉，不能进 rest**：分节里只点名字段名，旧段标题既不在
+    # `taken` 里、又不属于任何字段，于是会从 rest 原样放回；而每个带标题的分节又
+    # 无条件插一个新 DIVIDER —— 新旧叠加，**每重跑一次就多一份**（实测 1→2→3）。
+    # divider 是纯布局控件、没有 model、不影响数据，所以接口全程零报错，
+    # 只有数顶层项或打开表单才看得出来（幂等性缺陷，2026-09-18 实测）。
+    rest = [(w, k, m) for i, (w, k, m) in enumerate(flat)
+            if i not in taken and w.get('type') != 'divider']
     if rest:
         buf, meta = [], []
         for w, k, m in rest:
@@ -3484,6 +3568,122 @@ def apply_group_layout(widgets, sections, per_card=3):
                 del buf[:], meta[:]
         flush(buf, meta)
     return top, models
+
+
+def _detach_widget(items, name):
+    """在顶层 list 里按名字取出控件（裸顶层 / card 内都支持）。
+
+    Returns:
+        `(控件, 承载它的顶层项)` —— 取不到返回 `(None, None)`。
+        卡被摘空时连卡一起删掉：空卡在表单上是个突兀的框。
+    """
+    for it in list(items):
+        if not isinstance(it, dict):
+            continue
+        if it.get('type') == 'card':
+            kids = it.get('list') or []
+            for j, k in enumerate(kids):
+                if isinstance(k, dict) and k.get('name') == name:
+                    kids.pop(j)
+                    if not kids:
+                        items.pop(next(i for i, x in enumerate(items) if x is it))
+                    return k, it
+        elif it.get('name') == name:
+            items.pop(next(i for i, x in enumerate(items) if x is it))
+            return it, it
+    return None, None
+
+
+def _drop_orphan_dividers(items):
+    """删掉孤立的分隔线：紧挨着另一条分隔线的、以及收尾悬空的那条。
+
+    容器把哪一节的字段**整节搬走**之后，会留下一根光秃秃的段标题。两条挨着的
+    分隔线、或末尾悬空的分隔线，在表单上都是肉眼可见的缺陷。
+    """
+    out = []
+    for it in items:
+        if (isinstance(it, dict) and it.get('type') == 'divider' and out
+                and isinstance(out[-1], dict) and out[-1].get('type') == 'divider'):
+            continue
+        out.append(it)
+    while out and isinstance(out[-1], dict) and out[-1].get('type') == 'divider':
+        out.pop()
+    return out
+
+
+def group_into_tabs(design, containers):
+    """把点名的控件 MOVE 进 Tabs 容器（**移动，不重建**）。
+
+    `containers` 用 `spec_infer.normalize_containers(form)` 的规范形态：
+    `[{'name': 容器名, 'panes': [(页签名, [字段名, ...]), ...], 'hiddenOnAdd': bool}]`
+
+    ⚠️ **必须是移动**：控件 dict 原样搬运，`key`/`model` 一个字节都不改 —— 重建会换
+    model，把双向关联（`twoWayModel`）和上游引用一起打断（engine-contract #13）。
+    正因如此本函数**只搬运 + 设 `autoWidth` + 同名时关标题**，不碰 `showType`/`showMode`/
+    `hiddenOnAdd` 这类语义属性：那些由 `links` 声明，补丁阶段已经设好了。
+    （`hideTitle` 是版面属性不是语义属性：页签名与控件名相同时置顶层 `hideTitle=True`，
+    否则页签里会重复画一遍同名标题。）
+
+    ⚠️ **容器固定落在表单末尾**。这是刻意的，不是 `rest` 的副作用：`apply_group_layout`
+    把没点名的顶层控件一律收在最后，所以「容器跟着第一个字段的原位置走」在**第一次建**
+    时落在表单中部、**重跑一次**就漂到末尾 —— 静默的位置漂移。固定末尾则首建与每次
+    重跑完全一致。表达力的代价由 `precheck` 的提示兜底（容器字段后面还有别的字段时会
+    提示）。容器已存在时**按名字判重、整容器跳过**，所以重跑是幂等的。
+
+    Returns:
+        `{'made': [容器名...], 'skipped': [容器名...], 'moved': {容器名: [字段名...]}}`
+
+    Raises:
+        KeyError: 容器点名了一个这张表上没有的控件（**早报**，不静默少装一个）
+    """
+    items = design.setdefault('list', [])
+    rep = {'made': [], 'skipped': [], 'moved': {}}
+    for c in containers or []:
+        # 形态校验：喂进来的是**规范化之后**的容器。直接把规格原文塞进来时，
+        # 下面 `for label, flds in c['panes']` 只会抛一句
+        # 「not enough values to unpack」—— 完全指不到问题在哪。
+        if not isinstance(c, dict) or 'name' not in c or not isinstance(c.get('panes'), list) \
+                or not all(isinstance(p, (list, tuple)) and len(p) == 2
+                           for p in c['panes']):
+            raise ValueError('容器形态不对：%r。要用 spec_infer.normalize_containers(form) '
+                             '的规范形态 [{"name":…, "panes":[(页签名, [字段…])], …}]，'
+                             '不能把规格里的 `容器` 原文直接传进来' % (c,))
+        if any(isinstance(x, dict) and x.get('type') == 'tabs'
+               and x.get('name') == c['name'] for x in items):
+            rep['skipped'].append(c['name'])
+            continue
+        # ⚠️ 按**页签**分组，不是按字段：一个页签装多个控件时，按字段逐个建会得到
+        # N 个同名页签（页签的 name 就是 label，重名在 Tabs 里直接冲突）。
+        moved = []                      # [(页签名, [(控件, 字段名), ...]), ...]
+        for label, flds in c['panes']:
+            got = []
+            for f in flds:
+                w, _ = _detach_widget(items, f)
+                if w is None:
+                    raise KeyError('容器「%s」点名了控件「%s」，但这张表上没有这个控件'
+                                   '（容器字段要在 `字段` 里真的存在）' % (c['name'], f))
+                got.append((w, f))
+            moved.append((label, got))
+        tw, _, _ = TABS([lb for lb, _ in moved])
+        tw['name'] = c['name']
+        if c.get('hiddenOnAdd'):
+            tw['options']['hiddenOnAdd'] = True
+        for i, (label, got) in enumerate(moved):
+            for w, f in got:
+                w.setdefault('options', {})['autoWidth'] = 100   # 页签内容占满整行
+                # 页签名 == 控件名时，控件自带的标题与页签重复（页签已经说明了内容）——
+                # 不关的话页签里会再画一遍同名标题（2026-09-20 用户截图指出「tab中为什么
+                # 多了个标题」）。**只在同名时隐藏**：一个页签装多个控件时（页签名是概括
+                # 性的，如「相关记录」），各控件标题是唯一的区分，动了反而看不懂。
+                # ⚠️ hideTitle 在控件**顶层**，不在 options 里（写进 options 静默无效）。
+                if f == label:
+                    w['hideTitle'] = True
+                tw['panes'][i]['list'].append(w)
+        items.append(tw)
+        rep['made'].append(c['name'])
+        rep['moved'][c['name']] = [f for _, got in moved for _, f in got]
+    design['list'] = _drop_orphan_dividers(items)
+    return rep
 
 
 def create_form(name, code, widgets, title_index=0, layout='auto', expand=None,
@@ -4097,14 +4297,41 @@ def config_table_sort(view_id, orders):
     return update_list_view(view_id, orders=norm)
 
 
+def _norm_quick_item(it, seq=None):
+    """快速筛选项归一成**界面落库口径**：camelCase `queryType`，且不带 `name`。
+
+    ⚠️ 2026-09-21 事故（第三版列表页全表崩）：本函数此前**原样透传**调用方给的字典，
+    文档却写着「python 层已转换」。调用方按下划线 `query_type` 传 → 原样落库 →
+    后端 `map.get("queryType").toString()` 取到 null → 抛
+    `操作失败，Cannot invoke "Object.toString()" because the return value of
+    "java.util.Map.get(Object)" is null`，**整页渲染中断**（表头只剩 `#`/`操作`，
+    左侧筛选与数据全空）。故在工具层强制归一，两种键名都收，出的永远是驼峰。
+    """
+    if not isinstance(it, dict):
+        return it
+    out = {}
+    for k, v in it.items():
+        if k in ('query_type', 'queryType'):
+            out['queryType'] = v
+        elif k in ('name', 'nameText', 'label'):
+            continue                      # 界面保存格式里没有 name
+        else:
+            out[k] = v
+    out.setdefault('queryType', 'like')
+    if seq is not None:
+        out['seq'] = seq
+    return {k: out[k] for k in ('field', 'type', 'queryType', 'seq') if k in out}
+
+
 def config_table_quick_filter(view_id, query_list, query_button=True, wait_query=False):
     """配置表格视图的快速筛选栏
 
     Args:
         view_id:      视图 ID
         query_list:   筛选字段列表，格式：
-                        [{"field": "字段model名", "name": "显示名称",
-                          "type": "控件类型", "query_type": "查询方式", "seq": 0}, ...]
+                        [{"field": "字段model名", "type": "控件类型",
+                          "queryType": "查询方式", "seq": 0}, ...]
+                      `query_type`（下划线）也收，函数会归一成驼峰；`name` 会被丢弃。
         query_button: bool，是否显示查询按钮（默认 True）
         wait_query:   bool，是否等待点击查询后才加载数据（默认 False）
 
@@ -4113,11 +4340,16 @@ def config_table_quick_filter(view_id, query_list, query_button=True, wait_query
 
     示例:
         config_table_quick_filter(view_id, query_list=[
-            {"field": "input_name", "name": "姓名", "type": "input", "query_type": "like", "seq": 0},
-            {"field": "select_status", "name": "状态", "type": "select", "query_type": "=", "seq": 1},
+            {"field": "input_name", "type": "input", "queryType": "like", "seq": 0},
+            {"field": "select_status", "type": "select", "queryType": "eq", "seq": 1},
         ])
+
+    收尾必做（2026-09-21 起）：逐个视图 GET
+        /desform/getColumns?desformCode=<code>&listViewId=<viewId>
+    `success=false` 就是坏视图（列表页会整页报错），别只看 updateViewConfig 的 success。
     """
-    return update_list_view(view_id, queryList=query_list,
+    ql = [_norm_quick_item(it, i) for i, it in enumerate(query_list or [])]
+    return update_list_view(view_id, queryList=ql,
                             queryButton=query_button, waitQuery=wait_query)
 
 

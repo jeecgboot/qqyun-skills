@@ -28,7 +28,7 @@ description: >-
 
 整轮墙钟 = 接口 + 探查往返。开场 memory 计入探查（常见 30–40s），不是准备。接口秒级而整轮分钟级 = 路径违规。
 
-**建 ≥5 张盘 → `references/scripts/build_dashboards.py`**（读声明式 `dashboards.json`，一条命令建完；单进程 + 非破坏 + 断点续跑）。手搓编排器、每操作 `subprocess` 起进程、delete-then-create **三条都禁止**——2026-09-15 实测手搓方案：25 张盘跑 42 分钟，还因 `menus` 抓错列（名称后是 parentId，**drag 的 pageId 在 menuUrl 列**）删盘从未生效，攒出 58 个重复盘。
+**建 ≥5 张盘 → `references/scripts/build_dashboards.py`**（读声明式 `dashboards.json`，一条命令建完；单进程 + 非破坏 + 断点续跑）。**⚠️ `dashboards.json` 的 schema 权威页 = `references/create.md`「批量建盘 `dashboards.json`」——`charts` 必须是「以表单编码为键的对象」，写成数组会整批失败（`'list' object has no attribute 'items'`）且 `--dry-run` 假绿。schema 不确定时先跑「一页一图」的最小 spec，别一次铺满。** 手搓编排器、每操作 `subprocess` 起进程、delete-then-create **三条都禁止**——2026-09-15 实测手搓方案：25 张盘跑 42 分钟，还因 `menus` 抓错列（名称后是 parentId，**drag 的 pageId 在 menuUrl 列**）删盘从未生效，攒出 58 个重复盘。
 
 **判断标准以「轮数」为主：单点 mutate 1 轮、已有盘加图 1 轮、图+查询 2 轮串行、复合盘 1 轮、多表单主链 1 条 Bash；秒数为参考（单点 mutate ≤15–30s、单图旗标加图 ≤30s、复合盘一条 ≤60s、多表单全链 ≤2–3m）**——慢先数轮数；轮数超标查本节禁止项，轮数达标仍久才 `pitfalls-core` 墙钟段。已解析 TID/APP/PAGE 直接用。点名维值跳过 `fields`。互不依赖只读同壳；同页写入串行（失败改参立刻重跑，中间禁 Read/grep）。**口语枚举（本月/按日/包含/柱状图…）进 layout/specs/旗标，脚本归一；禁止为对码读文档或删盘重写 JSON。** 加图（含雷达/四地图/透视/双轴）禁先读 `charts-special`/`gold-specs`（读它确认别名 = 探查；仅白屏/不显示才读）。**单图禁止 Write specs-file**，用 `--oral "原句"` + 点名旗标。勿事后再 mutate。改计算值+标题 = 一条 `set-chart-calc`；改回字段 `--clear --val`。禁止 dump 页 JSON / 手写 py。「不是最新」立刻原命令重跑。追问为何久 → `pitfalls-core` 墙钟段即答，禁再 memory/grep。
 

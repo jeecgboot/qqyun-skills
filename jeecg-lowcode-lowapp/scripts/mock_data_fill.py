@@ -371,7 +371,10 @@ def main():
     ap.add_argument('--tenant-id', required=True)
     ap.add_argument('--app-id', required=True)
     ap.add_argument('--spec', required=True)
-    ap.add_argument('--rows', type=int, default=3, help='每表灌几行（默认 3）')
+    # ⚠️ 本脚本本身就是「灌数」这个动作 —— **只在用户提示词明确要求灌数时才跑它**。
+    # 跑起来了就说明已经决定要灌，所以这里默认 3 行是个合理量。
+    ap.add_argument('--rows', type=int, default=3,
+                    help='每表灌几行（默认 3）。⚠️ 整个脚本只在用户明确要求灌数时才该执行')
     ap.add_argument('--only', default='', help='只灌这些表（逗号分隔）')
     ap.add_argument('--budget', type=int, default=300,
                     help='总预算秒数（默认 300）。到点就停手并**以 0 退出**：'

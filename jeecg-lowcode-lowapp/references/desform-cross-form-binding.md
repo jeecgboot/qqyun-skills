@@ -148,7 +148,7 @@ update_widget('project_code', {'options': {'twoWayModel': tf['所属项目']['mo
 | 陷阱 | 现象 | 正确做法 |
 |------|------|----------|
 | add_widget 传入整个 LINK_RECORD 返回值 | `JSON parse error: Cannot deserialize` | 只传 `ws`（元组第一个元素） |
-| LINK_FIELD 传 `save_type` 参数 | `TypeError: unexpected keyword argument` | 创建后手动修改 `w['options']['saveType']` |
+| ~~LINK_FIELD 传 `save_type` 参数~~ | ~~`TypeError: unexpected keyword argument`~~ | **2026-09-20 起 `LINK_FIELD` 已支持 `save_type=` 参数，直接用，不用再建后手改** |
 | SUB_* 函数传 `parent_key=None` | `KeyError: 'subOptions'` | 不要在 Python 中手动调 SUB_*，用 JSON 配置的 sub-table-design |
 | update_widget 用 model= 定位控件 | `组件不存在，无法操作` | 用 `key=` 定位（`key=fields['字段名']['key']`） |
 | update_form 重建含关联的表单 | 所有 model 重新生成，破坏其他表的引用 | 用 add_widget 增量添加关联，不要用 update_form |
@@ -217,6 +217,15 @@ update_widget('form_c', {'options': {'twoWayModel': fa2['子表C']['model']}},
 ---
 
 ## 七、LINK_FIELD saveType 修改方法
+
+> ⚠️ **2026-09-20 起 `LINK_FIELD(..., save_type='save')` 直接可用**（本节下面的"建后手改"
+> 只适用于**已有表单**的存量修复，新建别再走）。默认仍是 `'view'`。
+>
+> **需求写「存储数据模式 / 存储数据」时必须传 `'save'`** —— 这不只是存不存值：
+> **`view` 的他表字段不能作流程条件**（筛选条件 / 分支条件都不行），设计器那格会
+> 显示成原始 model、引擎运行时也不匹配（gotchas #86，2026-09-11 用户定论）。
+> 2026-09-20 销售管理实测：需求标「存储数据」的 **12 个**他表字段**全部**落成 `view`
+> （`LINK_FIELD` 当时写死且不收参数），其中 2 个还被当成了流程条件。
 
 LINK_FIELD 默认 saveType='view'（动态展示，不保存），如需改为 'save'（保存快照）：
 

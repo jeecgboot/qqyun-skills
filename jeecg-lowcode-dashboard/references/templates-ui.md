@@ -4,6 +4,9 @@
 > 一律 `dataType:1` + `comp/add` + `saveCompToPage`（template **字符串**）；禁止 `add-charts`。  
 > `card.title` 必须 `''`。
 
+
+> ⚠️ **像素高是 `11h-10`，不是 `11h`。** vue-grid-layout 用 `row-height=1` + `margin=[10,10]`，一格真实高 = `h*1 + (h-1)*10`。写 `11h` 会多出 10px：设计器 body `padding:0` 吃得下，**敲敲云运行态保留 a-card 默认内边距**（`number.vue`：`!isLowApp` 才 `padding:0`），于是内容溢出格子——数字贴底、按钮文字被裁（2026-09-22 实测）。
+
 ## JCarousel 轮播
 
 - raw `/desform/api/fields` 取 `imgupload`/`photo`/`image`（勿 `file-upload`；`qqy_ops fields` 可能漏图）
@@ -18,7 +21,7 @@ config = {
   'dataMapping': [{'filed': '路径', 'mapping': ''}],
   'option': {'autoplay': True, 'dots': True, 'dotPosition': 'bottom', 'easing': 'linear'},
   'chartData': [{'src': 'https://jeecgos.oss-cn-beijing.aliyuncs.com/files/site/drag/0.png'}],
-  'size': {'width': w * 75, 'height': h * 11},
+  'size': {'width': w * 75, 'height': h * 11 - 10},
 }
 ```
 
@@ -32,7 +35,7 @@ config = {
   'dataType': 1, 'url': '', 'timeOut': 0,
   'chartData': 'https://www.jeecg.com',  # 占位，非展示地址
   'background': '#FFFFFF', 'borderColor': '#E8E8E8',
-  'size': {'width': 24 * 75, 'height': 35 * 11},
+  'size': {'width': 24 * 75, 'height': 35 * 11 - 10},
   'option': {
     'card': {'title': '', 'extra': '', 'rightHref': '', 'size': 'default'},
     'body': {'url': 'https://www.jeecg.com'},  # 用户网址
@@ -54,7 +57,7 @@ config = {
   'dataType': 1, 'url': '', 'timeOut': 0,
   'turnConfig': {'url': ''}, 'chartData': '',
   'background': '#3F7DD4', 'borderColor': '#E8E8E8',
-  'size': {'width': w * 75, 'height': h * 11},
+  'size': {'width': w * 75, 'height': h * 11 - 10},
   'option': {
     'showWeek': 'show', 'hourlySystem': '24',
     'format': 'YYYY-MM-DD hh:mm:ss',

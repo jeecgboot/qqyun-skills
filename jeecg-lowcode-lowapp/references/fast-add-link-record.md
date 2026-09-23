@@ -12,7 +12,7 @@ python "<skill目录>/scripts/add_link_record.py" --api-base <URL> --token <TOKE
 
 Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShell `--json '{"中文"}'`。不要等 y/n。不需要知道主表/目标表的 code 或字段 model——脚本内部按名称解析，**filter 的 sqParam/valueType/字段 model 全部由脚本算**，禁止手写。
 
-**批量（≥2 条）用 `scripts/batch_add_link_record.py`**：job 为 `{"tenantName","appName","maxWorkers":4,"links":[<每条同本页格式>]}`，线程池并行跑全部（逐条串行时每个子进程重复 get_tenants/get_apps 定位，N 条 ≈ N×20s+；并行墙钟接近单条）。links 内 `(worksheet, field)` 重复会 fail-fast 拒绝。
+**批量（≥2 条）用 `scripts/batch_add_link_record.py`**：job 为 `{"tenantName","appName","maxWorkers":4,"links":[<每条同本页格式>]}`，线程池并行跑全部（逐条串行时每个子进程重复 get_tenants/get_apps 定位，N 条 ≈ N×20s+；并行墙钟接近单条）。links 内 `(worksheet, field)` 重复会 fail-fast 拒绝。⚠ **同一工作表的多个 link 不要并行建**：maxWorkers>1 时实测同表 3 条只落 2 条（并行读改写同一份设计互相覆盖；2026-09-19 实测），同表多字段改 `maxWorkers: 1` 或按表分批，建完必须回读核对字段是否真落库。
 
 ## job.json
 

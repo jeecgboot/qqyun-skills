@@ -464,6 +464,123 @@ def sort_worksheets(order_info):
     return r.get('success', False)
 
 
+def _flat_menus(nodes, out=None):
+    out = [] if out is None else out
+    for n in nodes or []:
+        out.append(n)
+        _flat_menus(n.get('children'), out)
+    return out
+
+
+def check_menu_order(menu_list, expected=None):
+    """菜单顺序检查（纯函数，不联网）。返回问题列表，空 = 通过。
+
+    前端按 queryMenus 的**返回顺序**渲染，后端是 `ORDER BY parent_id, order_num`，所以：
+    - 同级排序号重复/为空 → 显示顺序不确定（并行建表必然出现，2026-09-21 实测）
+    - 分组的 parentId 混用 NULL 与 ''（createFirstGroup 建的是 NULL、createGroup 建的是 ''）
+      → NULL 的那个分组**永远排最前**，改 orderNum 也没用
+
+    Args:
+        menu_list: get_menus()['menuList']
+        expected:  [(分组名或None, [工作表/看板名, ...]), ...]；给了就再核对实际顺序。
+                   没点名的菜单不查（它们排在点名项之后）。
+    """
+    ml = _flat_menus(menu_list)
+    groups = [m for m in ml if m.get('type') == 'group']
+    items = [m for m in ml if m.get('type') != 'group']
+    gname = {g['id']: g.get('menuName') for g in groups}
+    probs = []
+
+    def dups(ms, label):
+        seen = {}
+        for m in ms:
+            seen.setdefault(m.get('orderNum'), []).append(m.get('menuName'))
+        for num, names in seen.items():
+            if num is None or len(names) > 1:
+                probs.append('菜单.%s 排序号%s：%s → 显示顺序不确定'
+                             % (label, '为空' if num is None else '重复(%s)' % num, '、'.join(map(str, names))))
+
+    dups(groups, '分组')
+    for pid in {(m.get('parentId') or '') for m in items}:
+        dups([m for m in items if (m.get('parentId') or '') == pid], gname.get(pid) or '未分组')
+    if len(groups) > 1 and {g.get('parentId') for g in groups} >= {None, ''}:
+        probs.append('菜单.分组 parentId 混用 NULL 与空串：%s 是 NULL，会永远排在最前'
+                     % '、'.join(str(g.get('menuName')) for g in groups if g.get('parentId') is None))
+
+    if expected:
+        want_g = [g for g, _ in expected if g]
+        got_g = [g.get('menuName') for g in groups if g.get('menuName') in want_g]
+        if got_g != want_g:
+            probs.append('菜单.分组 顺序不符：实际 %s / 期望 %s' % (got_g, want_g))
+        for g, names in expected:
+            gid = next((x['id'] for x in groups if x.get('menuName') == g), None) if g else ''
+            if g and gid is None:
+                probs.append('菜单.%s 分组不存在' % g)
+                continue
+            kids = [m.get('menuName') for m in items if (m.get('parentId') or '') == gid]
+            lost = [n for n in names if n not in kids]
+            if lost:
+                probs.append('菜单.%s 下没有：%s' % (g or '未分组', '、'.join(lost)))
+            got = [n for n in kids if n in names]
+            want = [n for n in names if n in kids]
+            if got != want:
+                probs.append('菜单.%s 顺序不符：实际 %s / 期望 %s' % (g or '未分组', got, want))
+    return probs
+
+
+def apply_menu_order(order, app_id=None, dry_run=False, missing='error'):
+    """按给定顺序重排分组与工作表，**写完回读**。幂等：已符合就不发请求。
+
+    Args:
+        order:   [(分组名或None, [工作表/看板名, ...]), ...]。没点名的分组/菜单保持相对顺序、排在点名项之后。
+        missing: 点名的名字不存在时 'error'（默认，报问题）/ 'skip'（忽略，用于看板还没建的阶段）
+
+    Returns:
+        {'changed': [动作...], 'problems': [回读后仍不符的问题...]}  —— problems 非空 = 失败
+    """
+    aid = str(app_id) if app_id is not None else desform_utils._LOW_APP_ID
+    ml = _flat_menus((get_menus(aid) or {}).get('menuList') or [])
+    groups = [m for m in ml if m.get('type') == 'group']
+    items = [m for m in ml if m.get('type') != 'group']
+    if missing == 'skip':
+        have_g = {g.get('menuName') for g in groups}
+        have_i = {m.get('menuName') for m in items}
+        order = [(g, [n for n in ns if n in have_i]) for g, ns in order if not g or g in have_g]
+    if not check_menu_order(ml, order):
+        return {'changed': [], 'problems': []}
+    pre = [p for p in check_menu_order(ml, order) if '不存在' in p or '下没有' in p]
+    if pre:                                               # 名字/归属对不上：不猜、不动
+        return {'changed': [], 'problems': pre}
+
+    changed = []
+    null_g = [g for g in groups if g.get('parentId') is None]
+    if len(groups) > 1 and null_g:
+        changed.append('分组 parentId 归一为空串：%s' % '、'.join(g['menuName'] for g in null_g))
+        if not dry_run:
+            for g in null_g:
+                api_request('/online/lowAppMenu/edit', data={'id': g['id'], 'parentId': ''}, method='PUT')
+
+    want_g = [g for g, _ in order if g]
+    g_seq = ([x for n in want_g for x in groups if x.get('menuName') == n]
+             + [x for x in groups if x.get('menuName') not in want_g])
+    i_seq = []
+    for g in g_seq + [None]:
+        gid = g['id'] if g else ''
+        kids = [m for m in items if (m.get('parentId') or '') == gid]
+        names = next((ns for gn, ns in order if (gn or None) == (g.get('menuName') if g else None)), [])
+        i_seq += [m for n in names for m in kids if m.get('menuName') == n] + \
+                 [m for m in kids if m.get('menuName') not in names]
+    changed.append('重排 %d 个分组 / %d 个菜单' % (len(g_seq), len(i_seq)))
+    if dry_run:
+        return {'changed': changed, 'problems': []}
+    if i_seq:
+        sort_worksheets([{'id': m['id'], 'orderNum': i + 1} for i, m in enumerate(i_seq)])
+    if g_seq:                                             # changeOrder 按 id 改 orderNum，分组同样适用
+        sort_worksheets([{'id': g['id'], 'orderNum': i + 1} for i, g in enumerate(g_seq)])
+    after = (get_menus(aid) or {}).get('menuList') or []  # 接口回 success 不算数，回读才算
+    return {'changed': changed, 'problems': check_menu_order(after, order)}
+
+
 def delete_worksheet(menu_id):
     """删除工作表
 

@@ -751,7 +751,7 @@ for i, ((comp_type, name, cfg, w, h), (x, y, w2, h2)) in enumerate(
         zip(ALL_COMPS, placements)):
     cfg = copy.deepcopy(cfg)
     # ⚠️ size 字段用像素（width=w×75，height=h×11），不是栅格单位
-    cfg['size'] = {'width': w2 * 75, 'height': h2 * 11}
+    cfg['size'] = {'width': w2 * 75, 'height': h2 * 11 - 10}
 
     # chartData 序列化（list/dict → JSON字符串）
     if 'chartData' in cfg and not isinstance(cfg['chartData'], str):

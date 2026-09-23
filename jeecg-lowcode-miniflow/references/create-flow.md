@@ -40,7 +40,7 @@ Windows 用 `py -3` 跑脚本。含中文节点名时写成临时 `.py` 再执�
 |------|------|
 | formTableCode | Desform 表单编码 |
 | formTableName | 表单名称 |
-| formTableId | ⚠️ 仅 **tableEvent** 传 `form_start_{formTableCode}`；**buttonEvent 不传**（builder 会按 config 原样写入 attr，而 UI 原生 buttonEvent 的 attr.formTableId 实测必须为 null；传了必多一次修正轮） |
+| formTableId | ⚠️ 仅 **tableEvent** 传 `form_start_{formTableCode}`；**buttonEvent 不传**（builder 会按 config 原样写入 attr，而 UI 原生 buttonEvent 的 attr.formTableId 实测必须为 null；传了必多一次修正轮）。⚠️ **这条只管根 attr —— `formTableList` 里 `nodeId=="start"` 那条永远要写 `form_start_<code>`**，两者共用一个变量会让设计器「选择更新对象」退化成显示原始 id（**gotchas #102**） |
 | titleField | 标题字段 model |
 | startEventType | `add` / `update` / `add\|update` / `delete` |
 
@@ -56,6 +56,14 @@ Windows 用 `py -3` 跑脚本。含中文节点名时写成临时 `.py` 再执�
 > **⚠️ subEvent 发布必读（5建 19:03 实证更正，免 UI 点击）：** 三层 JSON 就位且记录 processKey=`process<DBid>` 后，发布唯一缺的是**记录 customProcessId 字段**——API deploy 每次都注册，但 key 按 `'process'+customProcessId` 拼接，该字段空则注册出坏 key（`process`/`processnull`）导致 callActivity 查不到。**补一次设计器式保存再 PUT 即可全 API 自动注册：** `POST /act/designer/miniDesFlow/api/saveFlow`（Content-Type=x-www-form-urlencoded 表单，参数含 updateCount/processJson/processName/processKey=process<DBid>/processType=oa/id/**customProcessId=<DBid>**/lowAppId/startType=subEvent，tenantId 走 X-Tenant-Id 头）→ `PUT /act/process/extActProcess/deployProcess {"id":<DBid>}`（无需 X-Sign 等签名头）→ 校验 `/act/process/list` 出现 key=`process<DBid>` version≥1。历史结论"必须 UI 保存并发布 / #33a 带头 PUT"为当时表象，机理见 `gotchas.md` #47。三层 subEvent（#31）与 XML 监听器注入（#45）是与本条独立的另一维，仍须满足。
 
 踩坑细节 → `gotchas.md` 搜 subEvent / callActivity。
+
+> **⚠️ 子流程「本行字段」引用必须写 `search` + `"子流程"` + 父流程 get_more 节点 id（2026-09-20 实证）：** `Builder.value()` 对子流程的本行引用写的是 `table` + `formNodeId:"start"`——那是**主流程触发行**的写法，子流程画布上没有 `start` 这个节点。**运行时按上下文行取值，所以流程跑得对**，但设计器解析不到来源 → 字段值面板「设置的数据」与手动下拉显示**不一致**（用户报障原话：「设置的数据和手动选择的显示不一致」），且 save/deploy/`check_node_contract` 全绿。落库三键应为：
+> ```
+> formNodeId   = 父流程那个 get_more 节点的 id（= 本流程 formTableList 里 isSubStart 条目的 nodeId）
+> formNodeName = "子流程"        ← 别名，**不是**父流程那个节点的名字
+> formNodeType = "search"
+> ```
+> 全库扫 17/17 条手搭子流程一致（金标 `增加/减少库存子流程`：父 get_more 叫「从单条记录获取关联记录」，子流程登记名照样是「子流程」）。**父节点 id 要等父流程发布后才出现在子流程的 formTableList 里**，`build_flows` 构建期拿不到 → 由 main 的 **pass ③ 收尾回填**（`_fix_sub_ownrow_refs`）统一改写，**别再手工补**；只跑 `--only <子流程>` 时没有主流程 → 不会回填，需连主流程一起 `--update` 跑一轮。同时定形 `data_update` 指向本行的来源：`formTableSourceTaskId` = 输入行 nodeId + `formTableSourceNodeType:"search"`（金标 `自动报价2` 的「更新报价明细」），builder 原本写的是 `start`/`table`。**别误改**指向运算节点的引用（`formNodeType:"function"` 是对的）。`check_node_contract` 有一条「输入行登记名应为父流程调用节点名」的**提示**与金标相反，忽略即可（提示级、非违例）。
 
 > **⚠️ 手工拼子流程 JSON 的渲染键清单（2026-09-04 实证，防"无＋加节点标识"）：** subEvent 子流程常需手工构造 JSON（builder 对普通流程会自动补齐渲染键，手搭不会）。**start 根节点与每一个手拼节点**（data_add/data_get_*/callActivity 等）都必须带五个渲染键，否则设计器无"＋"、无法删除：
 > ```python
@@ -104,9 +112,23 @@ Windows 用 `py -3` 跑脚本。含中文节点名时写成临时 `.py` 再执�
 
 扩展节点需手动构建 JSON：`approve_result`、`api`、`aiOrchestration`、`message_*`。其中 **`api`（HTTP 调用）与 `aiOrchestration`（调用 AI 编排流程）的完整 attr 契约与构造示例见 `miniflow-node-types.md` 二十六 / 二十七节**；`approve_result` / `message_*` 见对应示例文件。禁用类型（抄送 `copy` 等）见二十七节之后的「二十八、不可用 / 占位节点类型」。
 
-> **⚠️ 分支类型消歧（2026-09-10「全控件表单」误建返工）：** 用户口中的「**包含分支 / 包容分支**」= `inclusive`（**不是**动词「包含」+「分支」；「包含分支审批」要读成「包含分支 + 审批节点」）、「**互斥 / 排他分支**」= `exclusive`、「**并行分支**」= `parallel`——出现这些词一律**先按节点名解释**。用户只说「分支」而没点名类型时，建流前用 `AskUserQuestion` 让用户在 **互斥 / 包含 / 并行** 三选一，**禁止默认按互斥建**（提问预算 ≤1 次时，这一次优先给"分支类型"，不要花在粒度/审批人等可推断项上）。`inclusive` 三条硬约束：① 条件必须 `conditionGroup` 格式，且条件节点同级要带 `branchForm`+`formTableCode`（gotchas #12）；② **不得用 `isDefault` 兜底分支**，每条分支都要有明确条件；③ 聚合节点 `inclusive_end` 由 `build_process_json` 自动生成，**禁止手工插入**（gotchas #13）。④ **「表单内每个组件一条分支」类需求，条件规则必须按控件族分流**：范围查询只属**日期 / 时间 / 数值**族；文本 `input`/`textarea` 与公式 `formula` **无「在范围内」**（用等于/不等于/模糊/空值类），文件 `file-upload` **仅 为空 / 不为空**——整表统一铺一种规则会写出该控件下拉里不存在的项：**服务端不校验**，save/deploy/回读全绿，只有人打开设计器才看到（下拉无该项、值框渲染异常）。规则表见 `miniflow-node-types.md` 二十节，踩坑记录见 gotchas #85。结构细节只读 `miniflow-node-types.md` 六节。
+> **⚠️ 分支类型消歧（2026-09-10「全控件表单」误建返工）：** 用户口中的「**包含分支 / 包容分支 / 相容分支**」= `inclusive`（**不是**动词「包含」+「分支」；「包含分支审批」要读成「包含分支 + 审批节点」）、「**互斥 / 排他分支**」= `exclusive`、「**并行分支**」= `parallel`——出现这些词一律**先按节点名解释**。用户只说「分支」而没点名类型时，建流前用 `AskUserQuestion` 让用户在 **互斥 / 包含 / 并行** 三选一，**禁止默认按互斥建**（提问预算 ≤1 次时，这一次优先给"分支类型"，不要花在粒度/审批人等可推断项上）。`inclusive` 三条硬约束：① 条件必须 `conditionGroup` 格式，且条件节点同级要带 `branchForm`+`formTableCode`（gotchas #12）；② **不得用 `isDefault` 兜底分支**，每条分支都要有明确条件；③ 聚合节点 `inclusive_end` 由 `build_process_json` 自动生成，**禁止手工插入**（gotchas #13）。
+> ⚠️ **「相容分支」是明道云设计器自己的叫法**，2026-09-20 实测：需求原文写「相容分支（各分支互不排斥、可同时走，最后聚合）」，因为本别名表当时**没有「相容」这个词**，grep 0 命中 → 被当成 `parallel` 建，**5 个分支的条件整组丢失**、变成无条件全跑（设「一般项目」和「重点项目」同时执行，看谁后写），而 save/deploy/回读/契约检查**全绿**。判据：**需求给每个分支都写了条件 + 说「互不排斥、可同时走」→ 就是 inclusive**；`parallel` 只用于**真的无条件并行**。
+> ⚠️ **⑤ 第四条硬约束（2026-09-20 实测事故）：必须保证「任何取值下至少有一条分支命中」。**
+> 一条都不命中时 token 停在网关、实例永不结束 —— 触发记录 `bpm_status` 卡 **2(处理中)**、
+> 被锁编辑，且 `/act/task/list` 为 0、不在「我的发起」，**看不出是流程问题**。
+> 最典型的漏法是「枚举 `eq/in` 分支没覆盖**字段为空**」，而非必填字段新建时正好就是空。
+> 因 ② 不许用默认分支，兜底要写一条**显式「为空」条件分支**（`nodes: []` 无动作），
+> 规则必须在**该控件族**的合法集内（文本类没有 `not_in`）。排查/解锁与完整实证见
+> `node-contract.md` §6「inclusive 必须至少命中一条」。④ **「表单内每个组件一条分支」类需求，条件规则必须按控件族分流**：范围查询只属**日期 / 时间 / 数值**族；文本 `input`/`textarea` 与公式 `formula` **无「在范围内」**（用等于/不等于/模糊/空值类），文件 `file-upload` **仅 为空 / 不为空**——整表统一铺一种规则会写出该控件下拉里不存在的项：**服务端不校验**，save/deploy/回读全绿，只有人打开设计器才看到（下拉无该项、值框渲染异常）。规则表见 `miniflow-node-types.md` 二十节，踩坑记录见 gotchas #85。结构细节只读 `miniflow-node-types.md` 六节。
 
 > **⚠️ 流程里含 get_one / get_more 时：save 前必做三条自愈**——补 `attr.formTableId`（builder 落 null）、删 `attr.limitNum`（写 0 会被设计器显示成「限制数量 1」）、`formTableList` 兜底按 `nodeId` 单键判重。三条的写法与实证见 `SKILL.md`「修改已有简流」get_more 段末（不要为此另开探查轮）。
+
+> **⚠️ `data_add` 写「他表字段」目标时，平台按其自身 `showField` 重算并覆盖流程里显式带的值**（目标字段配置错 → 带过去的也错；2026-09-17 实测：开票申请.客户编码 showField 误配成客户名称，流程带了正确编号仍被覆盖显示"百度"）。带值结果不对先查目标字段配置，别改流程映射；公式/汇总字段同理见 gotchas #91。
+
+> **⚠️ 简流内 `data_add` 建出的记录不会触发目标表的 tableEvent 流程**（引擎内部写入绕过工作表事件；界面/`POST /desform/data/add` 这类数据接口写入才会触发）。需要「上游流程建的单据也起下游审批/流程」时，把**上游流程记录**（发起方那条）的 `triggerOtherProcess` 置 `"1"`（默认 `"0"`）：`POST /act/designer/miniDesFlow/api/saveFlow`（x-www-form-urlencoded，带 id/updateCount/processJson/processName/processKey/processType/lowAppId/startType），**无需重新 deploy**（2026-09-17 实测：置 1 后同一流程即时起实例）。
+> **2026-09-21 起走声明式：`flow(..., trigger_other=True)`**，`build_flows` 保存时随 config 发 `triggerOtherProcess:"1"`，
+> `--update` 重存也保得住。别再建完单独打 saveFlow 补（那样每次重存都被冲回 0，进销存两次踩到）。
 
 > **⚠️ 二次 save / 修复重发必带 lowAppId（实测静默清空事故）：** 对已存在的流程再次 save（修复节点、改分支、重发等）时，后端用请求里的 `lowAppId` **原样覆盖**数据库字段——config 是重新拼的、lowAppId 留了空/占位即被清成空串：**流程不删、引擎照跑、save/deploy/回读全绿，只在应用简流列表里消失**（按 `extActProcess/list?lowAppId=` 查不到）。重发前必须 `query_flow` 从记录回取 `rec['lowAppId']` 填进 config（同「修改已有简流」铁律），**禁止**沿用首轮记忆的 id 之外再留空；批建多流程收尾时按 `lowAppId` 过滤列一次流程核对条数（期望=主流程+子流程总数），缺的逐条 queryById 查 `lowAppId` 是否为空并补 save（urlencoded 带 lowAppId）+ 重发。
 
@@ -253,6 +275,12 @@ if result.get('success'):
 
 同轮要建 ≥3 条流程时，按本节执行；否则按上文普通流程走。
 
+> ⚠️ **手写批建脚本时，第一件事是查重（幂等）** —— 完整规则见 `batch-flows.md`「幂等与失败处理」。
+> 脚本崩在中途（部门/角色不存在、字段名解析失败、断言不过）是常态，而**重跑是唯一的恢复手段**；
+> 脚本没有「同名已存在就跳过」时，重跑就会**再建一份副本**。副本的代价不止是脏数据：
+> `query_flow` 按名只返回最新一条，于是「改的/回读的是新的那条、校验器查的是全部副本」，
+> 表现为**反复修但违例不消失**（详见 `node-contract.md` 自检段的同名副本陷阱）。
+
 **1. 结构探查一次做完全员共享。** 主会话先跑一个探查脚本：`fetch_app_forms` + 涉及各表 `fetch_form_fields`，把 `{表code: {字段中文名: {model,type,options}}}` dump 成 JSON 放 `{tmpdir}/jeecg-desform/`（如 `probe_<应用名>.json`）。各流程脚本直接读文件取 model，**禁止**每条流程重复 fetch；跨进程（子代理）无法复用会话缓存，共享文件是唯一的复用通道。
 
 **2. 代理拆分：一代理 ≤2 条流程；预估 >15 节点的流程独占一个代理。** 简单流程（按钮改当前行、单 get_one+data_update、删除触发记录）模板内嵌 prompt，代理零文档阅读；只有大流代理才允许 grep node-types。
@@ -262,6 +290,7 @@ if result.get('success'):
    - data_update：完整 `updateFields` 注入 `attr`（只增键不整块替换，attr 里已有 expressionType/expressionValue）；⚠️ **val 为空串 `''` 的条目首次 create 会被服务端静默丢弃**（save success、回读才暴露），「清空字段」类条目须 create 后带 flow_id 二次 save 再 deploy 才持久化（实测）
    - get_one/get_more：补 `attr.formTableId=f'form_{节点id}_{表code}'`、删 `limitNum`；get_more 批量更新还须 `formTableSourceGetDataType=1` 且 formTableId 指向**源** getMore
    - 分支条件：buttonEvent/get_one 结果字段**不进自定义 EL**，用字段条件组（branchType 1 + branchForm 指向 start/search 节点）
+   - **日期字段「= 当前日期 / 当前时间」禁止插运算节点**：值直接写系统变量——`updateFields` 的 `val` / data_add 的 `formModel` 用 `{"formNodeType":"system","variableValue":"nowDate"/"nowTime","variableName":"当前日期"/"当前时间"}`（配 `valueType:3` + `valType:"variable"`，date 字段另加 `options.format`），见 node-types §3.1 类型 2 / §九 ③。只有规格写「运算：取当前日期」或需要 `+N 天 / 时间差` 时才用运算节点（gotchas #41）。2026-09-20 用户指出：无脑插 `+0D` 运算节点会凭空多出一个节点、与规格不符（本地 CRM【线索领取】返工）
    - 运算节点：builder 会把无 formula 的运算登记成 function-number，手拼 fun 节点用 `FunBuilder`（见下）保证 function-fun 登记正确
    - **edit（填写）节点：填写人=表单字段时 `variableTitle` 必须写字段中文名**（面板「指定填写对象」的唯一显示来源；只写 `variableContent` → 画布卡片正常但面板为空，2026-09-16 用户实测「员工考勤确认 没有值」）。`build_approver_group` 已自动从 `variableContent[0].fieldLabel` 派生、`_get_approver_content` 也已纳入，**正常走 builder 无需手写**；只有手改已有流程 JSON 时要显式补 `variableTitle`
    - **edit（填写）节点 + approver（审批）节点都要写 `content`（办理人显示名）**——⚠️ **两类节点同病**：`content` 为空时画布卡片都渲染成灰色「设置这个节点」，用户会当成「人员没了」。**审批节点别以为 builder 会自动填**：`assigneeByName`（点名到人）会，**`assigneeByVariable`（办理人=表单字段）不会**（2026-09-16 实测：4 个审批节点全空，而 edit 的同类节点因先修过而正常）。（界面自己拼「填写人：」前缀，落库不写前缀、不写节点名）。取值口径：绑定表单字段 → 字段中文名（`'直接上级'`/`'部门主管审批人'`/`'姓名'`）；表达式/内置解析（`assigneeByExp` 等）→ **语义名**（`${applyUserId}` → `'获取发起人'`）；角色/岗位/部门 → 对应名称。⚠️ **禁止把表达式原文写进 content**（写成 `'assigneeByExp(${applyUserId})'` 时画布卡片原样显示这串代码，2026-09-16 用户实测指着卡片纠正「这里应该是 获取发起人」；正确值就在同节点 `approverGroups[0].expressionsNames[0]`，自愈直接取它）。整单自愈：`query_flow` → 改 `childNode.content` → `save_flow(flow_id=, update_count=)` → `deploy_flow`
@@ -269,8 +298,17 @@ if result.get('success'):
      > **自愈位置：`build_process_json` 之后、`save_flow` 之前**（改 config 无效，builder 会再清一次）。做法：walk pj 取所有 **`type in ('edit','approver')`** 节点（⚠️ 只取 `'edit'` 会漏掉审批节点——2026-09-16 就是这么漏的），`content` 为空 / 含 `$` / 含 `assigneeBy` 时按办理人来源回填，取第一个命中的：`approverNames[0]` → `expressionsNames[0]` → `variableContent[0].fieldLabel`（表单字段，即中文名）→ `roleNames[0]`/`deptNames[0]`/`postNames[0]`。收尾断言：**这两类节点全部** `content` 非空且**不含 `$`、不含 `assigneeBy`**。批建时这条断言要跑在**每条**流程上，不能只抽查。
      > **与 content 同批要自愈的第二个键：`variableTitle`。** 凡 `assigneeByVariable`（办理人=表单字段）的组，**必须写 `variableTitle: [字段中文名]`**（= `variableContent[0].fieldLabel`）；留空则**配置面板**的「指定填写对象」显示成空的「+ 添加人员」，而画布卡片 content 是正常的——两个键坏在不同界面，只修一个会以为已经好了（2026-09-16 实测：12 个「办理人=表单字段」节点**全部** variableTitle 为空——其中 8 个是 edit、4 个是 approver；注意别与「13 个 edit 节点」的字段权限数混淆，两个口径不同）。回读断言：walk 所有 `approverGroups`（顶层 + `attr` 两份），`assigneeType=='assigneeByVariable'` 的组 `variableTitle` 非空。
    - 收尾回读：逐节点打印 `name / type / content / assigneeType`，重点断言 content 非空且**不含 `$`、不含 `assigneeBy`**（防止表达式原文漏进卡片文案）；save 前可一行自愈 `fixes = miniflow_creator.fix_edit_contents(pj)`（把误写成表达式原文的 content 换回语义名，幂等，返回待修清单，非空才 save+deploy）
+     > ⚠️ **回读断言的范围要放宽到「所有会渲染卡片的节点」，不止 edit/approver。** 同一类「落库值在设计器里解析不出可读名」已在三处各犯一次：更新节点「选择更新对象」匹配不上 `formTableList`（**gotchas #102**）、运算节点卡片掉进 `funText` 兜底露出裸存储串（**gotchas #103**）、本条的 edit/approver `content` 被清空。**三类一起扫**，别等用户逐个截图指出；扫描判据见 #103 末尾那张表。
    - **edit 节点字段权限不在 processJson 里**：`privileges` 对简流无效，必须建完流程后调 `POST /act/process/extActProcessNodePermission/saveOrUpdateBatch`（每字段 ruleType=1显示+2编辑两条；默认是「显示+可编辑」，所以「其余只读」要把**该节点用到的每个字段都写行**）。批量建流程时这是**独立收尾步骤**，save/deploy 全绿不代表权限已设（2026-09-16 实测：13 个 edit 节点全漏）。契约与档位表见 `field-perm-rule.md`。
    - 重发/改已有流程：`lowAppId` 必须从 `query_flow` 记录回取（见 SKILL.md「修改已有简流」）
+     > ⚠️ **重存时要传「建流时那份完整 config」，不能只传 processName/processKey/低代码归属几项**
+     > （2026-09-21 实测事故）：`save_flow` 的 config 不只用来读 name/key，**它会写流程记录列**。
+     > 只传少数键重存一次，记录的 `startType` 就被冲成 `manual`——root/`attr` 里的 `tableEvent` 还在，
+     > 但**引擎不再注册表事件监听（新增记录完全不发起）**，且低代码工作流列表把它从
+     > 「工作表事件」挪进「审批流程?」分类。**两类症状同源。**
+     > 判据：`/act/process/extActProcess/listProcess` 里每条的 `startType` 对不对得上分类。
+     > 重存正确写法 = 建流时的 config（`startType` / `formTableCode` / `formTableName` /
+     > `formTableId` / `titleField` / `startEventType` / `startTaskId` 一个不少）。
 
 **4. 助手函数（`scripts/miniflow_helpers.py`，契约取自线上已发布流程实测）：**
 
@@ -581,7 +619,8 @@ if result.get('success'):
 - **开关(switch)字段的条件值**：= raw 控件 `options.activeValue` 字符串（「是/开」；`fetch_form_fields` 对 switch 不返回 options），queryItem `type`/`valType` 写 `switch`（gotchas #53，2026-09-08 实测）。
 - **⚠️ 设计子表（内部子表）作触发字段（2026-09-09 实测，用户截图纠正）**：`fields` 接口**不返回** sub-table-design 容器——表单里有「内部子表」但 `fetch_form_fields`/raw fields 都看不到（只有外部子表 link-record 在顶层）。子表 model 要从**表单设计 JSON** 取：lowapp skill `query_form(code)['desformDesignJson']`（json.loads 后递归找 `type=='sub-table-design'` 的节点，model 前缀 `sub_table_design_`，`name`=中文名；也可从同表 summary 控件的 `options.linkTable` 间接看到）。startCondition 编码：`field`=子表 model、`columnName`=子表中文名、`type`=`sub-table-design`；空类规则 `empty`/`not_empty` 时 `val`/`valType` 写 **null**（与本应用用户/开关流程的 not_empty 样本同构）。`conditionFields` 同样写子表 model（update 触发时子表旧值走 redis 比对）。已实测建流程 save/deploy/回读通过。
 - **省市级联动(area-linkage)字段的条件值**：`val`=末级行政编码字符串（海淀区→`"110108"`）+ `allVal`=各级编码数组（`["110000","110100","110108"]`，北京市/市辖区/海淀区）；写名称路径字符串能 save/deploy 但设计器显示「未选中」、运行时也不匹配（gotchas #57，2026-09-09 实测）。
-- **⚠️ 部门选择控件（select-depart）的触发条件编码（2026-09-09 实测）**：`val` 写**部门 id 数组** `["<deptId>"]`、`name` 写**名称数组** `["研发部"]`——两处都要写；写字符串/None 设计器不识别、条件不匹配。部门 id 从 `GET /sys/sysDepart/queryTreeList` 该节点的 `id` 字段取（snowflake 或 UUID 视环境而定，以接口返回值为准）；行数据里该字段存储形态也是 id 数组 + `_dictText` 名称。同族控件 select-user（用户）的编码是 `val`=**username 标量** + `name`=**显示名标量**（如 `"val":"admin","name":"管理员"`；写 userId 或 id 数组设计器「未选中」，2026-09-09 用户 UI 实测纠正）——三者形态不同，勿互相套用。
+- **⚠️ 部门选择控件（select-depart）的触发条件编码（2026-09-09 实测）**：`type`/`valType` 写 **`select-depart`**（**不是** `input` —— 写 `input` 会让设计器按文本族给运算符，`属于`/`不是任何一个` 不在文本族列表里、下拉退化成显示原始码；同族控件 `org-role` 的条目也写明 `type`/`valType` 写 `org-role`）；`val` 写**部门 id 数组** `["<deptId>"]`、`name` 写**名称数组** `["研发部"]`——两处都要写；写字符串/None 设计器不识别、条件不匹配。
+  > ⚠️ **他表字段指向部门控件时同理**：族取 `options.fieldType`（= `select-depart`），不是 `link-field` 也不是 `input`。详见 `miniflow-node-types.md` §二十「他表字段的‘族’取 `options.fieldType`」与 gotchas #104。部门 id 从 `GET /sys/sysDepart/queryTreeList` 该节点的 `id` 字段取（snowflake 或 UUID 视环境而定，以接口返回值为准）；行数据里该字段存储形态也是 id 数组 + `_dictText` 名称。同族控件 select-user（用户）的编码是 `val`=**username 标量** + `name`=**显示名标量**（如 `"val":"admin","name":"管理员"`；写 userId 或 id 数组设计器「未选中」，2026-09-09 用户 UI 实测纠正）——三者形态不同，勿互相套用。
 - **⚠️ 组织角色控件（org-role）的触发条件编码（2026-09-09 实测，用户 UI 纠正）**：`val` 写**角色 roleCode 字符串**（不是 roleName 中文名、也不是 roleId！），`name` 写 `null`，`type`/`valType` 写 `org-role`。写中文名能 save/deploy 但条件不匹配。`fetch_form_fields` 对 org-role **不返回 options**，roleCode 必须用 `GET /sys/role/list?pageSize=200` 按 roleName 找——取该记录 `roleCode` 字段的短随机码（6~12 位字母数字），**不是 `id` 字段的 snowflake 长串**。**⚠️ 该接口不按租户过滤（实测 21 条里混有 tenantId=0/None/其他租户），必须先按 `tenantId == 当前租户` 过滤再按 roleName 找**；写别租户的同名角色 roleCode 能 save/deploy，但设计器值框显示空、条件无效——**角色控件是租户隔离的**（设计器选择器只显示本租户角色；用户/部门本环境 tenantId 全 null、不隔离，2026-09-09 实测）。**筛选条件多条时不要自行加 且/或 组**——用户没说就是单条，实测组级 matchType 写 `and` UI 仍显示「或」且跨租户值渲染为空行（2026-09-09 用户纠正）。UI 原生样本（rule=eq，field/columnName 换成目标环境实际值）：
   ```json
   {"rule": "eq", "ruleName": "等于", "valueType": "1",
@@ -590,7 +629,9 @@ if result.get('success'):
    "type": "org-role", "valType": "org-role"}
   ```
 - **⚠️ builder 落库键映射（回读/修复要查落库键，不是 DSL 键，2026-09-08 实测）**：`build_process_json` 把 notice 的 DSL 键翻译成存储键——`noticeType`→`attr.type`、`noticeTitle`→`attr.title`、`noticeContent`→`attr.templateContext`（attr 内还落 `toUserIds`/`toUserNames`）。回读校验消息内容查 `attr.templateContext` 而非 `noticeContent`（查 DSL 键会误判「内容丢失」多花一轮修复）；修复消息节点内容/标题时直接改 `attr.title`/`attr.templateContext` 落库键。
-- **⚠️ link-field（他表字段控件）触发条件编码（2026-09-09 用户实测纠正）**：`type`/`valType` 写 **`input`**（UI 原生，勿照抄字段 type 写 `link-field`——能 save/deploy 但运行时条件不匹配、流程不触发）；`val` 写**设计器选择器里显示的选项文本**（勿按口述词写：实测口述「家居」、实际选项为「家具」，照抄口述词条件永不成立）。触发字段/监控字段 `conditionFields` 仍写该字段 model。
+- **⚠️ link-field（他表字段控件）触发条件编码（2026-09-09 用户实测纠正；2026-09-20 修正）**：`type`/`valType` 写**它指向的那个控件的族** = `options.fieldType`（**不是**照抄 `link-field`，也**不是**一律 `input`）。本段 2026-09-09 的原结论是「写 `input`」——那条实证的样本**恰好是指向文本控件**的他表字段（`fieldType='input'`），被错误地推广成「所有他表字段」。指向 `select-depart` 等组织控件时必须写 `select-depart`，否则设计器按文本族给运算符、`属于` 退化成原始码 `in`（2026-09-20 用户截图实证，全案 gotchas #104）。`val` 写**设计器选择器里显示的选项文本**（勿按口述词写：实测口述「家居」、实际选项为「家具」，照抄口述词条件永不成立）；部门类目标的 `val` 要写 **id 数组**（同上一段）。触发字段/监控字段 `conditionFields` 仍写该字段 model。
+  > ✅ **`build_flows` 自 2026-09-20 起自动做这个映射**（`Resolver.family()` 解族 —— **链式他表字段沿 `showField` 递归解到最底层控件**；`cond_value()` 按族编码值；**解析不出族直接报错、不回落**），查询条件与网关分支条件两处都走它——走 DSL 建流不必手改；手拼 JSON / 改存量流程时才要自己按本段写。
+  > ⚠️ 另有一道**前置条件**：该他表字段必须是 **`saveType='save'`（存储数据）**，`view`（仅显示）的不可作条件；而 `LINK_FIELD()` **默认就发 `view`** —— 需求写「存储数据模式」的必须显式传 `save_type='save'`（gotchas #86 / `desform-cross-form-binding.md` 七）。
 - **实测验证**：add_data 一条满足条件的记录 → `GET /sys/annountCement/listByUser`（带 X-Tenant-Id 头）出现消息且只有正确收件人收到；不满足条件的记录不触发。
 
 ### G. 消息模板引用运算节点结果（写正文变量前必读 gotchas #55）
@@ -689,6 +730,7 @@ pj.setdefault('formTableList', []).insert(0, {'formTableId': f'form_{op_id}_func
 - **状态字段语义映射**：目标选项不存在时用已有近似选项（如无「待支付」→「未付款」）并在交付说明中写明，不私自造选项。选项来自字典/工作表时 val 写 itemValue（gotchas #40）。
 - **逐行发消息必须走子流程（用户 2026-09-09 定论）**：主流程 message 节点不逐行；子流程内 var 条目 `nodeType='search'`（子流程行上下文，nodeTypeMain=getMore）、`formTableId=form_{父getMore节点id}_{表code}`、`nodeId=父getMore节点id`（start 上下文才是 `'table'`/`form_start_`；主流程直连 getMore 的 `'getMore'` 形态只可在设计器选到人、运行不逐行）。正文要引用记录字段时另见组合 G/gotchas #55（jsonContext 需 md5+base64）。
 - **数据批量更新**：必须 `formTableSourceNodeType='getMore'` + `formTableSourceTaskId=<getMore节点id>` + `formTableSourceGetDataType=1`（组合 E2）；写成 `'search'` 引擎静默不批量写库。
+  > ⚠️ **这三个键都必须在 `attr` 里**（`attr.formTableSourceGetDataType` 等），**不能写在节点顶层**：`miniflow_creator.build_data_update_node` 的 attr 是「固定键字典 + `node_config["attr"]` 透传」，顶层键**不会被搬运、直接丢掉**，且 save/deploy/回读节点其他字段全正常。2026-09-20 实测：补这个键时写在顶层，回读 `attr.formTableSourceGetDataType` 是 `None`，批量更新一个字没写。
 
 ### I. timerEvent「仅执行一次」+ 全员系统公告站内消息（2026-09-09 实测交付）
 

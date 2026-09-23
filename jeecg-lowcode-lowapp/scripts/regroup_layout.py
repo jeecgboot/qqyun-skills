@@ -11,9 +11,20 @@
       "采购退货": [
         {"标题": "采购订单信息", "字段": ["选择采购订单", "采购订单名称", "采购订单编码"]},
         {"标题": "退货信息",     "字段": ["退货申请日期", "退货原因", "退货产品总数"]},
-        {"标题": "退货产品明细", "字段": ["退货产品明细"]}
+        {"标题": "",             "字段": ["退货产品明细", "退货产品总数"]}
       ]
     }
+
+⚠️ **`标题` 是「要不要画一条分隔线」的开关，不是分组的必要条件**：
+
+- 标题**非空** → 该节前面插一个 `divider`（段标题）
+- 标题**留空串** → **只分组、不画线**（分卡与字段顺序照旧按分节走）
+
+所以**需求点名了「XX（分隔符）」才写标题**，没点名的表一律留空串。
+2026-09-18 实测事故：给每张表的每个分节都填了语义标题，10 张没要求分隔符的表
+凭空多出 29 条分隔线，用户直接问「怎么多加了好多分隔符」。
+
+上面示例的第三行就是这种写法（该表需求没点分隔符）。
 
 ## 为什么要有这个脚本（2026-09-17 实测）
 
@@ -83,17 +94,16 @@ def widgets_of(design):
     return out
 
 
-def iter_widgets(items):
-    for it in (items or []):
-        if not isinstance(it, dict):
-            continue
-        yield it
-        for x in iter_widgets(it.get('list')):
-            yield x
-        for c in (it.get('columns') or []):
-            if isinstance(c, dict):
-                for x in iter_widgets(c.get('list')):
-                    yield x
+def iter_widgets(nodes):
+    """（薄封装）控件树遍历**统一走 `design_utils.iter_widgets`**。
+
+    这里原先自带一份，与 `patch_fields` 那份对「card 的子控件放在 `list` 还是
+    `columns`」的假设不一致 —— 2026-09-20 实测：走错的那份在一张 47 表的应用上
+    **一个控件都找不到**，且不报错。收敛成一份，改解析只改 `design_utils`。
+    """
+    from design_utils import iter_widgets as _iw
+    for x in _iw(nodes):
+        yield x
 
 
 def prewarm(api_base, token, tenant_id, app_id):

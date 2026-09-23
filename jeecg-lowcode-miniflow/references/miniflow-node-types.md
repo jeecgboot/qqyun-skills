@@ -343,7 +343,7 @@
 | 审批人为空时 | `assigneeIsEmpty` | 0 | `0`=不自动跳过（默认）/ `1`=自动跳过该节点 |
 | 审批人=发起人时 | `skipApproval` | 0 | `0`=由发起人自己审 / `1`=自动跳过 / `2`=转交部门负责人（该办理人须有部门且部门有负责人） |
 | 超时提醒 | `nodeTimeout` + `timeDate` | null | 超时**小时数**（数字，最小 0.5，如 48=48 小时）。**两个字段必须同值且同时设，缺 `nodeTimeout` 整块不生效**；常配 `timeType:"timeDate"` |
-| 意见分支开关 | 审批节点 `hasResultBranch` / 填写节点 `approvalEnabled` | false | 只有为 true，该节点后才能挂 `opinion`(suggest)；否则设计器里按钮灰置 |
+| 意见分支开关 | 审批节点 `hasResultBranch` / 填写节点 `approvalEnabled` | false | 只有为 true，该节点后才能挂 `opinion`(suggest)；否则设计器里按钮灰置。⚠️ **审批节点后面挂了 `approve_result`（意见分支）时，本键必须 `true`**——模板默认 false，false 时后端不生成 `ApproveResultBranchListener`，运行期网关求值抛 `Unknown property used in expression: ${approve_result_taskXXX == 'Y'}`（2026-09-21 实测，8 条审批流全中）。`build_node_chain` 已自动处理；手工拼 JSON 时自己置 true，并回读 BPMN grep 该 listener 自检 |
 | 审批方式 | `approvalMethod` | 固定 `1` | 会签类型由**节点级** `approvalMode` 区分，见 1.3 |
 
 > ⚠️ **`formEditStatus` 与字段权限是两回事**：前者是「这张表单在这个节点**整体**能不能改」，
@@ -642,6 +642,13 @@
 | `null` | 为空 | `notNull` | 不为空 |
 | `in` | 是其中一个 | `not_in` | 不是任何一个 |
 | `between` | 介于两值之间 | | |
+
+> ⚠️ **本表是「通用规则集」，按控件族取码时**以 `node-contract.md` §6.0 为准
+> **（2026-09-21 实测事故）：`link-record` / 子表 的「为空 / 不为空」规则码是
+> `empty` / `not_empty`，不是本表的 `null` / `notNull`，且 `val` / `name` 都写空数组。**
+> 写成 `notNull` 时 save/deploy/回读全绿，但该条件每次求值都出错 →
+> **`inclusive` 网关永远到不了 `inclusive_end`**（记录 `bpmStatus` 永久停在 2 被锁），
+> 且**与哪条分支命中无关**——即"补了兜底分支也照样卡"。
 
 > ⚠️ **分支下条件值形态勘误（2026-09-10 用户 UI 实测纠正；「分支下」= 互斥/包含网关 conditionNodes 的条件行，与触发条件 startCondition 是两套场景，勿互套）**：
 >
@@ -2381,16 +2388,42 @@ approver_node["childNode"] = approve_result_node
 
 | 控件族 | 规则下拉可选 |
 |--------|-------------|
-| 文本 `input` / `textarea` | 等于、不等于、全模糊、左模糊、右模糊、为空、不为空（**无** 大于/小于/在范围内） |
+| 文本 `input` / `textarea` | 等于、不等于、全模糊、左模糊、右模糊、为空、不为空（**无** 大于/小于/在范围内，**也无** 属于/不是任何一个） |
 | 公式 `formula` | **无「在范围内」**（等于可用） |
 | 文件 `file-upload` | **仅 为空 / 不为空** |
+| 单选/多选 `select`·`radio`·`checkbox` | 等于、不等于、**属于 / 不是任何一个**（`in` / `not_in`）、空值类 |
+| 组织类 `select-depart`·`select-user`·`org-role` | 同单选族，**含 属于 / 不是任何一个** |
 | 日期 `date` / 时间 `time` / 数值 `number`·`integer`·`money`·`rate`·`slider` | 比较类（`gt`/`ge`/`lt`/`le`…）+ **`range`（在范围内）** |
 
 要点：
 
-- **他表字段 `link-field` 仅「存储数据」模式可作条件**：`options.saveType=="view"`（仅显示）的字段**不可**用作条件（查询条件/分支条件同），服务端不校验、写了照样 save/deploy；要按该语义检索请改用其来源的**关联记录（link-record）**字段（见 gotchas #86）。条件编码另见上表：link-field 的 `type`/`valType` 写 `input`。
+- **他表字段 `link-field` 仅「存储数据」模式可作条件**：`options.saveType=="view"`（仅显示）的字段**不可**用作条件（查询条件/分支条件同），服务端不校验、写了照样 save/deploy；要按该语义检索请改用其来源的**关联记录（link-record）**字段（见 gotchas #86）。
+- **⚠️ 他表字段的“族”取 `options.fieldType`（= 它**指向**的那个控件的族），既不是 `link-field`、也不是恒等于 `input`（2026-09-20 纠正）：** 条件条目的 `type`/`valType` 必须写**该族**，设计器才按对的族给运算符列表。
+  - 写 `link-field`（照抄自己的 type）→ 设计器不认这个族，条件那格显示成原始 model；
+  - **一律写 `input`** → 只对「指向**文本**控件」的他表字段碰巧成立。指向 `select-depart` 时设计器按**文本族**给运算符，而文本族**没有 `属于`(in) / `不是任何一个`(not_in)`**（见上表）→ 下拉匹配不上、**退化成显示原始码 `in`**，而 save/deploy/回读/契约检查全绿（2026-09-20 实测，用户截图「生成机会编号报销 条件规则显示不对」；全案见 gotchas #104）。
+  - 本条此前写「link-field 的 `type`/`valType` 写 `input`」，与本页 `create-flow.md` 触发条件段同源；那条实证的样本**恰好是指向文本控件**的他表字段，被错误地推广成了「所有他表字段」。**以本要点为准。**
+  - **⚠️ 链式他表字段（他表字段指向的又是他表字段）必须沿 `showField` 递归解到最底层**：中间层的 `options.fieldType` **就是字符串 `'link-field'`** —— 照抄它正好又落回「设计器不认」那个族。2026-09-20 本应用实测三档：`销售合同.销售部门`→`机会目录.销售部门`(1 跳, `select-depart`)、`回款记录.销售部门`→`销售合同.销售部门`→`机会目录.销售部门`(**2 跳**)、`客户联系人.单位全称`→`目标客户.单位名称`(1 跳, `input`)。**解不到底就报错，禁止回落。**
+- **条件值按族给形态 —— 四族的编码各不相同（写错都只静默不匹配）：**
+
+  | 族 | `val` | `name` | 依据 |
+  |---|---|---|---|
+  | `select-depart` | **部门 id 数组** | **部门名称数组** | 2026-09-09 用户 UI 实测；写名称能 save/deploy 但引擎按 id 比对 → 条件永不成立 |
+  | `select-user` | **username 标量** | **显示名标量** | 同上；写 userId 或 id 数组设计器「未选中」 |
+  | `org-role` | **roleCode 字符串** | `null` | 写角色中文名能 save/deploy 但条件不匹配 |
+  | `date` | **毫秒时间戳 int** | `null` | 写日期串能 save/deploy 但**运行时恒不成立**（存储=毫秒，数字 vs 字符串必 false），设计器值框还会显示错日期 |
+  | 其余（`input`/`select`/`money`/…） | 原样 | `null` | `select` 多选就用名称数组，2026-09-20 实测渲染正常 |
+
+  `build_flows.cond_value()` 自 2026-09-20 起按上表编码：`select-depart` 把规格里的部门**名称**翻成 id（`Resolver.dept_id`，带租户过滤 + 部门树递归展平）、`date` 把日期串转本地零点毫秒（已验证 `'2026-09-11'` → `1789056000000`）、`select-user` 要求写成 `(username, 显示名)` 二元组（**只给 username 会让 `name` 为空 → 设计器不识别，故拒绝裸字符串**）。**认不出一律报错、不回落。**
 - **范围查询只属于日期 / 时间 / 数值族**；文本与公式走等值/模糊类，文件类走空值类（`val=[]`+`name=[]`+`valType=""`）。
 - 「表单内每个组件一条分支」类需求**按族分流铺规则**，不要整表统一一种规则（整表统一 = 必然给某些控件写出下拉里没有的项）。
+- **⚠️ 汇总 `summary` / 公式 `formula` 字段「无匹配记录」时落库是空串 `''`（或 null），不是 `0`** —— 所以
+  **等值类条件（`不等于 0` / `等于 0`）在这种字段上会误命中**：`'' != "0"` 判**真**，
+  「没有销售合同」的机会会被当成「有销售合同」执行分支（2026-09-22 销售管理实测：
+  `销售合同数 不等于 0` → 写 `机会状态='4'已签订销售合同`，1 张合同都没有的机会全被误标）。
+  真机数据佐证：计数字段存 `''`、求和字段存 `null`，两者都非 `0`。
+  **计数类一律用比较类规则表达**：`大于 0`（计数非负，等价于「有值」），空值参与数值比较不成立 → 天然排除空。
+  该 `type`/`valType` 仍写 `summary`（金标 `example/流程触发示例.md:1188` 对汇总字段用的就是 `ge`）。
+  比较类（`gt/ge/lt/le`）与空值类（`empty`/`not_empty`）不受此影响；**`ne`/`eq`/`in`/`not_in` 全部受影响**。
 - 日期 `range` 两端仍必须写**毫秒时间戳 int**（见 4.5 / gotchas #52、#77）；时间 `time` 写 `"HH:mm:ss"` 字符串。
 - 分支**卡片正文**那行是设计器前端按 `conditionGroup` 原始值现拼的（不读节点 `content`），日期类必然显示毫秒；卡片**标题**读 `name`（可读）。属渲染表现，改 JSON 无效。
 

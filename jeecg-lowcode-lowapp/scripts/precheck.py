@@ -42,12 +42,28 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from spec_infer import normalize_containers                     # noqa: E402
+
 #: patch_fields 的重入轮数（带出字段可能由另一条关联建出来）
 ROUNDS = 3
+#: DATE 工厂的 date_type 合法集（工厂自述；`dateType` 经创建器映射成工厂的 `date_type`）
+DATE_TYPES = {'year', 'month', 'quarter', 'week', 'date',
+              'datetime_s', 'datetime_sf', 'datetime'}
+#: 字段名 → 档位线索，**按长的先匹配**。只收歧义极小的复合词：
+#: 「时间」二字故意不收（外出时间=datetime / 跟进时间=date，名字判不出来）。
+DATE_HINTS = (('日期时间', 'datetime'), ('年份', 'year'), ('年月', 'month'),
+              ('季度', 'quarter'), ('年周', 'week'))
 
 errs, warns = [], []
 BY_NAME = {}          # 表名 → 表单定义
 EFF = {}              # 表名 → 自身字段 ∪ 关联带出的字段（收敛后）
+RECORD_COUNT_WAYS = {'计数', '记录数', '记录数量', '条数', '总数', '数量'}   # 记录数量不引用列，「汇总列」可省
+SUMMARY_WAYS = {'求和', '合计', '平均', '平均值', '均值', '最大', '最大值', '最小', '最小值',
+                '计数', '记录数', '记录数量', '条数', '总数', '数量', '已填计数', '未填计数'}
 SUBS = set()          # 已定义的子流程名（call_sub 解析用）
 SPEC = {}             # 整份规格（get_more(from_="start") 要查 links）
 NODES = {}            # 流程名 → {节点名: 节点该表}（ref(node=...) 解析用）
@@ -113,6 +129,65 @@ def build_eff(spec):
         err('links：%s.%s → %s 带出 %s，%d 轮内落不下（目标表没有）'
             % (lk['表'], lk['字段'], lk['目标'], '、'.join(bad), ROUNDS))
 
+    # 「显示字段」是**只展示、不建控件**的列：名字必须本来就在目标表上。
+    # 不需要参与上面的收敛（它不产出字段），所以直接查最终态 eff 即可。
+    # 2026-09-20 加：此前规格表达不了「只展示不带出」，只能手写补丁，而补丁形状
+    # 写错是静默的（落 [{"field":…,"show":true}] 会被引擎忽略 → 只显示标题一列）。
+    for lk in links:
+        if lk.get('表') not in BY_NAME or lk.get('目标') not in BY_NAME:
+            continue
+        bad = [c for c in (lk.get('显示字段') or []) if c not in eff[lk['目标']]]
+        if bad:
+            err('links：%s.%s → %s 的显示字段 %s 在目标表里没有'
+                % (lk['表'], lk['字段'], lk['目标'], '、'.join(bad)))
+
+    # 单条关联只有「卡片 / 下拉」两档，**没有「表格」**。
+    # 2026-09-20 加：写 `显示:"表格"` 会落 `showType:'table'`，前端把单条渲染成一张表
+    # （用户实测 8 个）。patch_fields 现在会夹成卡片并打 WARN，但那是**建完才说**；
+    # 这里提前拦，省一轮真机。
+    for lk in links:
+        if lk.get('条数') == '单条' and lk.get('显示') not in (None, '', '卡片', '下拉'):
+            err('links：%s.%s 的「条数=单条」配「显示=%s」是非法组合'
+                '（单条只有卡片/下拉；设计器里没有「表格」这一项）'
+                '→ 改成「显示=卡片」或「显示=下拉」'
+                % (lk['表'], lk['字段'], lk.get('显示')))
+    # ⚠️ 2026-09-21：这条曾被**撤销过**，理由是「回读线上某进销存模版，里面就是
+    # single+table」—— **因果搞反了**：那 8 个正是同类错误污染出来的坏数据。
+    # 线上应用**不是标准**，它自己就可能不对；与设计器能力冲突时以**设计器**为准。
+    # 规则：需求量写「单条 + 表格」时**拦下来**，不要放宽校验。
+
+    # 「双向」= 两侧互填 twoWayModel（desform-link-record.md §六）。
+    # true = 目标表里**恰好一个** link-record 指回本表；写控件名 = 指名那一个。
+    # 2026-09-20 加：此前规格表达不了双向、patch_fields 里 twoWayModel 一处都没有，
+    # 需求被静默降级——接口全绿，应用里 twoWayModel 全空，只能靠人眼发现。
+    for lk in links:
+        if not lk.get('双向'):
+            continue
+        t, fld, tgt = lk.get('表'), lk.get('字段'), lk.get('目标')
+        if t not in BY_NAME or tgt not in BY_NAME:
+            continue
+        want = lk['双向']
+        if want is not True and not (isinstance(want, str) and want.strip()):
+            err('links：%s.%s 的「双向」只能是 true 或目标表里的回指控件名，收到 %r'
+                % (t, fld, want))
+            continue
+        # 回指控件必须由**另一条 links** 声明建出来：表=目标表、目标=本表
+        back = [x for x in links if x.get('表') == tgt and x.get('目标') == t]
+        if not back:
+            err('links：%s.%s 声明了「双向」，但「%s」没有任何关联记录指回「%s」——'
+                '另一侧需要一条 links（表=%s、目标=%s），否则双向无处可指'
+                % (t, fld, tgt, t, tgt, t))
+            continue
+        names = sorted({x.get('字段') or '?' for x in back})
+        if isinstance(want, str) and want.strip():
+            if want.strip() not in names:
+                err('links：%s.%s 的「双向」指名了「%s」，但「%s」指回「%s」的控件是 %s'
+                    % (t, fld, want, tgt, t, '、'.join(names)))
+        elif len(back) > 1:
+            err('links：%s.%s 的「双向」写 true，但「%s」有 %d 个控件指回「%s」（%s）——'
+                '歧义，请写成要指定的那个控件名'
+                % (t, fld, tgt, len(back), t, '、'.join(names)))
+
     for sm in (spec.get('summaries') or []):
         t, fld = sm.get('表'), sm.get('字段')
         lkf, col = sm.get('关联字段'), sm.get('汇总列')
@@ -124,8 +199,22 @@ def build_eff(spec):
         tgt = link_by.get((t, lkf))
         if not tgt:
             err('summaries：%s 没有关联记录「%s」' % (t, lkf))
-        elif col not in eff[tgt]:
+        elif (sm.get('方式') or '') not in RECORD_COUNT_WAYS and col not in eff[tgt]:
             err('summaries：%s.%s ← %s 没有列「%s」' % (t, fld, tgt, col))
+        # 父表汇总要能算，父表那侧的关联控件里得**有**子记录。子表也声明了指回父表的关联、
+        # 而这一对没写「双向」时：从子表侧建的行只填了子表那一侧，父表控件恒空 → **汇总恒为空**，
+        # 而 precheck/build_app/app_audit/postbuild_verify 四道检查都不报（2026-09-22 项目管理 R3：17 对全中）
+        if tgt:
+            lk = next((l for l in (spec.get('links') or [])
+                       if l.get('表') == t and l.get('字段') == lkf), None)
+            back = any(l.get('表') == tgt and l.get('目标') == t for l in (spec.get('links') or []))
+            if lk is not None and back and not lk.get('双向'):
+                err('summaries：%s.%s 汇总的是关联「%s」，而「%s」也有指回「%s」的关联 —— '
+                    '这一对必须写「双向」: true，否则从子表侧建的行不会进父表控件，汇总恒为空'
+                    % (t, fld, lkf, tgt, t))
+        if sm.get('方式') and sm['方式'] not in SUMMARY_WAYS:
+            err('summaries：%s.%s 的方式「%s」不认识（会被静默当成求和），可用：%s'
+                % (t, fld, sm['方式'], '、'.join(sorted(SUMMARY_WAYS))))
     EFF.clear()
     EFF.update(eff)
     return link_by
@@ -147,12 +236,64 @@ def check_forms(spec):
         for fld in (f.get('字典') or {}):
             if fld not in flds:
                 err('表「%s」字典字段「%s」不在字段列表里' % (name, fld))
+        # 中转字段（2026-09-21 加）：隐藏取值信封，默认值 = 「本表指向某表 X 的关联控件」
+        # 上的字段 Y。规格形态 `{"<本表字段名>": ("<X表名>", "<Y字段名>")}`。
+        # 四样都得在：本表字段名要声明、被指的 X 表要存在、X 表上要有 Y 字段、
+        # 且**本表必须有一条指向 X 的关联记录**（默认值就是顺着它取的，没有就取不到）。
+        # 静态查不出的只剩「默认值表达式拼得对不对」——那条交给 app_audit 回读真机。
+        for fld, pair in (f.get('中转字段') or {}).items():
+            if fld not in flds:
+                err('表「%s」中转字段「%s」不在字段列表里' % (name, fld))
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+                err('表「%s」中转字段「%s」要写成 ("父表名", "父表字段名")' % (name, fld))
+                continue
+            parent, pfield = pair
+            pf = next((x for x in (spec.get('forms') or [])
+                       if x.get('名称') == parent), None)
+            if not pf:
+                err('表「%s」中转字段「%s」指向的表「%s」不在 spec 里' % (name, fld, parent))
+            elif pfield not in (pf.get('字段') or []) \
+                    and pfield not in (pf.get('字典') or {}) \
+                    and pfield not in (pf.get('编号') or {}):
+                err('表「%s」中转字段「%s」取的「%s.%s」不在那张表的字段列表里'
+                    % (name, fld, parent, pfield))
+            if not any(l.get('表') == name and l.get('目标') == parent
+                       for l in (spec.get('links') or [])):
+                err('表「%s」中转字段「%s」要顺着一条指向「%s」的关联记录取值，'
+                    '但 links 里没有这条关联' % (name, fld, parent))
+
         for fld in list((f.get('编号') or {})) + list((f.get('公式') or {})):
             if fld not in flds:
                 err('表「%s」编号/公式字段「%s」不在字段列表里' % (name, fld))
+        # 日期粒度（2026-09-20 加）：需求写「年份 / 日期时间」时靠它声明。
+        # 档位取自 DATE 工厂的自述合法集；写错落成默认 date（年月日），接口全绿、
+        # 只有人打开新增页才看得出粒度不对。
+        for fld, dt in (f.get('日期粒度') or {}).items():
+            if fld not in flds:
+                err('表「%s」日期粒度 的「%s」不在字段列表里' % (name, fld))
+            if dt not in DATE_TYPES:
+                err('表「%s」的「%s」日期粒度「%s」不合法，可用：%s'
+                    % (name, fld, dt, ' / '.join(sorted(DATE_TYPES))))
+        # 字段名自带档位线索、却没声明 `日期粒度` -> **提示**（不是报错：名字只是线索，
+        # 需求才是准的；但漏声明的后果是静默落成年月日，只有人在新增页才看得出）。
+        # 只在**歧义很小**的复合词上提示（年份/年月/季度/年周/日期时间）；
+        # 「时间」单独一个词**不提示** —— 「外出时间」要 datetime、「跟进时间」要 date，
+        # 名字判不出来，硬猜反而误导（这正是档位必须显式声明的原因）。
+        for fld in flds:
+            hit = next(((k, t) for k, t in DATE_HINTS if fld.endswith(k)), None)
+            if not hit:
+                continue
+            kw, want = hit                      # 命中的关键词 / 建议档位
+            cur = (f.get('日期粒度') or {}).get(fld)
+            if cur is None:
+                warn('表「%s」的「%s」名字像「%s」，但没写 `日期粒度` —— 默认会落成年月日。'
+                     '若需求是「%s」请写 {"%s": "%s"}' % (name, fld, kw, kw, fld, want))
+            elif cur != want:
+                warn('表「%s」的「%s」声明了日期粒度「%s」，但名字像「%s」（%s）—— 确认哪个对'
+                     % (name, fld, cur, kw, want))
         # 静态选项（不绑应用字典的多选/单选，如 产品权限：销售/采购/赠送）。
         # 规格里不声明时 `spec_infer.infer` 只会给出 input，前端就是个空文本框。
-        for key in ('静态多选', '静态单选'):
+        for key in ('静态多选', '静态单选', '静态下拉'):
             for fld, opts in (f.get(key) or {}).items():
                 if fld not in flds:
                     err('表「%s」%s 的「%s」不在字段列表里' % (name, key, fld))
@@ -165,7 +306,7 @@ def check_forms(spec):
         # （决定绑字典的字段走 checkbox 还是 select）。字段**不在 `字典` 里**时它一个
         # 字都不起作用，直接落到 `infer()` → `input`——前端是个空文本框，不报错、
         # 不警告、预检也照样通过。2026-09-17 建 52 表应用实测踩到（产品权限静默变文本框）。
-        # 想表达「不绑字典的静态选项」只能写 `静态多选` / `静态单选`。
+        # 想表达「不绑字典的静态选项」只能写 `静态多选` / `静态单选` / `静态下拉`。
         for fld in (f.get('多选') or []):
             if fld not in flds:
                 err('表「%s」多选 的「%s」不在字段列表里' % (name, fld))
@@ -174,6 +315,158 @@ def check_forms(spec):
                     'checkbox 还是 select」的开关，不绑字典时它完全不生效，会静默落成'
                     '文本框。要静态选项请写成 `静态多选`：{"%s": ["选项1", "选项2"]}'
                     % (name, fld, fld))
+        # ⚠️ 需求写「下拉单选」时**别写 `静态单选`** —— 它固定落 radio（横排单选钮），
+        # 规格里没有别的档能建出「静态选项 + 下拉」。这一档 2026-09-20 才补上。
+        # precheck 只能提示、无法自动纠正（它只认字段名，读不到需求原文），所以这里
+        # 只在两者同时出现时拦重复声明。
+        for key in ('静态多选', '静态单选', '静态下拉'):
+            for fld in (f.get(key) or {}):
+                others = [k for k in ('静态多选', '静态单选', '静态下拉') if k != key]
+                if any(fld in (f.get(k) or {}) for k in others):
+                    err('表「%s」的「%s」被重复声明在多个静态选项键里（%s）——'
+                        '一个字段只能占一档，否则建壳取哪一档由分支顺序决定'
+                        % (name, fld, '/'.join([key] + others)))
+
+
+#: `类型` 会被这些**更高优先级**的声明静默盖掉（= build_app.split_fields 的 if/elif 顺序）。
+#: 盖住的后果是全链路静默：规格里写了类型、建出来是另一档，接口 / 回读 / 预检都全绿。
+TYPE_SHADOW_KEYS = ('字典', '静态多选', '静态单选', '静态下拉', '日期粒度', '编号', '公式')
+
+
+def check_types(spec):
+    """`类型`（显式叶子类型）必须真的落到控件上。
+
+    它是 `infer()` 猜名字猜错时的**唯一补救口子**（2026-09-20 实测：`技术协议`
+    推成单行文本，其实是附件上传）。但它在 build_app 的分支里排在 字典 / 静态选项 /
+    日期粒度 / 编号 / 公式 **之后**，被任何一个盖住都不报错；字段名写错则整条配置
+    永远不会被遍历到。两种情况都只能靠这份预检拦下来。
+    """
+    from spec_infer import explicit
+    for f in (spec.get('forms') or []):
+        name = f.get('名称')
+        types = f.get('类型') or {}
+        if not types or not name:
+            continue
+        flds = set(f.get('字段') or [])
+        # 关联记录 / 带出 / 汇总字段走补丁段，压根不进建壳分支 —— 写 `类型` 是死配置
+        patchy = set()
+        for lk in (spec.get('links') or []):
+            if lk.get('表') == name:
+                patchy.add(lk.get('字段'))
+                patchy |= set(lk.get('带出') or [])
+        patchy |= {s.get('字段') for s in (spec.get('summaries') or [])
+                   if s.get('表') == name}
+        for fld, tn in types.items():
+            if fld not in flds:
+                err('表「%s」类型 的「%s」不在字段列表里 —— 建壳按字段列表遍历，'
+                    '这个名字永远不会生效' % (name, fld))
+                continue
+            if fld in patchy:
+                # ⚠️ **提示，不是错误**（2026-09-21 校准）：`类型` 对补丁段字段确实是空操作，
+                # 但这是「规格里有冗余声明」，**应用照建、行为正确**（补丁段那个分支先命中，
+                # 带出的控件类型由**源字段**决定，通常与这里写的正好一致）。
+                # 之前判 err 会把「建得完全对的规格」堵在门外 —— 闸门只该拦**会盖错的**，
+                # 不拦**写了没用**的。真想据此发 `err`，得先拿到源字段类型（要联网），
+                # 静态判不出来。
+                warn('表「%s」的「%s」是关联记录/带出/汇总字段（补丁段建），'
+                     '`类型` 对它不起作用 —— 冗余声明，删掉更干净' % (name, fld))
+                continue
+            try:
+                explicit(tn)
+            except ValueError as e:
+                err('表「%s」的「%s」类型不合法：%s' % (name, fld, e))
+                continue
+            shadow = [k for k in TYPE_SHADOW_KEYS if fld in (f.get(k) or {})]
+            if shadow:
+                warn('表「%s」的「%s」同时写了 `类型` 和 %s —— 建壳的 if/elif 里后者优先，'
+                     '`类型` 会被盖掉；两个档一致就没事，不一致请二选一'
+                     % (name, fld, ' / '.join('`%s`' % k for k in shadow)))
+
+
+def check_undeclared(spec):
+    """**没落进任何类型声明的字段 = 靠 `infer()` 猜名字** —— 猜错是静默的。
+
+    建壳的 if/elif 链（字典 / 静态多选 / 静态单选 / 静态下拉 / 日期粒度 / 编号 / 公式 /
+    `类型` / `infer()`）里，前七档都没命中就掉到 `infer()` 按**字段名**猜。
+    猜错**不影响 save/deploy/字段权限/引用解析**，七道闸门一条都看不见，
+    界面上却是「想选选不了、想填填不进」：
+
+      2026-09-22 三处同源事故（都是这条）——
+        · `人员成本.职级`：需求写「关联记录 →职级 单条·下拉」，规格里这条 links **整条漏了**
+          → infer 猜成单行文本 → 界面上是只能手填的输入框（用户截图报障，显示裸值 `1`）；
+        · `客户.注册电话`：需求「单行文本」，规格写成 `手机号` → 落成 phone 控件，
+          带「请输入正确的手机号码」校验，**座机填不进去**；
+        · `项目外采预算.小计`：需求「数字，必填，默认值：自动计算」，规格写成 `公式`。
+
+    ⚠️ **只报「兜底」那一批**：`infer()` 先按名字关键词匹配（`日期`→date、`金额`→money…），
+    匹配不上才兜底成 input。名字有线索的（`计划开始日期`）闭着眼也是对的，报了纯噪音；
+    真正的风险全在兜底那批 —— 名字什么线索引不出，控件种类完全没依据（`职级` 就是）。
+    按需求文档逐字比对是 `postbuild_types.py` 的活（那要建完、且要需求原文），
+    这里判 warn 不判 err。汇总成**一条**，不逐表刷屏。
+    """
+    from spec_infer import infer
+    loose = []
+    for f in (spec.get('forms') or []):
+        name = f.get('名称')
+        if not name:
+            continue
+        declared = set((f.get('类型') or {}).keys())
+        for k in TYPE_SHADOW_KEYS:
+            declared |= set((f.get(k) or {}).keys())
+        # 关联记录 / 带出 / 汇总 / 中转字段走补丁段，不进建壳分支 —— 天然不需要「类型」
+        patchy = set()
+        for lk in (spec.get('links') or []):
+            if lk.get('表') == name:
+                patchy.add(lk.get('字段'))
+                patchy |= set(lk.get('带出') or [])
+        patchy |= {s.get('字段') for s in (spec.get('summaries') or [])
+                   if s.get('表') == name}
+        patchy |= set((f.get('中转字段') or {}).keys())
+        for x in (f.get('字段') or []):
+            if x in declared or x in patchy or x.startswith('__'):
+                continue
+            if infer(x) == 'input':          # 兜底 = 名字没有任何线索引出别的类型
+                loose.append('%s.%s' % (name, x))
+    if loose:
+        warn('有 %d 个字段既没写类型声明、名字也无线索，控件种类**兜底成单行文本**：%s '
+             '—— 逐个核对需求：如果需求写的是「关联记录 / 下拉 / 金额 / 附件」这类，'
+             '必须显式写进 `类型` 或 `links`（猜错不影响 save/deploy，界面上一眼才看得出）；'
+             '建完用 postbuild_types.py --prompt <需求文档> 逐字段对一遍'
+             % (len(loose), '、'.join(loose)))
+
+
+def check_menu_order(spec):
+    """`菜单顺序`（可选）里的名字必须是真表/真看板，且分组与该表的 `分组` 一致。
+
+    没写 `菜单顺序` 时菜单按 `forms` 的书写顺序排 —— 打一行提示把结果亮出来，
+    因为「按依赖顺序写 forms」是很自然的写法，而那样菜单顺序就不是需求要的顺序
+    （2026-09-21 实测：24 表应用分组与组内顺序全乱，当时没有任何一环核对顺序）。
+    """
+    mo = spec.get('菜单顺序')
+    if not mo:
+        order = {}
+        for f in spec.get('forms') or []:
+            order.setdefault(f.get('分组') or '（未分组）', []).append(f.get('名称'))
+        if len(order) > 1:
+            warn('没写 `菜单顺序` → 导航按 forms 书写顺序排：%s。与需求的分组/菜单顺序不一致就补 `菜单顺序`'
+                 % ' ｜ '.join('%s[%s]' % (g, '、'.join(map(str, ns))) for g, ns in order.items()))
+        return
+    pairs = list(mo.items()) if isinstance(mo, dict) else [(x.get('分组'), x.get('工作表') or []) for x in mo]
+    pages = {p.get('name') or p.get('名称') for p in (spec.get('pages') or [])}
+    seen = set()
+    for g, names in pairs:
+        for n in names:
+            if n in seen:
+                err('菜单顺序 里「%s」出现了多次' % n)
+            seen.add(n)
+            f = BY_NAME.get(n)
+            if not f and n not in pages:
+                err('菜单顺序 的「%s」不是规格里的工作表或看板' % n)
+            elif f and (f.get('分组') or None) != (g or None):
+                err('菜单顺序 把「%s」放在分组「%s」，但该表的 `分组` 是「%s」' % (n, g, f.get('分组')))
+    lost = [n for n in BY_NAME if n not in seen]
+    if lost:
+        warn('菜单顺序 没点名 %d 张表（会排在各组点名项之后）：%s' % (len(lost), '、'.join(lost)))
 
 
 def check_layouts(spec):
@@ -201,10 +494,118 @@ def check_layouts(spec):
         dup = sorted({x for x in placed if placed.count(x) > 1})
         if dup:
             err('layouts「%s」里这些字段被放了多次：%s' % (name, '、'.join(dup)))
-        miss = [x for x in (f.get('字段') or []) if x not in placed]
+        # 容器字段**故意不写进分节**（写了会被容器段摘走、只剩一条孤儿分隔线，
+        # check_containers 会报错）。它们不归分节管，所以不该算「没点名」。
+        in_cons = {x for c in normalize_containers(f)[0]
+                   for _, pf in c['panes'] for x in pf}
+        miss = [x for x in (f.get('字段') or []) if x not in placed and x not in in_cons]
         if miss:
             warn('layouts「%s」没点名 %d 个字段（会按原顺序排在最后）：%s'
                  % (name, len(miss), '、'.join(miss[:8])))
+
+
+def check_field_opts(spec):
+    """`必填` / `选项` 的字段名和选项键**必须真的生效**。
+
+    ⚠️ 这两条以前在规格里**根本表达不了**：需求写「XX 必填」「附件最多 10 个」时无处可写，
+    `required` 在 spec→建壳 的整条链路上没有任何消费者（`f('客户名称','input',
+    required=True)` 是纯装饰），控件级选项连书写位置都没有。表现是**静默**的：
+    应用照建、接口全绿，只是字段不是必填、附件没有上限。
+    2026-09-18 实测：全应用 10 个 `required=True` 字段全是空操作。
+
+    ⚠️ **白名单校验才是这条的主要价值**：`make_widget` 对不在白名单的键是
+    「打印一行警告然后丢弃」，写错一个键名就是静默失效 —— 正是要提前拦的那类。
+    """
+    from desform_utils import _VALID_OPTIONS_KWARGS
+    # ⚠️ `选项` **只收真正的 options 级键**（`_VALID_OPTIONS_KWARGS`）——
+    # 不能把 `_PARAM_MAP` 也算进来：那里的键是**建壳器级的抽象**，工厂内部会做翻译
+    # （`dateType` → `options.type='datetime'`、`dictCode` → `options.dictCode`…）。
+    # 当成 options 级直接写进去，只会往控件里塞一个**设计器不认的键**：
+    # 2026-09-18 实测，线上日期控件是 `options.type='datetime'`、`dateType` 根本不存在。
+    # 收紧之后语义才干净 —— 「`选项` 里的键会被原样写进控件的 options」，
+    # 建壳与事后补丁两条路径行为完全一致。
+    ok_keys = set(_VALID_OPTIONS_KWARGS)
+    # 这些键是建壳器自己拼字段定义用的，覆盖了会把控件拆散
+    reserved = {'name', 'type', 'fields', 'columnNumber', 'category'}
+    for f in (spec.get('forms') or []):
+        name = f.get('名称')
+        have = set(f.get('字段') or [])
+        # 补丁阶段才建的字段（关联记录本身 / 带出 / 汇总）建壳时还不存在，设不了 required
+        late = {l.get('字段') for l in (spec.get('links') or []) if l.get('表') == name}
+        late |= {c for l in (spec.get('links') or []) if l.get('表') == name
+                 for c in (l.get('带出') or [])}
+        late |= {s.get('字段') for s in (spec.get('summaries') or [])
+                 if s.get('表') == name}
+        for fld in (f.get('必填') or []):
+            if fld not in have:
+                err('表「%s」必填 的「%s」不在字段列表里' % (name, fld))
+            elif fld in late:
+                # 关联记录：补丁阶段建控件时直接落 required（patch_fields 已支持）；他表字段/汇总不支持必填
+                if not any(l.get('表') == name and l.get('字段') == fld for l in (spec.get('links') or [])):
+                    is_sum = any(s.get('表') == name and s.get('字段') == fld for s in (spec.get('summaries') or []))
+                    if is_sum:
+                        warn('表「%s」的汇总「%s」写在必填里：建壳阶段不存在，规格落不了；要它必填请在建后套件 '
+                             "struct_cfg.py 写 OPT_FLAGS = {'%s': {'%s': {'required': True}}}" % (name, fld, name, fld))
+                    else:
+                        err('表「%s」的「%s」是他表字段，不该必填（值来自源表）' % (name, fld))
+        for fld, opts in (f.get('选项') or {}).items():
+            if fld not in have:
+                err('表「%s」选项 的「%s」不在字段列表里' % (name, fld))
+            if not isinstance(opts, dict) or not opts:
+                err('表「%s」选项「%s」要是非空对象 {键: 值}' % (name, fld))
+                continue
+            for k in opts:
+                if k in reserved:
+                    err('表「%s」选项「%s」的「%s」是保留键，不能覆盖' % (name, fld, k))
+                elif k not in ok_keys:
+                    err('表「%s」选项「%s」的「%s」不是 options 级键 —— 要么写错了名字'
+                        '（make_widget 只会打一行警告然后**丢弃**），要么是建壳器级的参数'
+                        '（如 dateType/mode/expression，工厂会翻译成别的 options 键，'
+                        '不能直接写）。可用：%s'
+                        % (name, fld, k, '、'.join(sorted(ok_keys))))
+
+
+def check_containers(spec):
+    """`容器` 点名的字段必须真在这张表上、不被重复点名、也不写进 layouts 分节。
+
+    **这条检查以前完全不存在**——因为规格语言里根本没有「容器」这个概念。
+    需求写「跟进记录、拜访记录、机会目录用多 tab」时，作者只能把三个控件平铺建出来、
+    事后再手工搬，而 `precheck` / 建表 / 补丁**没有任何一环会告诉你 tab 没建**。
+    2026-09-18 实测：一份需求点名 3 个字段用多 tab，应用建完是三个平铺的关联记录，
+    接口全绿、预检通过，直到用户回头问「Tabs 布局空间可以加吗」。
+    需求被静默降级 —— 就是本条要堵的口子。
+    """
+    for f in (spec.get('forms') or []):
+        name = f.get('名称')
+        cons, errs = normalize_containers(f)
+        for e in errs:
+            err(e)
+        if not cons:
+            continue
+        # 表上的控件 = 建壳字段 + 补丁阶段建的（关联带出、汇总）—— 与 check_layouts 同口径
+        have = set(f.get('字段') or [])
+        for l in (spec.get('links') or []):
+            if l.get('表') == name:
+                have |= set(l.get('带出') or [])
+        have |= {s.get('字段') for s in (spec.get('summaries') or []) if s.get('表') == name}
+        in_sec = {x for sec in ((spec.get('layouts') or {}).get(name) or [])
+                  for x in (sec.get('字段') or [])}
+        for c in cons:
+            for label, pf in c['panes']:
+                for fld in pf:
+                    if fld not in have:
+                        err('表「%s」容器「%s」的页签「%s」点名了「%s」，该表没有这个字段'
+                            % (name, c['name'], label, fld))
+                    if fld in in_sec:
+                        # 容器段会把控件从卡里摘走；那一节的段标题就成了孤儿分隔线。
+                        # `group_into_tabs` 会清掉紧挨着的/收尾的孤儿，但中间那根会留下。
+                        err('表「%s」的「%s」既在容器「%s」里、又写进了 layouts 分节——'
+                            '容器会把它从卡里摘走，那一节只剩一条光秃秃的分隔线。'
+                            '容器字段不要写进 layouts' % (name, fld, c['name']))
+        # 容器**固定落在表单末尾**（这样重跑位置才稳定，见 desform_utils.group_into_tabs），
+        # 且不依赖 `字段` 列表里的先后 —— 所以这里**不**按 `字段` 顺序提示「后面还有几个字段」：
+        # 最终排布由 `layouts` 的分节顺序 + rest 决定，拿 `字段` 顺序去推断是个假模型
+        # （2026-09-18 实测：它对本项目自己的规格刷出一条毫无意义的提示）。
 
 
 def check_formulas(spec):
@@ -232,12 +633,21 @@ def check_titles(spec):
             # 该字段由 links 带出（补丁阶段才建），建壳时不存在，带出/汇总/公式分支都跳过它，
             # 构建器**静默回退**成字段列表里下一个能用的控件（例：标题变成「已出库-退货数量」）。
             # 接口全绿、列表标题列却是空的，只有逐表回读 config.titleField 才看得出。
-            warn('表「%s」标题「%s」是靠关联带出建的：建壳阶段解析不到，构建器会静默回退成别的字段。'
-                 '建完必须回读 config.titleField，不符就把 design["config"]["titleField"] '
-                 '改成该控件的 model 再 save_design_from_file' % (name, title))
+            pass    # 标题是带出字段：build_app 布局段（regroup_layout --spec）会把 titleField 指回它，不再提示
 
 
 # ---------------- 看板 ----------------
+
+#: 看板的系统字段 —— **不在表单 `fields` 里**，但引擎解析 dim/grp/val 时会并进来。
+#: `qqy_ops.py` 原话：「创建人/流程状态等系统字段不在表单 fields 里，解析 dim/grp/assist
+#: 必须并入」；`gen_qqy_all_comps.py` 也要求 filterField 必须含这 5 个系统字段。
+#: 图表里写的是**中文名**（黄金样例就是这么写的：`"assistType":"创建人"`），model 名一并收下。
+#: ⚠️ 2026-09-18 实测：这里以前只有 `record_count`/`create_time`，于是任何按「创建人」分组的
+#: 图都被判成「字段不在表里」——**假阳性**，而且是逼人无视预检的那一类。
+SYS_FIELDS = {'record_count',
+              'create_time', 'update_time', 'create_by', 'update_by', 'bpm_status',
+              '创建时间', '修改时间', '创建人', '修改人', '流程状态'}
+
 
 def check_pages(spec):
     code_of = {}
@@ -260,7 +670,7 @@ def check_pages(spec):
             if not table:
                 err('看板「%s」引用了不存在的表「%s」' % (pname, form))
                 continue
-            flds = set(EFF.get(table, set())) | {'record_count', 'create_time'}
+            flds = set(EFF.get(table, set())) | SYS_FIELDS
             for s in specs:
                 title = s.get('title') or s.get('componentName') or '?'
                 all_titles.add(title)
@@ -273,6 +683,13 @@ def check_pages(spec):
                     err('看板「%s」图「%s」是透视表但 val 为空 —— 清单式透视请给 record_count'
                         % (pname, title))
                 for d in ([s.get('grp')] if s.get('grp') else []) + dims + vals:
+                    # 透视表的 `val` 允许写成 `{"field":…, "calc":…}` 对象
+                    # （多度量透视，见 charts-special.md）。直接拿整个 dict 去查集合会
+                    # `TypeError: unhashable type: 'dict'` —— 而它**只在规格里带 pages 时**
+                    # 才触发（不带 pages 则 check_pages 整段跳过），于是这个崩溃一直没被
+                    # 预检自己发现：一旦把看板规格并进 app_spec.json，预检就整段挂掉。
+                    if isinstance(d, dict):
+                        d = d.get('field')
                     if d and d not in flds:
                         err('看板「%s」图「%s」的字段「%s」不在 %s 里'
                             % (pname, title, d, table))
@@ -326,7 +743,12 @@ def load_flows(path):
         sys.path.insert(0, mf)
     m = importlib.util.spec_from_file_location('user_flows', path)
     mod = importlib.util.module_from_spec(m)
-    m.loader.exec_module(mod)
+    try:
+        m.loader.exec_module(mod)
+    except NameError as ex:
+        # 同 app_audit：建后套件的 pb_flows.py 传进来只会报裸 NameError（2026-09-22 项目管理 R2）
+        raise SystemExit('FAIL: --flows 要的是 flow_dsl 写的 flows.py（定义 FLOWS = [...]），'
+                         '%s 看起来是建后套件的 pb_flows.py：%s' % (path, ex))
     return getattr(mod, 'FLOWS', None) or []
 
 
@@ -340,9 +762,79 @@ def _node_tables(nodes):
     return out
 
 
+def _spec_ftype(spec):
+    """规格 → 「(表, 字段) 的控件类型」。只回答规格里**明说了**的（公式/汇总/带出/类型），推断出来的返回 None。"""
+    ty = {}
+    zh = {'金额': 'money', '数字': 'number', '整数': 'integer'}
+    for f in spec.get('forms') or []:
+        t = f.get('名称')
+        for k, v in (f.get('类型') or {}).items():
+            if v in zh:
+                ty[(t, k)] = zh[v]
+        for k in (f.get('公式') or {}):
+            ty[(t, k)] = 'formula'
+    for sm in spec.get('summaries') or []:
+        ty[(sm.get('表'), sm.get('字段'))] = 'summary'
+    for lk in spec.get('links') or []:
+        for k in list(lk.get('带出') or []) + list((lk.get('带出映射') or {}).keys()):
+            ty.setdefault((lk.get('表'), k), 'link-field')
+    return lambda t, f: ty.get((t, f))
+
+
+def apply_flow_rules(flows, spec):
+    """引擎行为规则（miniflow/scripts/flow_rules.py）：与 build_flows 走同一份实现，
+    所以「真机构建时会被改写 / 会被拦下」的东西，这里不联网就能看到。
+    返回**改写后**的流程（后面的静态检查按最终形态查）。"""
+    try:
+        import flow_rules as FR
+    except ImportError:
+        warn('找不到 miniflow/scripts/flow_rules.py —— 引擎行为规则（无数据支不执行 / 公式累加冲 0 / '
+             '同事件多流程 …）本次未检查')
+        return flows
+    flows, r1 = FR.apply_static(flows)
+    fx = {(f.get('名称'), k): v for f in spec.get('forms') or [] for k, v in (f.get('公式') or {}).items()}
+    flows, r2 = FR.apply_typed(flows, _spec_ftype(spec), lambda t, f: fx.get((t, f)))
+    # 公式套公式 + 被流程 update()：引擎 handlerLinkFieldValue 把公式延后求值，外层公式的 env 取的是内层公式
+    # **更新前**的旧值（DesignFormDataServiceBaseImpl:1398-1404 / 1664-1671）→ 流程写完一次后外层不对。
+    import re as _re
+    updated = {n.get('table') for f in flows for n in FR.walk_nodes(f.get('nodes') or []) if n.get('type') == 'data_update'}
+    for (t, k), expr in fx.items():
+        inner = [r for r in _re.findall(r'\$([^$]+)\$', expr or '') if (t, r) in fx]
+        if not inner:
+            continue
+        # 2026-09-22 进销存 R2 实测更正：不止「被流程更新的表」—— **任何 API / 流程建的行**，
+        # 外层公式都拿内层公式的旧值（盘点明细、采购入库明细、价格表都中招，落 0 让下游条件恒不成立）。
+        # 被流程更新的表更严重（每写一次就错一次），仍然单独点名。
+        warn('表「%s」的公式「%s」引用了同表公式 %s —— 引擎对公式延后求值，外层会拿到内层的旧值'
+             '（API/流程建的行一律落 0，不限于被流程更新的表）；请展开成只引用基础字段的单层公式%s'
+             % (t, k, '、'.join(inner), '。⚠️ 本表还被流程 update，错值会被反复写入' if t in updated else ''))
+    # 被 inc/dec 累加的列若既没在 add() 里补 0、也没有默认值 → API/UI 建的行上第一次累加被静默吞掉
+    inc_cols = FR.inc_columns(flows)
+    added = {}
+    for f in flows:
+        for n in FR.walk_nodes(f.get('nodes') or []):
+            if n.get('type') == 'data_add':
+                added.setdefault(n.get('table'), set()).update((n.get('mapping') or {}).keys())
+    for t, cols in sorted(inc_cols.items()):
+        bare = sorted(c for c in cols if c not in added.get(t, set()))
+        if bare:
+            warn('表「%s」的 %s 会被流程累加，但没有任何 add() 给它们初值 —— API/页面建的行上'
+                 '第一次「增加/减少」会被静默吞掉；请在建后套件 DEFAULTS() 里给 0'
+                 % (t, '、'.join(bare)))
+    for rep in (r1, r2):
+        for m in rep['errors']:
+            err(m)
+        for m in rep['warnings']:
+            warn(m)
+        for m in rep['notes']:
+            warn('（构建时自动改写，无需处理）' + m)
+    return flows
+
+
 def check_flows(flows, spec):
     if not flows:
         return
+    flows = apply_flow_rules(flows, spec)
     subs = [f for f in flows if f.get('kind') == 'sub']
     SUBS.clear()
     SUBS.update(f['name'] for f in subs)
@@ -439,6 +931,13 @@ def _check_node(fname, ctx, ctxf, node, depth=0):
                 % (fname, node.get('name'), len(brs)))
         for b in brs:
             for (fld, _rule, _val) in (b.get('cond') or []):
+                # 判据主语可以是 `result("运算节点名")`（一个 dict）—— 2026-09-21 前这里直接拿它
+                # 做 `in ctxf`，抛 `TypeError: unhashable type: 'dict'` 把整个预检带崩。
+                if isinstance(fld, dict):
+                    rn = fld.get('$result')
+                    if rn is not None and rn not in (NODES.get(fname) or {}):
+                        err('流程「%s」网关判据 result("%s")：前面没有叫这个名字的运算节点' % (fname, rn))
+                    continue
                 if fld not in ctxf:
                     err('流程「%s」网关条件字段「%s」不在上下文表 %s 里' % (fname, fld, ctx))
             for n in (b.get('nodes') or []):
@@ -543,6 +1042,11 @@ def main():
     check_formulas(spec)
     check_titles(spec)
     check_layouts(spec)
+    check_menu_order(spec)
+    check_containers(spec)
+    check_field_opts(spec)
+    check_types(spec)
+    check_undeclared(spec)
 
     print('—— 看板 ——')
     check_pages(spec)

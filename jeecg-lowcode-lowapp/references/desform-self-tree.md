@@ -122,6 +122,11 @@
 | `advancedSetting.customConfig` | `true` | `true`（相同） |
 
 > `isSelf` 必须是控件的**顶层属性**，放在 `options` 内部无效。
+>
+> ⚠️ **2026-09-17 实测追问：自关联控件漏写 `isSelf`/`valueSplit` 会被设计器当成通用「树控件」**。
+> 全租户扫描：平台自己建的自关联控件（7 个样例）**无一例外**都带 `isSelf: true` + `valueSplit: ''`；
+> 用工厂建、只写 `sourceCode=本表 code` 的控件（本项目 任务/费用科目/WBS任务模板 各 2 个）
+> 在设计器里显示为「关联记录 - 树控件」，用户报「应该是关联记录 自己关联自己」。补上两键即恢复。
 
 ---
 
@@ -175,13 +180,55 @@ print("自关联字段添加成功")
 
 ### `showType` 的选择
 
-自关联树 `showType` 默认推荐 `"card"`（系统对自关联有特殊的树形展示支持）：
+自关联树 `showType` **必须**用 `"card"`（系统对自关联有特殊的树形展示支持）。
+⛔ **显示方式只有 卡片 / 下拉 / 表格 三档，没有独立的「树」**——树形是卡片模式自带的
+（父记录以卡片呈现、点开展开子树）。2026-09-17 用户问「是不是只有卡片？能支持树」时实测核对：
+租户里平台/其他应用自建的 8 个自关联控件，**7 个 card**（人事管理·部门表 上级部门、教育管理·课程分类表 上级分类、
+关联记录·商品表 上级商品、供应商管理·采购批次 父/子、销售记录·订单明细 订单信息），仅 1 个 select（员工信息表 直属上级）。
+👉 自关联的一对控件（父侧 single + 子侧 many）**两侧都写 card**，不要按普通关联的习惯给父侧配下拉、子侧配表格，
 
 | showType | 说明 |
 |----------|------|
 | `card`（卡片） | 展示父记录的卡片，点击可展开子树，推荐 |
 | `select`（下拉） | 从下拉列表选父记录，数据量大时可配合搜索 |
 | `table`（表格） | showMode 为 single 时不推荐 |
+
+### ⛔ 别无意中建两个自关联控件（父子字段取「最后一个」；简流要写值时是**唯一例外**，见 3）
+
+2026-09-17 实测（前端源码 `useFilterField` + 后端接口双验证）：
+
+- **表格视图的树是自动开的**：表里有 `link-record` + `isSelf` 时，前端 `BaseList` 会给列表请求带上
+  `parentField`（父子字段 model）+ `parentId`，行上带 `__HAS_CHILD`，展开时按 `parentId` 拉子级
+  （`BasicTable` 的 `isTreeTable`，平台菜单/流程实例列表也在用）。后端 `POST/GET /desform/data/list`
+  实测：`parentField` + 空 `parentId` 只返回**根记录**、`parentId=<父id>` 只返回**子记录**，
+  `__HAS_CHILD` 在 `desformDataJson` 里。
+- **父子字段取的是「设计里遍历到的最后一个自关联控件」**：`useFilterField` 里
+  `(t.type==='link-record' && t.isSelf && (l.is=true, l.field=t.model), …)`——**无条件覆盖**。
+  遍历顺序（`Fe()`）= 数组顺序，容器（`isContainer` 的 grid 的 `columns` / `card` 的 `list` /
+  `tabs` 的 `panes`）先递归子级、再算自己。
+- ⇒ **一张表里建「父(单条) + 子(多条)」两个自关联，且多条侧排在后面时，会被选成父子字段 → 树是反的**
+  （实测：拿多条侧当 `parentField`，返回的根记录是叶子）。
+
+**正确做法（三选一）：**
+1. **只建单条侧这一个自关联**（平台建的部门表/商品表/课程分类表都这样）——最简单、最稳，推荐；
+2. 非要建一对，就把**单条侧放在最后**（平台建的供应商管理·采购批次：`子` 在前、`父` 在后）。
+   ⚠️ 顺序 = 设计 JSON 的数组顺序 = 表单上的显示顺序，改了顺序表单排版也跟着变。
+3. **简流要往这张表的自关联字段写值时，必须再压一个隐藏占位自关联在最前面**（2026-09-21 实测）。
+   - 后端 `handleTreeTableParentField` 取的是设计里**第一个** isSelf
+     （`DesignFormDataServiceBaseImpl:2805` `.filter(isSelf).findFirst()`），而**简流写关联字段下发的是裸字符串**
+     （新增/更新节点都是；`variableValue:"_id"` 与指向关联控件都一样），平台那步 `getJSONArray()` 直接崩：
+     `操作失败：offset 1, character 2, line 1, column 1, fastjson-version 2.0.58 <记录id>`。
+   - **这个错抛在 `save(...)` 之后**（mongo 不在 Spring 事务里），后果三条：
+     ① 新增节点每次执行都崩 → Flowable **重试 3 次** → **一次建出 3 条重复子记录**；
+     ② 库里**原样存裸串**（不归一）→ 该记录之后**编辑、删除都撞同一个错**（连删都删不掉）；
+     ③ 崩在写 `__HAS_CHILD` 之前 → **父行永远没有展开箭头**。
+   - 占位控件永远不被写值 → 后端读到空 → 直接 return，不再崩；**列表视图取的是最后一个**（见上）→ 树仍取真字段。
+   - 占位控件照抄真自关联的 options，改这几项：`hidden:true`、`hiddenOnAdd:true`、`disabled:true`、
+     `allowAdd/allowSelect/allowEdit/allowView:false`、`required:false`、`defaultValue:''`，并用**新的 model/key**。
+   - **代价**：平台不再自动给父行写 `__HAS_CHILD` → 改由流程的「更新记录」节点自己写；
+     该节点来源是多条时**必须带 `formTableSourceGetDataType:1`**，否则引擎**静默不写库**（保存/发布全绿、箭头不出来）。
+   - **判定**（不用跑流程）：挑一条自关联字段有值的记录做一次**无操作** `desform/data/edit`
+     （读出原文再原样写回）——有裸串时必失败，修好后必成功。
 
 ### `showMode` 的选择
 
@@ -211,6 +258,9 @@ add_data('org_department', {
 
 # ❌ 错误：json.dumps([id]) 会二次序列化，服务端存入错误格式
 # ❌ 错误：裸字符串 ID，服务端 fastjson 报错（记录仍入库但格式错误）
+
+> **注意：简流（miniflow 的「新增/更新记录」节点）做不到上面这一点** —— 它固定下发裸串，
+> 所以那种表要压占位自关联（本页第 3 条），不是靠改流程取值写法能解决的。
 ```
 
 ---
@@ -222,3 +272,20 @@ add_data('org_department', {
 | 同一表单内记录互相引用（本文档） | `desform-self-tree.md` |
 | 两个不同表单互相关联 | `desform-cross-form-binding.md` |
 | 一个表单关联另一个表单（单向） | `desform-link-record.md` |
+
+---
+
+## 实测补充（2026-09-21 项目管理三版报障）：`options.isSelf` / `options.valueSplit` 不是可选项
+
+平台/二版自己建的自关联控件，**三处**都带：
+
+| 位置 | 键 | 二版四个自关联控件 | 三版漏写后 |
+|---|---|---|---|
+| 控件顶层 | `isSelf: true` | 有 | 有（构建器 `is_self=True` 写的） |
+| 控件 `options` | `isSelf: true` ＋ `valueSplit: ""` | 有 | **缺** |
+| `advancedSetting.defaultValue` | `valueSplit: ""` | 有 | 视写法而定 |
+
+**症状**：设计里 `options.hidden: true` 的「上级任务占位」**在列表里露成一列**（表头就是控件名），
+用户当场报障；自关联的父级回写 / 树展开逻辑也认不到这个控件。
+**修法**：对照二版把 `options.isSelf` / `options.valueSplit` 补齐 → 整表回存 → 回读断言三处都命中。
+**教训**：建表时一次写全三处；事后补要整表回存，还有被设计器改回去的风险。

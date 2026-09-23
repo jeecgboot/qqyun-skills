@@ -30,24 +30,35 @@ description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作
      否则建出来是一长串单字段卡、零 divider（2026-09-17 布局事故）。
      已建好的表要补布局 → `scripts/regroup_layout.py --config layout.json`（可 `--dry-run`）
 3. **「全绿」不是验收**：`save` / `deploy` / `ADDED` 成功、计数对得上，都**不能**证明配置落地
-   （`engine-contract.md` 开头第一句就是这个）。验收 = **与已知正确产物逐节点/逐字段 diff**。
-   建应用/建流程**必须**跑 diff 闸门（见 `fast-full-chain.md` 文末「交付闸门」）。
+   （`engine-contract.md` 开头第一句就是这个）。验收 = **回读产物，逐节点/逐字段对照契约页**
+   （流程 → `miniflow/references/node-contract.md` 的必填键 + §9 形状清单）。
+   建应用/建流程**必须**跑交付闸门（见 `fast-full-chain.md` 文末「交付闸门」）。
+   ⛔ **不要以「线上某个配好的同类应用/流程」当验收基准**——真实部署里不存在这样一个对照组，
+   形态的正确性只由契约页定义。
 4. **批量引擎有覆盖边界**：`build_flows.py` + `flow_dsl` 只覆盖「审批 + 简单回写」。
    凡节点落在 `flow_dsl`「未覆盖」清单里（含**取关联多条明细、传 record id、
    子流程登记**），**必须先补齐引擎，或回落到手建**，禁止用最接近的助手硬套。
+4-b. **导航菜单顺序 = 需求的分组清单顺序**（不是「建议创建顺序」）：规格写 `菜单顺序`（或直接按菜单顺序写 `forms`），
+   `build_app.py` 建完自动强排并回读；已有应用用建后套件的 `MENU_ORDER`。并行建表的排序号天然错乱，**不排一定乱**（`app-spec.md`「`菜单顺序`」节）。
 5. 动真机前先过 `scripts/precheck.py`（纯静态、不联网、可反复跑）：
    `python scripts/precheck.py --spec app_spec.json --flows flows.py`
 6. 效率仍然要管，但**只在「功能完整、数据链与业务链都正确」的前提下优化**
    （并行读、脚本化、少轮次）；**任何提速手段都不得以跳过契约阅读或跳过 diff 为代价**。
+7. ⛔ **默认不灌数。** `build_app.py --rows` 默认 `0` = 灌数段整段跳过。
+   **只有用户在提示词里明确要求**（「灌测试数据」「造示例数据」「填几条演示数据」）**才传 N**。
+   看不出要求 = 没要求；**别为「让看板有东西看」擅自灌**（那是用户没要的数据污染）。
+   空盘是正常交付态，收尾说明里写明「未灌测试数据」。详见 `fast-full-chain.md` 文首 ⛔ 段。
 
 用户说「租户 + 应用 + 建表/工作表/一对一」且是**新建**时：
 
 1. **禁止 Read：** `jeecg-desform`、`jeecg-onlform`、`jeecg-system` 的 SKILL.md 全文。
 2. **只读** `references/fast-create.md`。读完第一条 tool call 是：Write utf-8 `job.json` + 跑 `scripts/create_linked_worksheets.py`。
-3. ⚠️ **例外（必须读）**：凡涉及**明细子表 / 工作表子表**（`isSubTable:true`、
-   `model=sub_table_design_<key>`、`twoWayModel`、汇总 `linkTable`）或**关联带出的字段命名**，
-   先读 `references/desform-link-record.md`「二-a」与 `fast-create.md`「建后补丁契约速查」——
-   这一块的契约**不在** `create_linked_worksheets.py` 里，不读就会建成普通关联记录（布局与模板不符）。
+3. ⚠️ **例外（必须读）**：**需求原文出现「子表」二字**（写成「子表」「明细子表」「工作表子表」
+   「关联工作表」都算）——`links` 与 `create_linked_worksheets.py` **表达不了这一档**，只会产出普通
+   关联记录（`showType:table` 让它看着像子表，顶层没有 `isSubTable`）。**必须建后单独转**：
+   先读 `references/desform-link-record.md`「二-a」（4 步 + 自查）与 `fast-create.md` 文末「`link` 产出的是普通 many 关联」条。
+   ⚠️ **判据是需求有没有写「子表」，不是控件长得像不像**；`save`/回读/`precheck` **都不报**这一档。
+   另：涉及**关联带出的字段命名**时同样先读上述两处 + `fast-create.md`「建后补丁契约速查」。
 4. 不要等 y/n。不要 `get_form_id` / `check_code_available` 探编码。消息没 token 时对 `prompt_history.jsonl` 搜一次 `jeecg-boot`+`eyJ`，没有就问一句。
 
 用户说「改已有关联记录 / 显示方式改为下拉 / 记录范围 / 设置筛选条件 / 默认值第一条 / 查询工作表」时（工作表已存在）：
@@ -81,7 +92,7 @@ description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作
 | 给已有**主表**加字段（点名了表+字段） | 文末「主表加字段只跑 add_widget」。会话已有 code 时 **零 Read**，第一条 tool call 就是 `add_widget` 脚本 | 本文件「更新已有表单」；加前/加后 `get_form_fields`；`save_auth_from_design`；工厂默认 type 的 widget-options |
 | 改已有控件 / 删字段 / 子表加列 | 改/删：`grep -n "^## 更新已有表单"` Read limit=40。子表加列：文末「往已有子表加列」 | 本文件全文；`desform-lowapp.md`；应用 CRUD |
 | 转为工作表 / 转换工作表 | `references/desform-new-sub-table.md`「转换工作表」+ `scripts/sub_to_worksheet.py`（两步接口，脚本一次跑完） | 只 POST 不改主表设计；猜 `id`/`key` 探测 |
-| 改**列表视图**（数据统计 / 行高 / 刷新 / 数据过滤 / 看板 / 日历 / 甘特图） | 会话已有 api-base / token / 租户 / 应用时 **零 Read**，**第一条 tool call 就是** `desform_list_view.py`（参数见「列表视图一条命令」）。数据过滤 JSON 用字段中文名和界面值；**条件值形态按 `desform-filter-rules.md`「条件值形态实测」（禁数组）；系统字段/字符串日期直连 `updateViewConfig`（文末 2026-09-10）**。创建看板/日历/甘特缺字段规则才读 `desform-list-view.md` 对应节 | 现写临时 `.py`；先 `get_form_fields` / `query_form` 探路；`desform-list-view.md` 全文；`desform_view_creator.py`（那是表单视图） |
+| 改**列表视图**（数据统计 / 行高 / 刷新 / 数据过滤 / 看板 / 日历 / 甘特图） | 会话已有 api-base / token / 租户 / 应用时 **零 Read**，**第一条 tool call 就是** `desform_list_view.py`（参数见「列表视图一条命令」）。数据过滤 JSON 用字段中文名和界面值；**条件值形态按 `desform-filter-rules.md`「条件值形态实测」（禁数组）；系统字段/字符串日期直连 `updateViewConfig`（文末 2026-09-10）**。**自定义显示列（`columnList` / `showColumnList`）禁止手搓——两份清单必须同格式且都写控件 `key`（不是 model），一律走 `{"action":"config_table","fieldNames":[...]}` 重建；手搓一份填 model 会让列表一列都不出（2026-09-20 实测 mj2_chg）**。创建看板/日历/甘特缺字段规则才读 `desform-list-view.md` 对应节 | 现写临时 `.py`；先 `get_form_fields` / `query_form` 探路；`desform-list-view.md` 全文；`desform_view_creator.py`（那是表单视图） |
 | 建表/改字段时给**关联记录**配记录范围或查询设置 | `references/desform-link-record.md`「二-b」调用场景，再读三或四；**写进创建 JSON / `LINK_RECORD`** | `desform-filter-rules.md`；`desform-super-query.md`；列表数据过滤；把 `filters` 和 `search` 互相写错 |
 | 改字段**宽度 / 半行 / 整行**（敲敲云工作表） | 本 SKILL「追加：控件行宽度（半行/整行）实测」一节（整单 `query_form`→改→`save_design_from_file`） | 只 `update_widget` 写 `options.autoWidth`/`options.width` 就完事（UI 保存会重置）；把 widget-options 的 `autoWidth` 当行布局唯一事实 |
 | 建表时给**新**关联记录配记录范围或查询设置 | 写入创建 JSON / `LINK_RECORD`（`fast-create.md` 的 job 或字段 options）。规则细节才读 `desform-link-record.md`「二-b」 | `desform-filter-rules.md`；列表数据过滤；把 `filters` 和 `search` 互相写错 |
@@ -311,7 +322,7 @@ result = check_code_available('<code>')  # 只接受 1 个参数
 **【强制】确定控件类型后、配置其属性前，必须先阅读 `references/desform-widget-options.md` 中该控件对应的片段**——按**下方自动注入的行号索引表**查到该控件的 `offset` / `limit`，直接 `Read` **只读那一段**（该文档很长，禁止全量读，无需 grep）。原因：许多控件有非直觉的内置能力，只看 `desform_utils.py` 工厂函数的默认 options 会把它们当成"无用的空字段"漏掉——典型如日期的 `dateType`（年/季/周）。敲敲云不展示选人/选部门的 `keyMaps` 和 `customReturnField`，不要配。不要凭训练知识假设某字段不存在或猜它的名字。
 
 <!-- WIDGET_OPTIONS_INDEX:START -->
-!`python ${CLAUDE_SKILL_DIR}/scripts/gen_widget_options_index.py 2>/dev/null || echo '> （控件选项索引自动生成失败，请用 grep -n "## <控件type>" references/desform-widget-options.md 定位行号后再 Read 该片段）'`
+!`python ${CLAUDE_SKILL_DIR}/scripts/gen_widget_options_index.py || echo '> （控件选项索引自动生成失败，请用 grep -n "## <控件type>" references/desform-widget-options.md 定位行号后再 Read 该片段）'`
 <!-- WIDGET_OPTIONS_INDEX:END -->
 
 对于 radio/select/checkbox 控件，支持静态选项（默认）和系统字典两种数据源。
@@ -567,8 +578,9 @@ python "<skill目录>/scripts/list_view/desform_list_view.py" --api-base <用户
 | 甘特图设置（仅甘特视图） | `{"action":"update_gantt","viewId":"...","startField":"第一段开始日期","endField":"第一段结束日期","defaultView":"week","autoRefresh":60,"showUnscheduled":false}`。startField/endField 可写中文名，仅限 date/datetime 字段（year/month 不支持，对齐 UI GanttViewFieldSelect）且两端类型须一致，脚本自动维护 `dateType`；defaultView=day/week/month/quarter/year；autoRefresh 档位 0/30/60/120/180/240/300；显示字段：`ganttShowAll`/`ganttHideAll`/`ganttFieldNames`/`ganttHideFieldNames`（列表格式 `{key, field:model, show, seq}`，新字段默认隐藏）；省略项保持现状 |
 | 配置默认排序 | `{"action":"config_sort","viewId":"...","orders":[{"field":"名称","type":"desc"},{"field":"金额1","type":"desc"}]}`。orders 的 `field` 写字段中文名（脚本自动转 model），`type` 只认 `asc`/`desc`，数组顺序即优先级，清空排序传 `orders:[]`。未点名视图时作用于全部表格视图（通常即默认表格视图），点名 viewId/viewName 时对任意视图类型生效 |
 | 数据过滤 / 筛选组 | `{"action":"config_data_filter","matchType":"and","conditions":[...]}`。条件里写**字段中文名**和界面值（`name`/`rule`/`val`），组用 `match_type`+`items`。脚本内补 model、选项落库值。**取值形态见 `desform-filter-rules.md`「条件值形态实测」（禁数组）；系统字段/字符串日期直连 `updateViewConfig`（文末 2026-09-10）**。禁止先查字段 |
+| **建表收尾自检（必做）** | 建完多表应用，**用 API 灌一对父子记录**再回读父记录：① 汇总字段要有值（无值 → `linkTable` 写成 model 了，必须写关联控件 **key**）；② 子记录的反查父记录字段要有值（空 → 主表侧 `twoWayModel` 漏写/只写了一对）。两条都是「保存/发布全绿但功能静默失效」，只能靠这个端到端灌数才看得出；③ 全设计扫一遍未解析占位符 `re.findall(r'<[^<>]{1,20}>', desformDesignJson)` **必须为空**——残留 `<字段名>` 说明规则/动作的比较值没解析成 model，会出现「规则恒真、报错不停」（2026-09-21：销售合同「合同金额和应收金额不等」常报不消）；④ **自关联控件的三处 `isSelf`/`valueSplit`**（顶层、`options`、`advancedSetting.defaultValue`）——缺 `options` 那两个键，本该隐藏的「上级任务占位」会**在列表里露成一列**（2026-09-21 用户报障）。一把梭：`python scripts/check_selflink.py --api-base … --token … --app-id … [--fix]` |
 | 左侧筛选列表（仅表格视图） | `{"action":"config_left_filter","leftFilterField":"单选框组1","leftFilterData":"part","leftFilterCondition":["高中","本科"],"leftFilterOrder":"asc","addFormDefaultStatus":true}`。leftFilterField 写字段中文名，类型限 `link-record/table-dict/radio/checkbox/select/select-tree/select-user/select-depart/select-depart-post/org-role`（对齐 UI Shaixuanliebiao，其它类型报错）；**可用系统字段：创建人/修改人/所属部门/流程状态**（创建/修改时间 datetime 不可用，对齐前端 useFieldSelect）；data=all\|exist\|part；part 指定项 condition 可传数组自动转逗号串；未传项保持视图现状；清除：`{"action":"config_left_filter","clear":true}` |
-| 配置快速筛选（字段名版，仅表格视图） | `{"action":"config_quick_filter","fieldNames":["创建时间","金额1","单选框组1"]}`。写字段中文名，脚本自动转 model，type/queryType 按 **UI 实测映射表**匹配（文本类 like、数值/单选/日期类 eq、展示类 empty；系统列：创建时间=datetime、创建人=select-user、所属部门=select-depart、流程状态=select），数组顺序即筛选栏顺序。完整映射见 `desform-list-view.md`「config_table_quick_filter」；未收录控件或需自定义用 `queryList` 显式传 `[{field,type,queryType,seq}]`（field 为 model）。两者只给一个 |
+| 配置快速筛选（字段名版，仅表格视图） | `{"action":"config_quick_filter","fieldNames":["创建时间","金额1","单选框组1"]}`。写字段中文名，脚本自动转 model，type/queryType 按 **UI 实测映射表**匹配（文本类 like、数值/单选/日期类 eq、展示类 empty；系统列：创建时间=datetime、创建人=select-user、所属部门=select-depart、流程状态=select），数组顺序即筛选栏顺序。完整映射见 `desform-list-view.md`「config_table_quick_filter」；未收录控件或需自定义用 `queryList` 显式传 `[{field,type,queryType,seq}]`（field 为 model）。两者只给一个。⚠️ **queryType 必须驼峰**：写成下划线 `query_type` 会原样落库 → 列表页抛 `操作失败，Cannot invoke "Object.toString()" because the return value of "java.util.Map.get(Object)" is null`，**整页渲染中断（表头只剩 # / 操作，数据与左侧筛选全空）**——2026-09-21 第三版 24 张表全中。配完视图**必须回读验收**：`GET /desform/getColumns?desformCode=<code>&listViewId=<viewId>`，success=false 即坏视图 |
 | 创建看板 / 日历 / 甘特 | `{"action":"add_board","groupField":"状态"}` 等；分组/日期字段规则才读 `desform-list-view.md` 对应节 |
 | 看板设置修改（仅看板视图） | `{"action":"config_board","viewId":"...","groupField":"单选框组1","filterGroupType":"part","filterGroupCondition":["值1","值2"],"titleField":"邮箱1","showLabel":false,"coverField":"none","coverView":true}`。groupField 限 `radio/select/select-user/table-dict/link-record/switch`（对齐 UI Kanbanshezhi.vue）；filterGroupType 只有 `all`/`part`（看板无 exist）；改 groupField 自动清空条件；titleField 限 `input/textarea/money/integer/number/phone/email/link-record/select-user`；coverField 限 imgupload 字段或 `none`；省略项保持现状；卡片显示字段用 `cardShowAll`/`cardHideAll`/`cardFieldNames`/`cardHideFieldNames`（新增字段默认隐藏，对齐 LHZP-718）；可只传 viewId |
 | 日历设置修改（仅日历视图） | `{"action":"config_calendar","viewId":"...","calendarDefault":"timeGridWeek","firstDay":1,"weekStatus":true,"weekDayList":["0","6"],"lunarStatus":true,"hourStatus":true,"titleField":"邮箱1"}`；日期分组：`dateColumns`/`calendarColumnList` 每项 `begin_field`/`end_field` 可写中文名 + `tag` + `type`（字段限 date/year/month/quarter/week/datetime 系）。calendarDefault=dayGridMonth（月）\|timeGridWeek（周）\|timeGridDay（日）；firstDay 0-6（0=周日）；weekStatus=true 且未传 weekDayList 默认隐藏周六日 `["0","6"]`、false 则清空（对齐 UI）；**titleField 存 model**（与看板存 key 不同），限 input/textarea/money/integer/number/phone/email/link-record/select-user；省略项保持现状；可只传 viewId |
@@ -1074,6 +1086,8 @@ def find(node, key, val, out, d=0):   # 按 键==key 且 值含val 收集所在 
 
 `update_widget` 写 `numberRules` 返回 success ≠ 设计器规则面板生效：**段对象缺 UI 辅助键时面板读不到段内容**（text 段缺 `value`、create_date 段缺 `format`/`formatCustom` 时表现为「设置没生效」，但 JSON 已落库）。改自动编号规则时：先 query 找 UI 手工配置的参照控件（如「自动编号-01」）抄完整键集合；`AUTONUMBER(prefix=...)` 工厂已补全（text 段 value+text、create_date 段 format+dateFormat+formatCustom）。完整结构见 widget-options.md 勘误第 8 条。
 
+**⚠️ 补零位数由 `mode` 决定，不是 `length`（2026-09-20 实测事故）：** 流水段 `mode:1` = 自然数（`1,2,3…`，**`length` 被完全忽略**）、`mode:2` = 指定位数（`0001,0002…`）。**工厂默认流水段就是 `mode:1` + `length:4`，照抄默认值即错** —— 建出来的编号形如 `JH-26-2` 而不是 `JH-26-0002`（前缀 / 日期 / 起始值 / 不重置全对，只有位数没生效，save 与回读全绿，只有人翻数据才看得出）。规格或 `app-spec.md` 的 `编号:[前缀,位数,是否含日期]` 里**只要给了位数** → 必须 `mode:2`；只有需求明说「不要补零」才写 `mode:1`。日期段要用自定义格式（如 `YY-`）→ `format:'custom'` + `formatCustom:'YY-'` + `dateFormat:'YY-'` **三键同写**；`format` 直接写 `'YY-'` 时后端输出仍对（走 `dateFormat`），但设计器面板该下拉**显示空白**，看着像没配。
+
 ## 追加：控件默认值 — 空的「高级默认值」会覆盖普通默认值（2026-09-03 实测）
 
 **现象：** `update_widget` 给 date/time 控件写 `options.defaultValue='18:52:52'`，接口 success、回查 options.defaultValue 也在，但新增页默认值不显示；同表单用户手动拖出的新控件默认值正常。
@@ -1117,9 +1131,10 @@ def find(node, key, val, out, d=0):   # 按 键==key 且 值含val 收集所在 
 - date 默认当天：**禁止补 `options.defaultValueType:3`**（2026-09-08 纠正：面板不回显）→ 整单补高级默认值 `advancedSetting.defaultValue`：① compose `$_CONTEXT_VAR_sysDate$` ② function `DATENOW()`，`defaultValueType` 保持 `1`（详见 `desform-default-value.md`「date — 默认值类型」）
 - `link-record` 的 `showType` → 单卡场景默认已正确可忽略；要其他形态事后改 options
 
-**「子表作为单独工作表 / 已有工作表作为子表」= 明细控件 link-record + `isSubTable:true` + `model:"sub_table_design_<key>"`（model 后缀=key）+ showType=table**。创建脚本 link 产普通 many 关联，要此外观需转换；结构与同步点见 `references/desform-link-record.md`「二-a」。转换后 3 处同步：① 子表回指字段 `options.twoWayModel` ② 主表汇总 `options.linkTable` ③ 改 model 后 `save_auth_from_design(主表code)` 重刷字段权限。
+**「子表作为单独工作表 / 已有工作表作为子表」= 明细控件 link-record + `isSubTable:true` + `model:"sub_table_design_<key>"`（model 后缀=key）+ showType=table**。创建脚本 link 产普通 many 关联，要此外观需转换；结构与同步点见 `references/desform-link-record.md`「二-a」。转换后 2 处同步：① 两处 `options.twoWayModel` **互指**——子表回指字段指向父侧控件 model，**父侧控件也要指向子表字段 model（漏写 → 「添加记录」弹窗带不出父记录，2026-09-20 实测）** ② 改 model 后 `save_auth_from_design(主表code)` 重刷字段权限。
+⛔ **主表汇总 `options.linkTable` 不在同步之列，转换时别动它**：它存的是明细控件 **key**（key 不随 model 换名而变）。改成 `sub_table_design_…` 后面板「关联表」下拉解析不到、直接显示原始串，而 save/回读/precheck 全绿（2026-09-21 实测报障）。与下文第三段、`fast-create.md` 对照表一致。
 
-**汇总字段落库（UI 绑定 vs 脚本不一致）：** 用户在界面重绑汇总后 `linkTable` 存明细控件 **key**（无 `sub_table_design_` 前缀，脚本/整单写入的是 model 全名）；勾「必填」落库 = `options.required:true` + 顶层 `rules:[{"required":true,"message":"${title}必须填写"}]` 双写。用户 UI 绑过的控件以界面保存形态为准，禁止回改。
+**汇总字段落库：** `linkTable` 一律存明细控件 **key**（无 `sub_table_design_` 前缀）——UI 重绑是这个形态，脚本/整单写入也必须是这个形态；**写 model 全名是错的**（面板不回显，2026-09-21 实测）；勾「必填」落库 = `options.required:true` + 顶层 `rules:[{"required":true,"message":"${title}必须填写"}]` 双写。用户 UI 绑过的控件以界面保存形态为准，禁止回改。
 
 **手工向主表 design 追加整行字段：** 包 isAutoGrid card（`{"options":{},"isContainer":true,"type":"card","isAutoGrid":true,"model":"card_<ts>_<rnd>","key":"<ts>_<rnd>","list":[widget]}`）追加到 `design["list"]`（汇总类放明细区控件之后）。汇总控件绑工作表子表时 `linkTable` 写明细控件 **key（无前缀）**，勿写 `sub_table_design_` model（面板按 key 匹配，写 model 不回显，见 `references/desform-widget-options.md` 汇总节）。
 
