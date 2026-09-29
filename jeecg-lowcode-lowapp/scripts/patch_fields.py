@@ -179,8 +179,8 @@ class Engine(object):
         self.dicts = {}          # 字典名 -> {"dictCode","items"}
         self.gaps = []           # 本轮补丁未落地项（每轮重算）
         self.load_gaps = []      # 载入阶段的问题（不可重试，不随轮次清空）
-        self.tmpdir = os.path.join(tempfile.gettempdir(), 'jeecg-desform')
-        os.makedirs(self.tmpdir, exist_ok=True)
+        from skill_temp_path import app_workdir
+        self.tmpdir = app_workdir(self.app, 'patch')   # <工作目录>/patch/
 
     # ---------- 载入 ----------
 
@@ -346,10 +346,46 @@ class Engine(object):
                 self._gap(fname, fld, '目标表「%s」不在 spec 或未建成' % tgt)
                 continue
 
+            # 关联记录的「显示字段」：显式 `显示字段` 优先，没写时沿用 `带出`
+            # （历史上是同一条声明 —— `带出` 既建他表字段、又充当展示列）。
+            # **只展示、不带出**的列必须显式写 `显示字段`，否则规格表达不了。
+            # 2026-09-20 实测：Tabs 里的关联记录要展示 5~6 列但一个带出字段都没有，
+            # 只能手写补丁；而手写时把形状写成 [{"field":…,"show":true}] 是**静默失效**的
+            # （引擎只认 ["<model>", …] 裸字符串数组，回落到只显示标题一列）。
+            show_names = lk.get('显示字段') or list(dict.fromkeys(
+                list(lk.get('带出') or []) + list((lk.get('带出映射') or {}).values())))
+            show_hits = [(s, self.src_info(tgt, s)) for s in show_names]
+            show = [i['model'] for _, i in show_hits if i]
+            show_missing = [s for s, i in show_hits if not i]
+            hide_on_add = bool(lk.get('新增时隐藏'))
+
             # ① 关联记录本身
             w = find_widget(design, fld)
             if w is not None:
                 key = w.get('key') or ((self.reg.get(fname) or {}).get(fld) or {}).get('key')
+                # 已存在的控件按规格补齐：缺的显示列、`新增时隐藏`（重跑即修旧应用）
+                opts = w.setdefault('options', {})
+                if w.get('type') == 'link-record':
+                    cur = list(opts.get('showFields') or [])
+                    lack = [m for m in show if m not in cur]
+                    fixed = False
+                    if lack and not show_missing:
+                        opts['showFields'] = show + [m for m in cur if m not in show]
+                        fixed = True
+                    if hide_on_add and not opts.get('hiddenOnAdd'):
+                        opts['hiddenOnAdd'] = True
+                        fixed = True
+                    if fixed:
+                        done += 1
+                if show_missing:
+                    self._gap(fname, fld, '显示字段 %s 在目标表「%s」上没就位' % (show_missing, tgt))
+            elif show_missing and self._round < self.MAX_ROUNDS:
+                # 显示字段引用的目标表字段还没建（同轮后建的关联/他表字段）→ 整个关联推迟到下一轮建。
+                # 以前是 `if i` 直接滤掉，控件建成后下一轮见「已存在」就跳过 → 永久少一列、四道闸门全绿
+                # （2026-09-24 任务管理：工时填报.工时明细 丢了「关联任务」列）。
+                self._gap(fname, fld, '显示字段 %s 在目标表「%s」上还没就位（下一轮重试）' % (show_missing, tgt))
+                self._deferred += 1
+                continue
             else:
                 # 目标表的标题字段可能**本身就是一个他表字段**（明细表的标题是
                 # 从它关联的上游表带出来的），此时它要等那张表的关联先建好。
@@ -360,15 +396,8 @@ class Engine(object):
                     self._gap(fname, fld, '目标表「%s」的标题字段「%s」还没就位'
                               % (tgt, self.spec['_title_of'].get(tgt)))
                     continue
-                # 关联记录的「显示字段」：显式 `显示字段` 优先，没写时沿用 `带出`
-                # （历史上是同一条声明 —— `带出` 既建他表字段、又充当展示列）。
-                # **只展示、不带出**的列必须显式写 `显示字段`，否则规格表达不了。
-                # 2026-09-20 实测：Tabs 里的关联记录要展示 5~6 列但一个带出字段都没有，
-                # 只能手写补丁；而手写时把形状写成 [{"field":…,"show":true}] 是**静默失效**的
-                # （引擎只认 ["<model>", …] 裸字符串数组，回落到只显示标题一列）。
-                show_names = lk.get('显示字段') or (lk.get('带出') or [])
-                show = [i['model'] for i in
-                        (self.src_info(tgt, s) for s in show_names) if i]
+                if show_missing:        # 最后一轮仍缺：先按已就位的列建，缺口进交付报告（不再静默）
+                    self._gap(fname, fld, '显示字段 %s 在目标表「%s」上没就位' % (show_missing, tgt))
                 _mode, _stype = link_modes(lk)
                 # 目标表 == 本表 → 自关联树：必须 is_self=True（engine-contract C6：
                 # 顶层 isSelf + options 的 isSelf/valueSplit + advancedSetting 的 valueSplit
@@ -382,6 +411,10 @@ class Engine(object):
                         if _w.get('type') == 'link-record':
                             _w.setdefault('options', {})['required'] = True
                             _w['rules'] = [{'required': True, 'message': '${title}必须填写'}]
+                if hide_on_add:     # 规格 `新增时隐藏`：新建本表记录时这块不渲染（下游单据列表，不从这里发起）
+                    for _w in iter_widgets([res[0]]):
+                        if _w.get('type') == 'link-record':
+                            _w.setdefault('options', {})['hiddenOnAdd'] = True
                 append_widget(design, res[0], seq); seq += 1
                 self._register(fname, res[0])
                 key = res[1]
@@ -391,8 +424,10 @@ class Engine(object):
             #   `带出`     = 建出的控件**与目标表字段同名**；
             #   `带出映射` = 本表控件名 ≠ 目标表字段名（如两个仓库都带「仓库名称/仓库编码」，
             #                要分别落成「换货入库仓库名称/编码」与「换货出库仓库名称/编码」）。
-            #   saveType 一律 `'save'`（存储数据）：需求写「带出/存储数据」的字段是流程的定位键，
+            #   saveType 默认 `'save'`（存储数据）：需求写「带出/存储数据」的字段是流程的定位键，
             #   `'view'`（仅显示）既不落库、也不能作流程条件 —— 引擎侧会静默取到空值。
+            #   需求**明写「仅显示」**的，在这条关联上列进 `仅显示`（名字也要在 带出/带出映射 里），
+            #   落成 view（以前只能建后 OPT_FLAGS 改，app_audit 再报违例，销售-速测18 4 条）。
             if not key:
                 continue
             wanted = [(sf, sf) for sf in (lk.get('带出') or [])]
@@ -409,7 +444,7 @@ class Engine(object):
                     continue
                 r2 = DU.LINK_FIELD(local_name, key, info['model'],
                                    field_type=info.get('type') or 'input',
-                                   save_type='save')
+                                   save_type='view' if local_name in (lk.get('仅显示') or []) else 'save')
                 append_widget(design, r2[0], seq); seq += 1
                 self._register(fname, r2[0])
                 done += 1
@@ -611,31 +646,15 @@ class Engine(object):
                                   'reason': '本表没有关联记录「%s」（summary 的关联字段写错了？）' % lkf})
                 continue
             stype = SUMMARY_TYPES.get(sm.get('方式') or '求和', 'inner-sum')
-            if stype == 'inner-record-count':
-                # 特殊结构：field 填类型字符串、summary 留空（desform-widget-options 汇总节）。
-                # 按普通结构写 field=<列>/summary=inner-record-count 设计器认不出、不计数（2026-09-22 项目管理 R2）
-                w = DU.SUMMARY(fld, key, 'inner-record-count', summary_type='')[0]
-                append_widget(design, w, seq); seq += 1
-                for x in iter_widgets([w]):
-                    if x.get('name'):
-                        self.reg[fname][x['name']] = {'model': x.get('model'),
-                                                      'key': x.get('key'), 'type': x.get('type')}
-                done += 1
-                continue
             # 汇总列在**关联目标表**里；目标表名 = links 里这条关联的目标
             tgt = next((l.get('目标') for l in (self.spec.get('links') or [])
                         if l.get('表') == fname and l.get('字段') == lkf), None)
-            info = self.src_info(tgt, col) if tgt else None
-            if not info:
-                cands = near_names(list(self.reg.get(tgt) or {}), col) if tgt else []
-                self.gaps.append({'table': fname, 'field': fld,
-                                  'reason': '关联表「%s」没有列「%s」' % (tgt, col) +
-                                            ('（是否想写：%s）' % '、'.join(cands) if cands else '')})
-                continue
             # 带条件的汇总：规格 `条件` → options.filter。
             # 「源字段」写的是**目标表**上的字段名。落库形状三件套缺一不可：
             # rule 大写 / sqParam.rule 小写 / value 恒为数组 —— 漏了 sqParam 平台会
             # **静默忽略整条条件**（保存、回读都正常，症状是"不该算的记录也被算进来"）。
+            # ⚠️ 条件要在「记录数」分支**之前**算：以前记录数分支先 continue，条件整条被丢、
+            # filter 关着落库，precheck/app_audit 都不报（2026-09-24 考勤-速测18：8 个带条件计数全丢）
             sflt = None
             conds = sm.get('条件') or []
             if conds:
@@ -658,6 +677,24 @@ class Engine(object):
                     self._gap(fname, fld, '汇总条件里的源字段「%s」在「%s」里没有' % (bad, tgt))
                     continue
                 sflt = {'enabled': True, 'matchType': 'AND', 'rules': rules}
+            if stype == 'inner-record-count':
+                # 特殊结构：field 填类型字符串、summary 留空（desform-widget-options 汇总节）。
+                # 按普通结构写 field=<列>/summary=inner-record-count 设计器认不出、不计数（2026-09-22 项目管理 R2）
+                w = DU.SUMMARY(fld, key, 'inner-record-count', summary_type='', filter=sflt)[0]
+                append_widget(design, w, seq); seq += 1
+                for x in iter_widgets([w]):
+                    if x.get('name'):
+                        self.reg[fname][x['name']] = {'model': x.get('model'),
+                                                      'key': x.get('key'), 'type': x.get('type')}
+                done += 1
+                continue
+            info = self.src_info(tgt, col) if tgt else None
+            if not info:
+                cands = near_names(list(self.reg.get(tgt) or {}), col) if tgt else []
+                self.gaps.append({'table': fname, 'field': fld,
+                                  'reason': '关联表「%s」没有列「%s」' % (tgt, col) +
+                                            ('（是否想写：%s）' % '、'.join(cands) if cands else '')})
+                continue
             # ⚠️ 对 link-record 汇总时 linkTable 传**控件 key（不带前缀）**，传 model 面板会读不到
             w = DU.SUMMARY(fld, key, info['model'], summary_type=stype, filter=sflt)[0]
             append_widget(design, w, seq); seq += 1
@@ -800,6 +837,8 @@ class Engine(object):
     # ---------- 主流程 ----------
 
     MAX_ROUNDS = 3      # 有界重试：见 do_links 里「目标表标题本身是他表字段」的说明
+    _round = MAX_ROUNDS  # run() 外单独调 do_links 时按「最后一轮」处理（不推迟）
+    _deferred = 0
 
     def run(self, only=None):
         self.spec['_title_of'] = {f['名称']: f.get('标题') for f in self.form_items()}
@@ -808,6 +847,8 @@ class Engine(object):
         only = set(only or [])
         touched = set()
         for rnd in range(1, self.MAX_ROUNDS + 1):
+            self._round = rnd                    # do_links 据此决定「显示字段没就位」是推迟还是记缺口
+            self._deferred = 0                   # 本轮推迟建的关联数：有推迟就不能因「本轮没改动」提前收工
             self.gaps = []                       # 每轮重算：上一轮补齐的缺口应消失
             changed = 0
             for f in self.form_items():
@@ -846,7 +887,7 @@ class Engine(object):
                 finally:
                     if os.path.exists(path):
                         os.remove(path)
-            if not changed:
+            if not changed and not self._deferred:
                 break
             if rnd > 1:
                 log('OK:round%d 又补齐 %d 张表' % (rnd, changed))

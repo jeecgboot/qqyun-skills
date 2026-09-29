@@ -33,7 +33,8 @@ ap.add_argument('--dry-run', action='store_true')
 ap.add_argument('--only', default='buttons,views,menus,switches')
 A = ap.parse_args()
 API, TOKEN, TID, AID = A.api_base, A.token, str(A.tenant_id), A.app_id
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', AID)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(AID, create=False)   # 该应用的工作目录（probe 建的；读不到就报缺 probe.json）
 for _f in ('probe.json', 'dicts.json'):
     if not os.path.exists(os.path.join(WORK, _f)):
         sys.exit('缺少 %s —— 先跑 postbuild_probe.py' % os.path.join(WORK, _f))
@@ -96,6 +97,10 @@ def record_id(t, title):
         tf = PROBE[t]['titleField']
         _RID[t] = {str((r.get('desformData') or {}).get(tf)): r['id']
                    for r in ((list_data(CODE[t], 1, 500) or {}).get('records') or [])}
+    if title not in _RID[t] and A.dry_run:
+        # dry-run 不真的预置 SEED，新应用上这条基础数据还不存在 → 返回占位值，别让预演崩
+        # （2026-09-24 CRM-速测17 C：新应用 --dry-run 直接 KeyError，只能跳过预演）
+        return '__DRYRUN_RID__'
     if title not in _RID[t]:
         raise KeyError('工作表「%s」里没有标题为「%s」的记录 —— 按钮条件/视图过滤引用关联记录时目标表要先有这条基础数据：'
                        '在本配置里写 SEED = {"%s": [{"<标题字段名>": "%s", ...}]}，脚本会在建按钮前预置' % (t, title, t, title))
@@ -103,8 +108,18 @@ def record_id(t, title):
 
 
 def fill_fields(*specs):
-    """点击后当前记录的字段可填写：'字段' 或 ('字段','required'|'readonly')"""
-    lst = [{'key': s, 'attr': ''} if isinstance(s, str) else {'key': s[0], 'attr': s[1]} for s in specs]
+    """点击后当前记录的字段可填写：'字段' 或 ('字段','required'|'readonly'|'') 或 ('字段', attr, 默认值)
+    默认值写**落库值**（字典字段用 dv('字典名','文案') 取值）。以前三元组的第三项被静默丢掉，
+    「提交」按钮预填「申报状态=已提交」配不出来（2026-09-24 申报-一句话7 K2）。"""
+    lst = []
+    for s in specs:
+        if isinstance(s, str):
+            lst.append({'key': s, 'attr': ''})
+        else:
+            it = {'key': s[0], 'attr': s[1] if len(s) > 1 else ''}
+            if len(s) > 2:
+                it['defaultVal'] = ','.join(map(str, s[2])) if isinstance(s[2], (list, tuple)) else s[2]
+            lst.append(it)
     return {'formTable': 'current', 'formType': 'update', 'updateFieldList': lst}
 
 

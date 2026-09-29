@@ -88,12 +88,13 @@ input, textarea, number, integer, money, date, time, radio, checkbox, select, sw
 ### Python 用法
 
 ```python
-sub = make_sub_table('订单明细', [
-    SUB_INPUT('产品名称', sub_key, required=True),
-    SUB_NUMBER('数量', sub_key),
-    SUB_MONEY('单价', sub_key),
-    SUB_FORMULA('小计', sub_key, mode='PRODUCT', expression='$数量model$*$单价model$'),
-])
+# make_sub_table 返回 (container, key) 二元组；列工厂要子表 key，所以先建空子表拿 key，再往列里加控件
+sub, sub_key = make_sub_table('订单明细', [])
+name_w, _, _ = SUB_INPUT('产品名称', sub_key, required=True)     # SUB_* 返回 (widget, key, model)
+qty_w, _, qty_m = SUB_NUMBER('数量', sub_key)
+price_w, _, price_m = SUB_MONEY('单价', sub_key)
+sum_w, _, _ = SUB_FORMULA('小计', sub_key, mode='PRODUCT', expression='$%s$*$%s$' % (qty_m, price_m))
+sub['columns'][0]['list'].extend([name_w, qty_w, price_w, sum_w])   # 放进列里的必须是 dict，不能是元组
 
 create_form('采购订单', 'purchase_order', [
     INPUT('订单号', required=True),
@@ -103,7 +104,7 @@ create_form('采购订单', 'purchase_order', [
 ```
 
 > ⚠️ **2026-09-14 实测大坑（人事OA 30 表整单补丁踩毁 1 表）：上面示例只在 `create_form` 路径下安全（布局引擎会解包）。手工把 `make_sub_table` 结果插入**已有表单**的 `design['list']` 再走 `save_design_from_file` 时，必须自己做两层解包，否则整表报废：**
-> 1. `make_sub_table(...)` 返回 `(container, key, model)` 三元组，插入 design 前取 `[0]`；
+> 1. `make_sub_table(...)` 返回 `(container, key)` **二元组**（不是三元组，别按三个值解包），插入 design 前取 `[0]`；
 > 2. **`container['columns'][].list` 里每个子控件还是 `SUB_*` 的 `(widget, key, model)` 三元组未解包**——必须二次解包 `w = w[0]`。漏了这一步 `json.dump` 会把 tuple 序列化成 JSON 数组，落库后子表列是数组不是控件对象；
 > 3. **保存接口不校验结构，照样返回"保存成功"；下次 `queryByCode/queryById` 遍历时对数组条目调 `getString("type")` 抛 NPE（`...because "item" is null`），整张表查不出来**。insert 前本地校验：design['list'] 每项必须是 dict；sub-table-design 的 columns[].list 每项必须是 dict。
 >

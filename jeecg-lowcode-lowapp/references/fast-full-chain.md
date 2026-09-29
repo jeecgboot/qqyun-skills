@@ -1,20 +1,56 @@
 # 全链路新建（应用 + 工作表 + 关联 + 简流 + 盘；灌数按需，非默认）
 
+> **需求只有一句话 / 没逐表列字段？** 先读 `requirement-design.md` 把它补成完整设计（`design.md`），**发给用户确认后**再回到本页建造。
+
 **只读两页**：本页 + **`engine-contract.md`**（引擎硬约束一页纸——那十几条**不报错、
 只静默写坏**，写规格前必须先读完）。读完第一条 tool call 必须是执行脚本。
 
+> **② 文档分「契约类 / 操作类」，读法不同。判据只有一句：违反它会不会当场报错？**
+>
+> | 类型 | 判据 | 读法 | 本 skill 里是 |
+> |---|---|---|---|
+> | **契约类** | 违反**不报错**、只静默写坏 | **写规格之前**精读一遍（就一遍） | `engine-contract.md`、`app-spec.md` 的「四条硬规矩」、miniflow `node-contract.md` |
+> | **操作类** | 违反**会报错** | **执行到那一步之前**才按节 grep 切片，**禁止通读** | `postbuild-kit.md`、`fast-create.md`、dashboard `create.md`/`mutate.md` |
+>
+> 2026-09-28 进销存 47 表实测：把操作类的 `postbuild-kit.md`（448 行）**通读**花了 8 分钟，
+> 占整轮最大一段空档 —— 而实际只用到 `RENAME` / `DEFAULTS()` 两节。
+> **「不读契约」和「通读操作手册」是两种错，别用后者去防前者。**
+
+> **一句话建应用**（没有逐字段需求，要自己写规格/流程/冒烟）另外**按节查**，别通读：
+> `requirement-design.md`（全文，设计层）· `app-spec.md` 开头骨架 +「写规格时的四条硬规矩」·
+> `postbuild-kit.md` 第三节（配置写法）· `smoke-flows.md`「配置」「审批断言」两节 ·
+> `miniflow/references/batch-flows.md`「两个批量构建器的签名对照」· `dashboard/references/create.md`「批量建盘」。
+> 2026-09-24 担保-一句话11：这 8 份逐份读完花了 230 秒（全轮 1/3），按上面的节查就够。
+
+> ⛔ **第三页（读一眼标题即可，别通读）**：`app-prompt-skeleton.md` 的**第 11~30 条**
+> **+ 第五节「成组出现的需求要按原文逐条点名核对」**
+> —— 那是「需求语言 → 规格语言」的硬规则清单（明细=双向关联而非设计子表、
+> 审批「或」条件、看板宽度/筛选面板/图表标题…）。
+> ⚠️ 该页第 25、26 条（`/` 单位后缀与 RENAME 顺序）**已于 2026-09-24 作废**，
+> 见该页原文更正 —— **别再照做**。
+> **2026-09-23 的教训**：这些规则**早就写在那页里了**，但全链路这条路由**从不指向它**，
+> 于是当轮原地重踩了「看板非标宽度」「盘名与工作表同名」两条，多花一轮返工。
+> **2026-09-24 同型第三次**：53 表应用里 **4 处默认值漏配**，同样是因为本页只指到
+> 「11~30 条」、没指第五节 —— 而第五节课文里连「11 条只铺 8 条」的实例都写着。
+> 建后套件已同步加 ⚠（见 `postbuild-kit.md` 3.2）。
+>
+> **2026-09-24 同型第四次 —— 变体：知识就在本页，照样漏。** 15 处【子表】全漏，
+> 而「③ 建完必须再跑一次转换」就写在本页 §③-b、我也读了本页 —— 区别是那儿只有散文、
+> 又没点名套件里现成的 `SUBTABLES`，于是五道闸门全绿。
+> **写在同一页不算数：得让「漏做」有东西会失败 —— 归宿是 `struct_cfg.py` 的一条配置，
+> 不是交付说明里的一条待办。**
+> 那页的条目按编号/节标题查，**不要通读全文**。
+
+**第一步：开工作目录**（`python "<lowapp>/scripts/skill_temp_path.py" --new <应用名的英文简称>`，如 `crm`）——
+本次所有手写配置（`app_spec.json` / `flows.py` / `struct_cfg.py` / `dashboards.json` …）都写进它打印的目录；
+`build_app --spec <工作目录>/app_spec.json` 建出应用后把 app_id 绑进目录里的 `app.json`，三个 skill 的脚本产物随后都按 app_id
+自动落回这个目录（见 SKILL.md「临时目录标准」）。**并行建多个应用时每个代理各开各的**；别自己另起目录，也别写到 `jeecg-lowcode/` 根下。
+
 **禁止：** 并行 Read `jeecg-lowcode-lowapp` / `miniflow` / `dashboard` 的 SKILL.md 全文；`memory_search`；`miniflow-node-types.md`；`example/入库审批*.md`；`widget-options`；`json-config`；`desform-lowapp.md` 全文；`--help` 再确认。
 
-**五条元规则（对抗「猜 / 试 / 造」——报错循环的来源）：**
-
-1. **报错即答案**：脚本与接口的报错信息是照「下一步该用什么」设计的——租户全名、usage、可用字段清单、缺失的键名都写在里面。报错先**逐字读完报错再动手**，禁止另猜；同一报错连试 **≤ 2 次**，第 3 次必须重读对应文档片段。
-2. **动真机只准第一方脚本**：查/改真机一律走 `scripts/` 下的脚本（`build_app` / `postbuild_run` / `build_flows` / `app_audit`…）。禁止内联 python 直连 `api_request` / `urllib` 探测端点或改配置（分析本地文件允许内联 python）。
-3. **违例只改意图侧**：闸门报违例 → 改 `app_spec.json` / `flows.py` / `struct_cfg.py` 重跑，改不了的写进交付报告的偏离清单。**禁止从真机反推规格**（如拿真机配置生成「live spec」再拿去过闸门）——闸门绿 ≠ 规格对；规格是意图、真机是实现，实现迁就意图。
-4. **动手前先过三问**（想完再调工具）：① 这步跑哪个脚本（`scripts/` 全名）？参数齐不齐（api-base / token / tenant-id / app-id / spec / --expect）？② 上一步输出和报错里给了什么值？租户全名、usage、字段清单直接抄，禁止另猜。③ 输出落哪个文件？（只落 `%TEMP%\jeecg-desform\` 下）—— 弱模型不打草稿，这三问就是强制草稿。
-5. **内联 python 先防错**（允许分析本地文件，但先想好防御）：API 响应先判 `None` / 类型再取下标；`json.loads` 只吃字符串；字典取值用 `.get()`。—— `NoneType not subscriptable` / `string indices` / `json.loads(dict)` 全是没防御的内联脚本。
-
 > **动真机前先过 `scripts/precheck.py`**（纯静态、不联网、可反复跑）：
-> `python scripts/precheck.py --spec app_spec.json --flows flows.py --expect "表单=52,字典=22,看板=25"`
+> `python scripts/precheck.py --spec app_spec.json --flows flows.py --struct struct_cfg.py --expect "表单=52,字典=22,看板=25"`
+> （`--struct` 可选：读建后套件的 DEFAULTS，已给初值的累加目标不再报「缺初值」）
 > 拦的是**本来要真机才暴露**的错：公式占位符、带出字段名、看板透视空 `val`、
 > 查询面板跨表、流程 `ref/cond` 引了本行没有的字段、**网关单出口带条件**、
 > **标题只靠关联带出**。
@@ -56,10 +92,17 @@
 python "<lowapp>/scripts/build_app.py" --api-base URL --token TOKEN \
   --tenant-name "租户名" --app-name "应用名" --create-app --spec app_spec.json
 ```
+`--tenant-name` **必填**（给了 `--tenant-id` 也要带，后续子步骤按名字认租户）。
+
+> ⚠️ **`--create-app` = 必须新建**：租户里已有同名应用会**直接报错退出**（附已有 id），不再静默复用。
+> 续跑已建的应用（`--from` / `--only`）请**去掉 `--create-app`、改传 `--app-id <id>`**。
+> 2026-09-23 实测事故：旧行为下同名测试应用被当成新应用打了一整轮补丁（41 张表被改）。
+> 起名前先 `lowapp_creator.py --json '{"action":"list"}'` 看一眼现有应用名。
 
 规格格式（表名+字段名+关系，**只写业务语言**）见 `app-spec.md`。字段类型由 `spec_infer`
 推断、关联/汇总/字典由 `patch_fields` 建、流程由 `build_flows` 建——都不用手写。
 `--from 阶段名` 续跑，`--only 阶段名` 单跑。
+
 
 > ## ⛔ 灌数是**例外**，不是默认
 >
@@ -141,6 +184,14 @@ python "<lowapp>/scripts/lowapp_creator.py" --api-base URL --token TOKEN \
 
 ## ③ 双向关联（`add_link_record.py`）
 
+> ⛔ **写 `links` 时最容易漏的是「父→子」方向那一条**（2026-09-24 生产管理 53 表实测）：
+> 子表侧的「子→父」写了，父表侧的「父→子」漏了 → 那个字段被 `infer()` 兜底成**单行文本**，
+> 界面上本该是**明细表格**的地方变成一个输入框。**四道闸门全绿** ——
+> `app_audit` / `postbuild_verify` 都是拿**规格**当基准，规格里没这条 link 就没有比对对象。
+> 现已由 `precheck.py` 的 `check_table_named_fields` 判 **err**（字段名与另一张工作表同名却无
+> 对应 link，零误报），**动真机前跑一次 precheck 就能拦下**。
+> ⚠️ 之前 `check_undeclared` 其实报过，但混在一条 188 项的 ⚠ 里等于没报——现已剔除。
+
 job **必须** `tenantName` + `appName`（`target` 同样要 `appName`+`worksheet`）。**不要只写 `tenantId`/`appId`** → 脚本报 `缺少应用`。
 
 不同表可并行；**同一张表**的多个关联必须串行。
@@ -164,6 +215,23 @@ job **必须** `tenantName` + `appName`（`target` 同样要 `appName`+`workshee
 ⛔ **需求原文出现「子表」二字（并点名了从哪张工作表取数）时，③ 建出来的不是终点。**
 `create_linked_worksheets.py` 的 `link` 和 `add_link_record.py` 产的都是**普通 many 关联记录**：
 `isSubTable`、`model: sub_table_design_<key>`、两侧 `twoWayModel` **三处一处都不会落**。
+
+> ⛔ **别手搓 —— 填 `struct_cfg.py` 的 `SUBTABLES`，`postbuild_struct` 一次转完**
+> （`[(主表, 子表控件, 明细表, 明细表里回指主表的字段), …]`，见 `postbuild-kit.md` 决策表第 1 行）。
+> 漏做时 `precheck` / `build_app` / `postbuild_run` / `app_audit` / `postbuild_verify` **没有一处会失败**：
+> 2026-09-24 53 表应用 **15 处【子表】全建成普通关联记录**、`SUBTABLES` 空着，五道闸门全绿，
+> 是用户在设计器里逐个翻出来的。
+> **清单按需求原文逐条点名抽，禁止按控件名去重**（同日实测 `【子表】需质检的产成品`
+> 出现两次、挂两张父表：去重得 14，实际 15）。
+>
+> ⚠️ **明细表无回指字段 = 需求写漏，不是"要不要转"的问题。**
+> **先照搬同应用同类子表的成对写法补上再转，别停下来问**（2026-09-24 实测 15 处里 1 处）。
+> 要问的是「写漏的字段按什么补」（命名 / 是否成对 / 显示列 / 默认值挂谁）——**不是「要不要转成子表」**；
+> 补完在交付说明里点名「需求清单外新增的字段」。
+> 唯一需要用户定的取舍：**明细表已有的回指字段被多个父表争用**（互指只能选一个）。
+> **同理：「控件是子表」与「业务规则点名锁定它」是两个独立维度** ——
+> 15 处里只有 8 处需求在「动作：锁定（只读）→ …」里点了名，另外 7 处
+> **只转、不要动规则目标**（补了就是超需求改动）。
 
 转换 4 步见 `desform-link-record.md`「二-a」，在本表 links 全部成功之后、`layouts` 之前跑：
 主表侧顶层 `isSubTable:true` + `model` 改 `sub_table_design_<控件key>` → 两侧 `twoWayModel` 互指
@@ -206,6 +274,11 @@ job **必须** `tenantName` + `appName`（`target` 同样要 `appName`+`workshee
 > ② ~~主表 `summary.options.linkTable`~~ —— **不在此列**（2026-09-21 更正）：它存的是控件 **key**，不受 model 换名影响，动了反而坏；
 > ③ 本表 `formula` 表达式里的 `$<model>$` 占位；
 > ④ 简流分支条件的 `field` / `data_update.updateFields[].field`。
+> ⑤ **`config.bizRuleConfig[].actions[].value[]`（业务规则「锁定（只读）」的目标列表）**——
+>    按 model 存，就在 `desformDesignJson['config']` 里（与 ①②③ 同一次 grep 覆盖）。
+>    转子表后要把**新 model 补进去**，规则才锁得住它；没补则规则在、条件对、`save` 全绿，
+>    而「转成子表能不能被锁」的验证**是空的**（2026-09-24：目标 24 个里没它，用户测不出任何东西）。
+>    ⚠️ 这档 `SUBTABLES` **不覆盖**，转换后逐表单独补。
 > ⚠️ ④ 有反直觉处：条件里该字段的 `type` **仍是 `link-record`**，不是 `sub-table-design`。
 > ⚠️ **转换前抓的字段表快照（`fetch_form_fields` / 中文名→model 映射）在转换后整份作废**——
 > ④ 建简流时若复用 ③ 阶段缓存的那份，条件会写到已不存在的 model 上而**不报错、也不生效**。
@@ -215,6 +288,89 @@ job **必须** `tenantName` + `appName`（`target` 同样要 `appName`+`workshee
 ## ④ 简流（只 import `miniflow_creator`，禁止打开 node-types / 入库审批示例）
 
 同一 `.py`：`fetch_app_forms` + `fetch_form_fields` 解析中文名 → `build_process_json` → save → deploy。全程 py ≤2 次。
+
+> ⛔ **写第一个字之前先确认：改名（`RENAME`）做完了没有 —— 这是本段的第 0 条规则
+> （2026-09-22 进销存 47 表实测，代价：17 条子流程字段解析失败 + 一整轮返工）。**
+>
+> `build_flows` 是**按「中文字段名」解析**的。`RENAME` 换的是控件显示名（key/model 不变），
+> 设计器内部 `$model$` 引用安全，**但流程源码里的中文名会全部对不上**。
+>
+> **正确顺序**（不可交换）：`build_app`（**不带 `--flows`**）→ `postbuild_struct`（含 `RENAME`）
+> → `postbuild_defaults` → **再写/跑 `build_flows`**。
+> **流程源码里直接写改名后的名字**（`ref("成本单价/元")`、`add()/update()` 的 mapping 键、
+> `cond` 的字段名），别等报错再补。
+>
+> 漏改的症状是 `FAIL:sub … 'XX 里没有字段 成本单价'` —— 不会静默，但一条失败拖住整批。
+> 已写完才发现要改名时：回扫流程源码用**负向前瞻** `名字(?!/元)` + **最长优先**排序
+> （`收款金额` 是 `已收款金额` 的子串，用「已含 `X/元` 就跳过」的守卫会整批漏掉，本轮实测漏 12 处）。
+> 详见 `postbuild-kit.md`「3.1 `struct_cfg.py`」的 RENAME 块。
+
+> ⛔ **建完 subEvent 子流程必须再补发一轮 —— 这是本段的第二硬规则（2026-09-22 进销存 47 表实测，
+> 代价：25 条子流程白建 + 父流程被闸门整体拦下 + 一整轮返工）。**
+>
+> `build_flows.py` 对子流程报 `OK:sub …`、`deploy` 也全绿、`/act/process/extActProcess/list` 里也
+> `processStatus=1`，**但记录的 `customProcessId` 是 `None`** → 引擎把定义 key 拼成坏 key `process`，
+> 父流程的 `callActivity` 永远找不到定义（阶段①.5 闸门会报
+> `FAIL:barrier … 在引擎里没有已部署定义`，**25/25 全中**）。
+>
+> **补发 = 一条命令**（建完子流程、建父流程之前跑；实测 25 条 **42 秒**）：
+>
+> ```bash
+> python scripts/postbuild_subpub.py --api-base … --token … --tenant-id … --app-id …
+> ```
+>
+> 幂等可反复跑；`--check-only` 只核验现状、`--dry-run` 只列待补发的、退出码 2 = 有失败项。
+> **核验/判据口径统一为定义 key 本身**：`GET /act/process/extActProcess/queryById?id=<DBid>`
+> → `result.processXml` 是 base64，解码后 `<process id="process<DBid>">` 才算注册成功。
+>
+> ⚠️ 判据**不能**用记录里的 `customProcessId` —— `saveFlow` 拿它拼 BPMN 但**不回写该列**，
+> `queryById` 回读恒为 `None`，拿它当判据会把 25 条已就绪的流程全报成「待补发」（2026-09-22 实测）。
+> ⛔ **也不要用 `/act/process/list` 核验 —— 该接口实测 read timeout，白等 5 分钟。**
+>
+> 脚本内部的配方（miniflow `gotchas #47`，2026-09-03 定论），手写补丁时照抄：
+> ① `POST /act/designer/miniDesFlow/api/saveFlow`（**form-urlencoded，不是 JSON body**）带
+> `id/customProcessId=<DBid>/processKey=process<DBid>/processName/processType=oa/lowAppId/startType=subEvent/processJson/updateCount`；
+> ② `PUT /act/process/extActProcess/deployProcess` body `{"id":"<DBid>"}`。
+>
+> **建父流程之前必须跑这一步**；`--force` 只是"承认带病继续"，不是修法。
+> `build_app.py` / `postbuild_run.py` 目前都**不含**这一段——建完子流程、建父流程之前，手工插一次。
+>
+> ✅ **2026-09-28 修：`build_flows` 的 ①.5 屏障已改用同一条权威判据（`queryById` + `processXml`）。**
+> 在那之前它判的是 `/act/process/list` —— 正是上面写着「read timeout、别拿它核验」的那个接口，
+> 于是出现最坏组合：`postbuild_subpub` 报「30/30 已就绪」，**同一次运行的屏障**报「30/30 未注册」，
+> **补发之后重跑屏障仍然全红**（进销存 47 表实测，连报两趟、白烧一轮）。
+> 现在屏障是两层：① 逐条 `queryById` 解 `processXml`（**权威**，就是 `postbuild_subpub` 用的口径）；
+> ② 只有 ① 报缺口的，才再用 `/act/process/list` 兜一次**并集**（它会被超时吞成空集，
+> 所以**只能救误报、不能一票否决**）；① 全过时**根本不发那个请求**（省掉它的超时等待）。
+>
+> **因此正确顺序是**（不要再插一轮空跑）
+> `build_flows` 建子流程（被屏障拦下 = **预期路径**）→ `postbuild_subpub.py`
+> → **`postbuild_subpub.py --check-only` 确认 `异常 0`** → **原命令重跑 `build_flows`**（屏障自动放行，父流程正常建）。
+> ⛔ **不要绕过 `--check-only` 直接 `--force`**：`--force` 把「真没注册」和「判据读不到」一起放行，
+> 而这两者在运行期的后果完全一样（`FlowableObjectNotFoundException`）。只有 `--check-only`
+> 明确报出失败、且你判定可以带病继续时才用 `--force`。
+
+> ⛔ **建完父流程之后，必须再跑一次子流程收尾修复 —— 这是本段第三硬规则（2026-09-23 进销存 47 表实测，
+> 代价：6 条子流程被打回 `tableEvent` 误触发 + 13 条 `subFlowSourceInfo` 为空 + 一整轮排查）。**
+>
+> 上面 ⑤.5 的 `postbuild_subpub.py` 只认**已经是 `subEvent`** 的子流程，
+> 而 `build_flows` 的「父流程回填趟」在 ⑤ 之后**又重存了一遍子流程**，把其中一部分的
+> `startType` 打回 `tableEvent` —— 它们会变成普通表事件流程，在上下文表被写时**误触发**；
+> 同时 `subFlowSourceInfo`（「被以下工作流触发」）也被清空。
+> 两者都**不报错**，`save`/`deploy`/条数/`app_audit` 全绿；只有 `check_node_contract`
+> 的「其中子流程 N 条」会少（19 而不是 25）。
+>
+> **一条命令收尾（幂等，建完父流程后必跑）**：
+>
+> ```bash
+> python scripts/postbuild_subfix.py --api-base … --token … --tenant-id N --app-id A --expect 25
+> ```
+>
+> 它从**各父流程 `processJson.subFlowList` 反推**该修哪些子流程（权威来源，不靠名字猜），
+> 逐条重存 `startType=subEvent` + `customProcessId` + `processKey` 并回填 `subFlowSourceInfo`，再 deploy。
+> 判据 = `startType` + `subFlowSourceInfo` + `processXml` 解出的定义 key **三项全对**；
+> `--check-only` 只核验、`--dry-run` 只列计划、退出码 2 = 有失败项。
+> **排位**：⑤ 建父流程 → **⑤.6 本步** → ⑥ `check_node_contract`。详见 `engine-contract.md` #7-d。
 
 > ⚠️ **建 `edit`（填写）节点必须写 `content`**（= 填写人**显示名**，如 `'直接上级'`），否则设计器卡片显示灰色的「**设置这个节点**」未配置占位，用户会以为流程没建好。界面自己拼「填写人：」前缀，落库只放显示名；手建的节点设计器会自动写这个字段，脚本建的不会（2026-09-15 实测，用户指出「手动的就没有」）。
 > **显示名 ≠ 表达式原文**：填写人是表单字段就写字段中文名；填写人是表达式/内置解析（`assigneeByExp`+`${applyUserId}` 等）要写**语义名**（`'获取发起人'`，即同节点 `approverGroups[0].expressionsNames[0]`）；角色/岗位/部门写对应名称。把 `assigneeByExp(${applyUserId})` 原样塞进 content，画布卡片会把这段代码直接显示出来（2026-09-16 用户指着卡片纠正「这里应该是 获取发起人」，已自愈重发）。收尾回读断言 content 非空且**不含 `$`、不含 `assigneeBy`**。
@@ -230,17 +386,11 @@ FLOWS = [
         approve(name="主管审批", users=["admin"], mode=1),
     ]),
 ]
-# 每条流程都用 flow()/subflow() 等助手生成，不要写裸 dict（缺必填键会在构建时报 KeyError）。
 ```
 ```bash
 python "<miniflow>/scripts/build_flows.py" --api-base URL --token TOKEN \
   --tenant-id N --app-id A --spec flows.py
 ```
-
-> ⚠️ **报错速查**：
-> - `ModuleNotFoundError: No module named 'flow_dsl'` → 只有**脱离 build_flows 直接 `import flows` 试跑**才会撞（build_flows 自己会把 miniflow/scripts 挂进 sys.path，经它跑不需要 sys.path 头）。**不需要单独试跑**：静态检查交给 `precheck`，落地检查交给 `build_flows --dry-run`。
-> - `KeyError: 'processName'`（或其它必填键）→ flows.py 里有条目不是助手函数生成的（裸 dict 缺键），对照 `create-flow.md` 的 `flow()` 签名逐条核对。
-> - `FAIL:` 行 → 带 `--update --only "<流程名>"` 重跑，别整批重发。
 
 > ⚠️ **重跑失败项必须带 `--only`**（2026-09-17 实测）：`--update` 是**无条件全量重存+重发布**，
 > 63 条流程实测 **234s**，而且**什么都不改也一样跑满**。只改了几条却整批重发 =
@@ -265,9 +415,9 @@ python "<miniflow>/scripts/build_flows.py" --api-base URL --token TOKEN \
 | 按钮改当前行 | **E**（buttonEvent 的 `attr.formTableId=None`；save 前自愈 `updateFields`） |
 | 审批通过后按关联多条逐行改库存 | **F**（主流程 opinion + 子流程 D；getType=3 外科重写内嵌在 F，勿开 node-types） |
 
-子流程：三层 `startType=subEvent`；save 后 `register_subprocess_id`；再按 create-flow **#47** 补 `customProcessId=<DBid>` 保存并 deploy；`/act/process/list` 有 key=`process<DBid>` 才建父流程。
+子流程：三层 `startType=subEvent`；save 后 `register_subprocess_id`；再按 create-flow **#47** 补 `customProcessId=<DBid>` 保存并 deploy；**按 `queryById.processXml`（不是 `/act/process/list`）确认 key=`process<DBid>` 已注册**才建父流程。
 
-审批人：username/realname **精确**匹配点名 → 角色用 **roleName** 精确匹配 → 否则 `candidateUser` + `admin` + 该用户 `realname`。禁止把 `roleCode=admin`（超管角色）当成「管理员」。
+审批人：username/realname **精确**匹配点名 → 角色写 `approve(roles=["角色名或 roleCode"])`，**落库 roleIds 必须是 roleCode**（`build_flows` 按 `/sys/role/list` 自动解析，查不到直接报错；2026-09-24 前它把角色**名**原样写进 roleIds，三个应用任务全部无人可收） → 否则 `candidateUser` + `admin` + 该用户 `realname`。禁止把 `roleCode=admin`（超管角色）当成「管理员」。按部门负责人取人用 `appr(who="部门负责人")`（`${flowNodeExpression.getDepartLeaders(applyUserId)}`）；旧表达式 `${applyUserDeptLeaderId}` / `${applyUserDeptId}` 在本机 Flowable 报 Unknown property，实例起不来。
 
 > ⚠️ **审批组四种形态写错都是静默故障**（save/deploy 全绿、实例照起，**只是任务没人收到**，2026-09-16 用户实测报障）：① 指定成员 = `candidateUser`（单数）+ `approverIds:[**裸账号**]`（**不带 `user.` 前缀**，那是消息节点 `toUserIds` 的写法）；② 发起人 = `candidateUser` + `assigneeByExp`；③ 办理人=表单**用户**字段 = `candidateUsers`（**复数**）+ `assigneeByVariable`；④ 办理人=表单**部门**字段 = 同上 **再加 `variableContent[].isNeedTranslateToUserIds: true`**（缺它部门不展开成用户 → 部门成员全收不到）。
 > 验收判据只有一条：`/act/task/myTodo` 里任务是否出现在**该办理人**的待办（`/act/task/list` 的 `taskAssigneeId` 对表单字段类不回填，不能当判据）。最稳 = **正反例对照**：同一部门字段选「该用户所属部门」应出现、选「其不在的部门」应不出现，一次排除"兜底给发起人/管理员"的假阳性。详见 miniflow `gotchas #90`。
@@ -338,8 +488,6 @@ for transaction` → 请求积压 → **后端进程直接倒下**。串行在�
 
 ## ⑧ 交付闸门（**一条命令**，外加下面那张手工表）
 
-**闸门顺序（不可反）**：`precheck`（动真机前，唯一该反复跑的静态闸门）→ `build_app` → 建后套件（`postbuild_run`，含 `postbuild_verify`）→ `build_flows` → `check_node_contract` → 建盘 → 本闸门 `app_audit`。四道齐了才算交付。**全部建完之后才想起跑 precheck = 顺序事故**：那时它报的违例说明 spec/flows 与真机已漂移，只能改 spec/flows 修，禁止反推真机规格磨平（见文首五条元规则）。
-
 ```bash
 python "<lowapp>/scripts/app_audit.py" --api-base URL --token TOKEN \
   --tenant-id N --app-id A --spec app_spec.json --flows flows.py \
@@ -360,6 +508,19 @@ python "<lowapp>/scripts/app_audit.py" --api-base URL --token TOKEN \
 
 先跑 `--form <表名>` **单表小样**，别整批跑完才发现解析写错。
 
+> ⚠️ **`app_audit` 不查布局——交付前另跑两项**：① 按需求的半行/整行/1-3 逐字段设 `options.autoWidth`
+> （顺序在 `regroup_layout` **之后**，否则被重算冲掉）；② 逐页签回读 `panes[].list` 核对容器没漏搬。
+> 规则见 `app-spec.md` 的 layouts 节与「容器」节。
+
+> ⏱ **实测墙钟（2026-09-22 进销存 47 表 / 53 流程 / 16 盘）：`app_audit` 单跑 = 278 秒（4.6 分钟）。**
+> 它是**全轮最慢的单条命令**（要回读 47 张表设计 + 53 条 `processJson`），
+> 但**不是**"最后一项要 40 分钟"的来源——那种体感来自**它之前的返工轮**（见 ④ 的子流程补发硬规则）。
+> 预算：把 5 分钟留给它，不要在它前面再省那 42 秒的补发。
+>
+> **它还查「调子流程传参的字典文案」**（`attr.variableList` 里的字面量 vs 目标字段 options）——
+> 实测 `build_flows` **不会**把 `call_sub(pass_={"账向": "增加应收"})` 翻成存储值，落库就是文案，
+> 这里会报 `传参 … 像是「X.账向」的显示文案（存储值 '0'）`。**写 `pass_` 时直接写存储值**（`"0"`）。
+
 ### ⑧-b 端到端冒烟（**默认不跑**，用户要求时才跑）
 
 > ⛔ **默认不跑，连 `smoke.py` 都不用写。** 交付一个应用**不包含**端到端冒烟。
@@ -371,8 +532,31 @@ python "<lowapp>/scripts/app_audit.py" --api-base URL --token TOKEN \
 > **但交付说明里必须写明**：「三道结构闸门全绿，**未做端到端验证**——流程是否真的写对未经运行验证」。
 > 别把「闸门全绿」说成「流程没问题」，这两件事不是一回事（下一段就是原因）。
 >
+> **例外：一句话建应用（走 `requirement-design.md` 路由）必跑**，按该页第三节的最小集：每条分级审批（设计里有才测）高低阈值各一单（断言落点 + 进待办）+ 一条主链路回写。理由：设计是你补的、用户没逐条审过，而审批人配错是**四道闸门都看不见**的静默故障（2026-09-24 第 1 轮三个应用全踩）。配置写法见 `smoke-flows.md`。
+>
 > **什么时候值得主动提醒用户跑一次**：应用里有台账/记账/累加（`inc`/`dec`）、跨表回写、
 > 子流程逐行处理这类流程时——这些正是结构检查看不见、一跑就错的重灾区。提醒一句即可，别擅自跑。
+>
+> ### ⛳ 2026-09-23 实证：一次冒烟抓出 **4 个真缺陷**（进销存-标准版，47 表 / 52 流程）
+>
+> 交付时 `check_node_contract` 违例 0/提示 1、`app_audit` 违例 0/提示 0 —— **全绿**。
+> 8 个用例的冒烟一跑，**账全是错的**：
+>
+> | 抓到的问题 | 结构闸门 | 冒烟 |
+> |---|---|---|
+> | 79 条公式里 **30 条恒空**（表达式含全角 `×` `÷` / `IIF`） | 看不见 | ✅ |
+> | 19 条**链式公式不重算**（改了 `销售出库数量`，`当前库存数量` 停在旧值） | 看不见 | ✅ |
+> | 盘亏建出的凭证单**库存永远不动**（建单/明细/触发的**顺序竞态**） | 看不见 | ✅ |
+> | `get_one empty=` 错位 → 每轮往明细表扔**空行** | 看不见 | ✅ |
+>
+> **成本对照**：写 `smoke.py`（8 个用例）≈ 20 分钟；**不跑的话这 4 个缺陷会原样交付**，
+> 而它们每一个都让「账本」这个应用的核心功能失效。**带台账/记账的应用，这一段的性价比是正的。**
+>
+> ⚠️ **两个踩坑记录**：
+> 1. **残留判据不能只看「带标记的行」**——错位新建的**空行**没有任何文本列，标记兜底扫不到；
+>    收尾要**数一遍全表行数**（`sum(total)`），不能只看「带标记残留 0 条」。
+> 2. **断言要打在「账」上**，不是「流程跑了」上：只断言「凭证单建出来了」会漏掉
+>    「建出来了但没记账」——同一张单要同时断言记账位（`库存已记账=是`）**和台账数量**。
 
 ```bash
 python "<lowapp>/scripts/smoke_flows.py" --api-base URL --token TOKEN \
@@ -383,7 +567,7 @@ python "<lowapp>/scripts/smoke_flows.py" --api-base URL --token TOKEN \
 2026-09-21 进销存（47 表 / 56 流程）实测：三道结构闸门全绿的应用里藏着「第一笔入库丢账」
 「公式值累加把库存冲成 0」「同事件两条流程只跑一条」「判据取金额字段恒判错」—— 全靠造单回读才暴露。
 `smoke_flows.py` = 造最小单据 → 触发流程 → 轮询回读断言 → 按记录 id 清理（断言零残留）。
-配置只写中文名与显示文案（写法见脚本文首）；「新增即进审批」的表默认跳过（平台没有完成审批任务的 API）。
+配置只写中文名与显示文案，**写法见 `smoke-flows.md`**（别去翻脚本）；审批流用用例的 `approval` 断言测落点与待办、`approve_all` 办结后验回写，收尾自动清本次实例。
 **验收口径：`RESULT fail=0` 且「带标记的残留 0 条」。** 实测 12 个用例 / 28 条断言约 40 秒。
 
 > **两条纪律（2026-09-21 从零重建进销存实测，合计白烧约 15 分钟）：**
@@ -410,16 +594,18 @@ python "<lowapp>/scripts/smoke_flows.py" --api-base URL --token TOKEN \
 | **流程字段映射** | 需求里每条「新增记录中的【X】」逐条对齐该 `data_add` 的 `formModel`**条数**（契约校验只管结构键，**不看映射全不全**） | 条数一致 |
 | **表单布局** | 每张表回读 design，数 `divider` 与 `card` 子字段数 | 有分节、每卡 ≤3 字段 |
 | **控件类型 / 档位** | 逐字段比对「需求声明的控件 vs 实际 `type`」；连带比档位键（日期 `options.type`、他表字段 `options.saveType`）。做法与判据见 `app-spec.md`「`类型`」节末尾 —— **必须做全量比对，报告口径是「不符 0 处」**。⚠️ 抽查会漏：本轮先只发现 6 个金额字段，全量比对才又抓出 16 个「选择用户」+ 2 个「数字」（2026-09-21） | 不符 0 |
+| **流程节点形态（需求原文 → 真机 `processJson`）** | 拿**需求原文点名的节点**当基准（获取多条 / 获取单条 / 运算统计条数 / 互斥分支 / 相容分支 / 子流程 / 审批 / 定时…），逐个对照真机节点 `type`。⚠️ **这一条没有机械闸门**：`check_node_contract` 只判「结构合法」、`app_audit` 只比 spec/flows 与真机 —— 两者都看不见「按需求该建的那个节点被换成了别的」。**闸门的 ⚠ 提示不是改结构的许可证**：`✗ 预检不通过` 才必须改结构；`⚠ 提示` 一律照原文建、在交付里标为已知风险。⛔ 2026-09-20 与 2026-09-22 **同一应用的同一个子流程连撞两次**（「获取多条 → 统计条数 → 互斥分支」被换成「取单条 + 数据分支」，理由是「闸门告警 + 同语义」），两次 save/deploy/契约/审计全绿。详见 `miniflow/references/batch-flows.md` 的「禁止语义等价替换」条 | 不符 0 |
 | **金额字段的「类型」与「单位」** | 分开查，别只看一个：① `type == 'money'`（名字没「金额」二字的极易落成 `input`）② `options.unitText` 与需求原文一致（**`unitText` 会被静默丢弃而 `precision` 会落地**，别用 precision 当判据） | 不符 0 |
+| **子表形态** | **从需求原文逐条点名**抽出每处【子表】（**同名控件挂不同父表算两处**：2026-09-24 实测 15 处，按控件名去重会得 14），逐条验：主表控件 `isSubTable is True` + `model.startswith('sub_table_design_')` + 后缀==控件 `key` + `options.showType=='table'`；明细表回指字段 `showMode=='single'`+`showType=='card'`+`twoWayModel`==主表新 model；两侧互指；最后拿**旧 model** 全应用 grep。⚠️ 转不成的（明细表**无回指字段**）要单独列出问用户，别默默跳过 | 该转的都转了、旧 model **0 命中**。⛔ **这一档没有机械闸门**：`precheck`/`build_app`/`postbuild_run`/`app_audit`/`postbuild_verify` **一个都不查**（2026-09-24 生产管理 15 处全漏，五道闸门全绿，用户在设计器里翻出来）。防复发靠 **`struct_cfg.py` 的 `SUBTABLES` 填满**，不是靠交付说明里写待办 |
 | **关联记录子配置** | 需求写了就逐条比：`options.filters`（记录范围）、`advancedSetting.defaultValue`（默认带出）、`options.createMode.params.selectLinkModel`（批量添加绑定字段）、`options.twoWayModel` | 该有都有 |
-| **引用完整性（key vs model）** | 逐控件把**每一处引用**拿真机设计解析一遍：汇总 `linkTable`（→本表关联控件 **key**）与 `field`（→明细表 model）、他表字段 `linkRecordKey`（**key**）与 `showField`（model）、关联记录 `titleField`/`showFields[]`/`twoWayModel`/`filters.rules[].model`/`createMode.params.selectLinkModel`、默认值 `$key.model$`（key 是本表关联控件、model 在目标表）、`linkage`/`linkDataConfig` 的 `desformCode`+`appId`+`rules`+`linkages`、`auto-number` 的 `field` 段、`formula` 的 `$…$` | 解析不到 **0 处**。⚠️ 这类「**存了值但面板解析不到**」的缺陷 `save`/回读/`precheck`/契约检查**全绿**、运行时往往也正常，**只有打开设计器面板才看得见**（2026-09-21 汇总 `linkTable` 实测报障）。**凡是脚本之外手改过的引用键，必须单独验**——脚本按契约生成的反而稳。校验器要能自证：注入一处已知缺陷看它报不报，别让校验器本身悄悄退化 |
+| **引用完整性（key vs model）** | 逐控件把**每一处引用**拿真机设计解析一遍：汇总 `linkTable`（→本表关联控件 **key**）与 `field`（→明细表 model）、他表字段 `linkRecordKey`（**key**）与 `showField`（model）、关联记录 `titleField`/`showFields[]`/`twoWayModel`/`filters.rules[].model`/`createMode.params.selectLinkModel`、默认值 `$key.model$`（key 是本表关联控件、model 在目标表）、`linkage`/`linkDataConfig` 的 `desformCode`+`appId`+`rules`+`linkages`、`auto-number` 的 `field` 段、`formula` 的 `$…$`、**`config.bizRuleConfig[].actions[].value[]`（业务规则锁定目标，按 model 存）** | 解析不到 **0 处**。⚠️ 这类「**存了值但面板解析不到**」的缺陷 `save`/回读/`precheck`/契约检查**全绿**、运行时往往也正常，**只有打开设计器面板才看得见**（2026-09-21 汇总 `linkTable` 实测报障）。**凡是脚本之外手改过的引用键，必须单独验**——脚本按契约生成的反而稳。校验器要能自证：注入一处已知缺陷看它报不报，别让校验器本身悄悄退化 |
 | **自定义按钮** | `desform_custom_button.py` `action=list` 逐表数个数；每个非空 `processId` 必须在**本应用**流程清单里（`lowAppId` 过滤）——纯表单按钮应为 `null`/`false` | 悬空 0 |
 | **按钮条件值** | `conditionsGroup[].queryItems[].val`：link-record 用记录 id（纯数字）、字典控件用 `itemValue` | 无文案/无空值 |
 | **列表视图** | 逐表 `action=list` 取视图，再 `action=get` 回读 `conditions` / `queryList` / `columnList`(show) / `hasSummary` | 与规格一致 |
 | **功能开关** | 逐表 `get_switch_settings(code)`，数 `enabled=True` 的 code 个数 | 该开的全开 |
 | **导航隐藏** | `get_menus(app_id).menuList[].hideFlag` | 该隐藏的 `=1`，其余 ≠1 |
 | **导航顺序** | `check_menu_order(get_menus(app_id)['menuList'], [(分组,[表…]),…])` —— 比的是接口**返回顺序**（前端按它渲染），不是 `orderNum` 排序后的顺序 | 返回 `[]`。`postbuild_verify.py` 只查「排序号重复/为空、分组 parentId 混用 NULL 与空串」（不需要期望）；**「顺序对不对」要带期望比**，由 `build_app` / `MENU_ORDER` 写完回读 |
-| **字典值形态** | 凡 `options.isDictItem` 控件，看按钮条件 / 简流写入（`data_update.updateFields[].val`、`data_add` 常量）/ 视图过滤里是否出现该 model，值必须是 `itemValue`（如 `"0"`） | 无显示文案值 |
+| **字典值形态** | 凡 `options.isDictItem` 控件，看按钮条件 / 简流写入（`data_update.updateFields[].val`、`data_add` 常量）/ 视图过滤 / **看板图内筛选（`config.filter.conditionFields[].fieldValue`）** 里是否出现该 model，值必须是 `itemValue`（如 `"0"`） | 无显示文案值 |
 | 数据 | `list_data(code,1,2)`，值在 **`record['desformData']`** 里 | 非空 |
 
 ⚠️ **「流程全部启用」这一行不能单独用**。2026-09-17 实测：63 条流程全绿、全部启用，
@@ -454,4 +640,5 @@ python "<lowapp>/scripts/smoke_flows.py" --api-base URL --token TOKEN \
 | `batch_update` 参数缺失 | 改 `edit_data` |
 | save 500 Duplicate key | `startTaskId` 不要等于任何节点 id |
 | deploy 成功但 callActivity 找不到定义 | 子流程补 `customProcessId` 再 deploy（组合 F / #47） |
+| `FAIL:barrier N/N 条子流程未注册` | **别改流程、别 --force**：先 `postbuild_subpub.py --check-only` 核一遍——报 `异常 0` 就是屏障自己的判据过时（2026-09-28 前的 `/act/process/list` 会整批误报），装最新 `build_flows` 后原命令重跑即自动放行；真报缺口才补发。⛔ 别拿「闸门告警」当改结构的许可证（见 ⑧ 末条） |
 | 编码已存在 / `[阻止]` | 换带日期后缀的 code，不要探 8 次 `get_form_id` |

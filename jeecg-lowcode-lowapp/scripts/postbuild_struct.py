@@ -35,8 +35,8 @@ ap.add_argument('--work', default=None)
 ap.add_argument('--dry-run', action='store_true')
 A = ap.parse_args()
 AID = A.app_id
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', AID)
-os.makedirs(WORK, exist_ok=True)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(AID, create=False)   # 该应用的工作目录（probe 建的；读不到就报缺 probe.json）
 _pp = os.path.join(WORK, 'probe.json')
 if not os.path.exists(_pp):
     sys.exit('缺少 %s —— 先跑 postbuild_probe.py' % _pp)
@@ -46,7 +46,8 @@ CODE2T = {v: k for k, v in CODE.items()}
 
 # ── 配置：全部可省略 ──
 DELETE_THEN_MOVE = {}    # {表: [(要删控件名, 要删类型, 搬入原位的控件名, 其类型)]}
-TO_LINKFIELD = {}        # {表: [(本表字段, 本表关联控件, 源表, 源表字段)]}  建错类型 → 他表字段（保留 key/model）
+TO_LINKFIELD = {}        # {表: [(本表字段, 本表关联控件, 源表, 源表字段[, 'view'])]}  建错类型 → 他表字段（保留 key/model）
+                         # 第 5 项写 'view' = 仅显示（需求明写「仅显示」时；默认存储数据，流程要用就别写 view）
 SUBTABLES = []           # [(主表, 主表子表控件, 明细表, 明细回指字段)]
 FILTERS = []             # [(本表, 本表关联控件, 目标表, 目标表字段, 本表比较字段)]  记录范围：目标字段 等于 本表字段
 CREATE_MODE = []         # [(主表, 子表控件, 明细表, 明细里用于批量选择的关联字段)]
@@ -143,7 +144,9 @@ for t, jobs in DELETE_THEN_MOVE.items():
 
 # ── 2. 建错类型 → 他表字段（保留 key/model，整体替换 options）──
 for t, jobs in TO_LINKFIELD.items():
-    for fname, lrname, src_t, src_f in jobs:
+    for job in jobs:
+        fname, lrname, src_t, src_f = job[:4]
+        save_type = 'view' if len(job) > 4 and job[4] == 'view' else 'save'
         w, lr, sw = find(t, fname), find(t, lrname, 'link-record'), find(src_t, src_f)
         if w is None or lr is None or sw is None:
             miss('%s 他表字段 %s（关联=%s 源=%s.%s）' % (t, fname, lrname, src_t, src_f)); continue
@@ -152,7 +155,7 @@ for t, jobs in TO_LINKFIELD.items():
         so, old = sw.get('options') or {}, w.get('options') or {}
         w['type'], w['className'], w['icon'] = 'link-field', 'form-link-field', 'icon-field'
         w['options'] = {
-            'linkRecordKey': lr['key'], 'showField': sw['model'], 'saveType': 'save',
+            'linkRecordKey': lr['key'], 'showField': sw['model'], 'saveType': save_type,
             'fieldType': sw['type'],
             'fieldOptions': {k: so[k] for k in ('type', 'format', 'precision', 'unitText',
                                                 'options', 'dictCode') if k in so},
@@ -231,7 +234,7 @@ for t, fname, prefix, ref_f, sep, width in FIELD_NUMBER_RULES:
         miss('编号 %s.%s（引用 %s）' % (t, fname, ref_f)); continue
     w.setdefault('options', {})['numberRules'] = [
         {'type': 'text', 'text': prefix, 'value': prefix},
-        {'type': 'field', 'value': rm},
+        {'type': 'field', 'model': rm, 'value': rm},   # 服务端认 model（widget-options auto-number 节）；只写 value 时引用段恒空（CRM-速测20：SJ--003）
         {'type': 'text', 'text': sep, 'value': sep},
         {'type': 'number', 'mode': 2, 'start': 1, 'reset': 0, 'length': width, 'continue': False}]
 

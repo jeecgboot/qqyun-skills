@@ -25,7 +25,7 @@ ap.add_argument('--dir', required=True)
 ap.add_argument('--dry-run', action='store_true')
 ap.add_argument('--from', dest='from_', default='struct', choices=ORDER)
 ap.add_argument('--replace', default='')
-ap.add_argument('--work', default='', help='probe.json / dicts.json 的目录（透传给各 postbuild_*.py；默认 %TEMP%/jeecg-desform/<app_id>）')
+ap.add_argument('--work', default='', help='probe.json / dicts.json 的目录（透传给各 postbuild_*.py；默认该应用的工作目录 %TEMP%/jeecg-lowcode/<英文简称>_<时间戳>/）')
 A = ap.parse_args()
 COMMON = ['--api-base', A.api_base, '--token', A.token, '--tenant-id', str(A.tenant_id), '--app-id', A.app_id]
 if A.work:

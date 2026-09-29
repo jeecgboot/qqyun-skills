@@ -114,7 +114,12 @@ def main():
 
     api_base = args.api_base.rstrip("/")
     token = args.token
-    init_lowapp(api_base, token, tenant_id=int(args.tenant_id), app_id=args.app_id)
+    # prewarm=False：本脚本只打 /sys/dict/*，从不调 get_form_id()，用不到表单 ID 缓存。
+    # 而 prewarm 打的是 /online/lowApp/miniflow/tenantAppFormList（拉**整个租户**的表单列表），
+    # 2026-09-24 实测 154 张表时单次要 22~38 秒。build_app 的字典段是「一个字典一个子进程」，
+    # 32 个字典就被这个预热白吃掉 ~800 秒（占整单 47%）。
+    init_lowapp(api_base, token, tenant_id=int(args.tenant_id),
+                app_id=args.app_id, prewarm=False)
 
     action = args.action
     if action == "query":

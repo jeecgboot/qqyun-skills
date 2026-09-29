@@ -4,7 +4,7 @@
 
 ## 第一条 tool call
 
-用户消息里的 `api-base` / token 直接用（会话已有租户/应用也写进 JSON）。Write UTF-8 JSON 到 `{tmpdir}/jeecg-desform/job.json`（先 `skill_temp_path.py -f job.json`；会话已有该目录直接拼路径）。立刻：
+用户消息里的 `api-base` / token 直接用（会话已有租户/应用也写进 JSON）。Write UTF-8 JSON 到 `skill_temp_path.py -f job.json` 打印的路径（`_jobs/` 下、文件名带时间戳）；属于一次建应用的一部分（已用 `--new` 开了工作目录）时，写进该次的工作目录。立刻：
 
 ```bash
 python "<skill目录>/scripts/add_link_record.py" --api-base <URL> --token <TOKEN> --config <job.json>

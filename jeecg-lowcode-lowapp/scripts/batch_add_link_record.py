@@ -88,8 +88,16 @@ def main():
 
     cfg['apiBase'] = a.api_base
     cfg['token'] = a.token
-    tmpdir = os.path.join(tempfile.gettempdir(), 'jeecg-desform')
-    os.makedirs(tmpdir, exist_ok=True)
+    # 按应用隔离：job 只给了应用名时先解析一次 id（只读应用列表，不建应用）；
+    # 固定名 batch_link_NNN.json 放根目录时，两个应用并行建会互相覆盖。
+    app_id = cfg.get('appId') or cfg.get('app_id')
+    if not app_id:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from create_linked_worksheets import resolve_tenant_app
+        _, app_id = resolve_tenant_app({k: v for k, v in cfg.items() if k != 'createApp'},
+                                       a.api_base.rstrip('/'), a.token)
+    from skill_temp_path import app_workdir
+    tmpdir = app_workdir(app_id, 'link')   # <工作目录>/link/
     workers = max(1, min(int(cfg.get('maxWorkers') or 4), len(links)))
 
     fails = 0

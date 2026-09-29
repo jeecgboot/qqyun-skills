@@ -37,7 +37,8 @@ ap.add_argument('--work', default=None)
 ap.add_argument('--dry-run', action='store_true')
 A = ap.parse_args()
 AID = A.app_id
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', AID)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(AID, create=False)   # 该应用的工作目录（probe 建的；读不到就报缺 probe.json）
 for _f in ('probe.json', 'dicts.json'):
     if not os.path.exists(os.path.join(WORK, _f)):
         sys.exit('缺少 %s —— 先跑 postbuild_probe.py' % os.path.join(WORK, _f))

@@ -195,25 +195,73 @@ def resolve_tenant_app(cfg, api_base, token):
             app_id = create_app(tenant_id=tid, app_name=app_name)
             print(f'[createApp] 应用不存在，已自动创建: {app_name} id={app_id}')
             init_lowapp(api_base, token, tenant_id=tid, app_id=app_id)
+            _share_form_cache(tid, app_id)
             return tid, app_id
         app_id = app['id']
+        if cfg.get('newApp'):
+            raise SystemExit(
+                f'FAIL: 要新建的应用「{app_name}」在租户里已存在（id={app_id}）—— 不会复用它。'
+                f'续跑这个应用：去掉 --create-app、改传 --app-id {app_id}；要新建：换一个应用名。')
         print(f'应用: {app.get("appName")} id={app_id}')
     else:
         print(f'应用 id={app_id}')
     init_lowapp(api_base, token, tenant_id=tid, app_id=app_id)
+    _share_form_cache(tid, app_id)
     return tid, app_id
+
+
+def _share_form_cache(tenant_id, app_id):
+    """把刚预热好的「表单编码 → ID」缓存落盘 + 设环境变量，让子进程跳过预热。
+
+    本脚本每张表 spawn 一个 `desform_creator.py` 子进程（且一个 chunk 内**并发**跑）。
+    子进程各自 init_lowapp 会**再预热一次**，而预热接口
+    `/online/lowApp/miniflow/tenantAppFormList` 的耗时随租户表数线性增长
+    —— 2026-09-24 实测本租户 154 张表时单次 11~14.5 秒，且服务端会把并发的
+    这一批重查询排队（并发拿不到收益）。
+    47 张表 = 47 次预热 ≈ 583 秒，占建壳段 668 秒的 87%。
+
+    这里让父进程预热的结果对所有子进程可见；子进程 `subprocess.run` 不传 env=，
+    继承 os.environ，所以设环境变量就够了。失败只退回各自预热，不影响正确性。
+    """
+    try:
+        import desform_utils as _du
+        path = os.path.join(_du.app_tmpdir(app_id=app_id), 'formids.json')
+        n = _du.dump_form_cache(path)
+        if n:
+            os.environ[_du.FORM_CACHE_ENV] = path
+            print(f'预热共享缓存: {n} 条 → 子进程跳过预热')
+    except Exception as e:                                         # noqa: BLE001
+        print(f'预热共享缓存失败（退回各自预热，不影响正确性）: {e}')
 
 
 # fields.type 合法码（2026-09-15 实测；写错 creator 报「未知的控件类型」，
 # 并行批建时一张错即整批失败重跑，故在此 fail-fast 预检）。完整说明见
 # references/fast-create.md「fields.type 合法码速查」。
+#
+# 2026-09-24：原白名单是 desform_creator._TYPE_MAP 的**真子集**，漏收的码在
+# creator 侧其实完全可用（类型映射、_PARAM_MAP 参数、_post_process_widgets
+# 跨字段解析都已实现），却在这里被整批拦下 —— 建 53 表应用时一个 barcode
+# 就让整批 0 张建成。现补齐为「_TYPE_MAP 减去 LOWAPP_DISABLED_WIDGET_TYPES
+# 与布局容器」。
+#
+# 补齐的非容器类型（job 的 fields[] 用 name/type + 各自参数即可表达）：
+#   barcode      条码/二维码，codeType=barcode|qrcode、sourceModel="$字段名$"
+#                （sourceModel 由 _post_process_widgets 解析成 model）
+#   summary / summary-date  汇总 / 汇总日期，linkTable 写子表或关联控件中文名
+#   color 手写签名 hand-sign 富文本 markdown 文本识别 ocr 地图 map
+# 仍未收录：tabs / grid / card / buttons —— 它们是容器，需要嵌套子控件，
+# 而 fields[] 是扁平结构、没有嵌套通道，放开只会建出空容器误导使用者。
+# 仍需预处理（--preprocess）或建后再补。
 KNOWN_FIELD_TYPES = {
     'input', 'textarea', 'number', 'integer', 'money', 'phone', 'email',
     'radio', 'checkbox', 'select', 'date', 'time', 'switch', 'rate', 'slider',
-    'imgupload', 'file-upload', 'divider', 'editor', 'text',
+    'imgupload', 'file-upload', 'divider', 'editor', 'markdown', 'text',
     'area-linkage', 'location', 'capital-money', 'text-compose',
     'auto-number', 'select-user', 'select-depart', 'select-depart-post',
     'org-role', 'sub-table-design', 'formula', 'link-record', 'link-field',
+    # 2026-09-24 补齐
+    'barcode', 'summary', 'summary-date', 'color', 'hand-sign',
+    'markdown', 'ocr', 'map',
 }
 
 

@@ -44,6 +44,17 @@ import sys
 
 #: 提示词里的中文控件名 → 平台控件 type
 #  （提示词写法有近义词，都收在这里；遇到没收录的会在结尾列出，别当通过）
+#: 「子表」在需求里有**两个词**、平台上有**两个形态**，单键映射天然只能对上一半：
+#:   内部子表 → `type == 'sub-table-design'`（列当场定义，数据嵌在主表 JSON 里）
+#:   外部子表 → `type == 'link-record'` **且** 顶层 `isSubTable:true`
+#:              （「转换工作表」的产物；转换**刻意不改 `type`**，标记只在 isSubTable + model 前缀，
+#:                见 `references/fast-full-chain.md`「③-b 子表（关联工作表）」）
+#: 所以「子表」这一档收成一个**候选集合**：内部 / 外部任一都算过。
+#: 而「内部子表」「外部子表」这两个需求里真在用的词，各自只认自己那一种 ——
+#: 补上它们之前，这两个词根本不在词表里 → 落到「类型名未收录」提示、**完全不参与比对**。
+_SUB_INNER = 'sub-table-design'
+_SUB_OUTER = 'link-record+isSubTable'      # 仅 type==link-record 且 isSubTable 为真时用这个 token
+
 TYPE_MAP = {
     '关联记录': 'link-record', '他表字段': 'link-field', '汇总': 'summary',
     '单行文本': 'input', '多行文本': 'textarea', '金额': 'money',
@@ -53,11 +64,30 @@ TYPE_MAP = {
     '文件上传': 'file-upload', '附件上传': 'file-upload', '图片上传': 'imgupload',
     '单选框': 'radio', '多选框': 'checkbox', '下拉': 'select', '单选下拉': 'select',
     '下拉选择': 'select', '下拉单选': 'select', '分割线': 'divider',
-    '子表': 'sub-table-design', '文本组合': 'text-compose', '编号': 'auto-number',
+    '子表': (_SUB_INNER, _SUB_OUTER),
+    '内部子表': (_SUB_INNER,), '外部子表': (_SUB_OUTER,),
+    '文本组合': 'text-compose', '编号': 'auto-number',
     '自动编号': 'auto-number', '地址': 'area-linkage', '富文本': 'richtext',
     '评分': 'rate', '滑块': 'slider', '颜色': 'color', '手机': 'phone',
     '金额大写': 'capital-money', '大写金额': 'capital-money', '手写签名': 'hand-sign',
 }
+
+
+def wants_of(tcn):
+    """需求侧的中文类型 → 可接受的 token 集合（None = 词表未收录）。"""
+    v = TYPE_MAP.get(tcn)
+    if v is None:
+        return None
+    return v if isinstance(v, tuple) else (v,)
+
+
+def actual_type(w):
+    """真机控件的比对 token。外部子表要能区别于普通关联记录，所以单独给一个 token。"""
+    if w.get('type') == _SUB_INNER:
+        return _SUB_INNER
+    if w.get('type') == 'link-record' and w.get('isSubTable'):
+        return _SUB_OUTER
+    return w.get('type')
 
 _TBL_RE = re.compile(r'^\s*\d+\.\s*(\S+?)\s*（标题字段：(.+?)）\s*$', re.M)
 _FLD_RE = re.compile(r'^\s*\d+\)\s*(.+?)（([^（）]+)）\s*$', re.M)
@@ -135,23 +165,25 @@ def main():
             if not w:
                 err.append('%s.%s 没建出来（提示词：%s）' % (tname, f, tcn))
                 continue
-            want = TYPE_MAP.get(tcn)
+            want = wants_of(tcn)
             if want is None:
                 skipped += 1
                 info.append('提示词里的类型「%s」未收录（%s.%s）—— 请补进 TYPE_MAP' % (tcn, tname, f))
                 continue
-            if w['type'] != want:
-                err.append('%s.%s 提示词「%s」应为 %s，实建 %s（model %s）'
-                           % (tname, f, tcn, want, w['type'], w['model']))
+            got = actual_type(w)
+            if got not in want:
+                err.append('%s.%s 提示词「%s」应为 %s，实建 %s%s（model %s）'
+                           % (tname, f, tcn, ' 或 '.join(want), w['type'],
+                              '（外部子表）' if got == _SUB_OUTER else '', w['model']))
             else:
                 ok += 1
                 if a.all:
-                    print('  ✓ %-12s %-12s %s' % (tname, f, want))
+                    print('  ✓ %-12s %-12s %s' % (tname, f, got))
         # 提示词里没写、但建了的字段。**默认只计数不列明细**：分割线（提示词用 `▸ 布局` 表达）、
         # 子表列（提示词写在子表那一行里）、自动编号这些天然不在字段列表里，逐条列会淹掉真信号。
         for f in built:
             if f not in flds and not f.startswith('__'):
-                extra.append('%s.%s（%s）' % (tname, f, built[f]['type']))
+                extra.append('%s.%s（%s）' % (tname, f, actual_type(built[f])))
 
     print('提示词可核对的字段 %d 个（一致 %d、类型名未收录 %d）'
           % (ok + len([e for e in err if '应为' in e]), ok, skipped))

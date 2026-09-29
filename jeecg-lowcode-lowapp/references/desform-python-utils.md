@@ -484,7 +484,8 @@ print(sql)
 
 > ⚠️ **2026-09-15 实测：`SUB_*` 子表列工厂必须传 `parent_key`（= 目标 `sub-table-design` 控件的 `key`），缺了抛 `missing 1 required positional argument: 'parent_key'`。** 正确：`pk = sub['key']` 后 `SUB_INPUT('工作内容', pk)`、`SUB_SELECT('是否交接', pk, ['已交接', '未交接'])`、`SUB_USER('工作交接人', pk)`。报错即修、不产生脏数据，但会让整表补丁失败重跑。另：job 建的空壳 `sub-table-design` 本身带 `[{"list":[]}]` 列结构——判「要不要加列」必须看列内 `list` 是否有控件（`any(c['list'] for c in sub['columns'])`），用 `columns` 是否为空判定会误判为「已有列」静默跳过。
 
-> ⚠️ **2026-09-14 实测：手工整单补丁（query_form → 改 design['list'] → `save_design_from_file`）时，所有工厂返回值都要取 `[0]`**（`FORMULA`/`AUTONUMBER`/`LINK_FIELD`/`make_sub_table` 均是 `(x, key, model)` 三元组）。尤其 `make_sub_table` 的 `columns[].list` 内是**未解包的子三元组**，插已有表必须二次解包，否则落库后子表列变 JSON 数组、保存照报成功、之后 query NPE 整表查不出（修复配方见 `desform-sub-table-types.md`「Python 用法」末尾警告）。**补丁脚本必须按"必然重跑"设计**：每表一个幂等标记（如 `'工号' not in wmap`）跳过已完成表——**没有标记的重跑会把 link-field/子表等新增控件重复叠加**（实测带出字段叠出 4 套同名字段，且全部保存成功无报错，只能在设计器里看出来）；`save_design_from_file` 之后立即 `query_form` 回读验证再进下一张表。
+> ⚠️ **2026-09-14 实测：手工整单补丁（query_form → 改 design['list'] → `save_design_from_file`）时，所有工厂返回值都要取 `[0]`**（`FORMULA`/`AUTONUMBER`/`LINK_FIELD` 是 `(x, key, model)` 三元组；**`make_sub_table` 是 `(container, key)` 二元组**，
+按三个值解包直接 ValueError——销售-速测18 照旧文档白跑一次）。尤其 `make_sub_table` 的 `columns[].list` 内是**未解包的子三元组**，插已有表必须二次解包，否则落库后子表列变 JSON 数组、保存照报成功、之后 query NPE 整表查不出（修复配方见 `desform-sub-table-types.md`「Python 用法」末尾警告）。**补丁脚本必须按"必然重跑"设计**：每表一个幂等标记（如 `'工号' not in wmap`）跳过已完成表——**没有标记的重跑会把 link-field/子表等新增控件重复叠加**（实测带出字段叠出 4 套同名字段，且全部保存成功无报错，只能在设计器里看出来）；`save_design_from_file` 之后立即 `query_form` 回读验证再进下一张表。
 
 ---
 

@@ -16,9 +16,11 @@
 content 是不是原始 id）、**同名重复副本**。
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 
 OK, BAD, WARN = [], [], []
@@ -34,7 +36,12 @@ APP_CODES = None
 # 都按 `function-{funType}` 写，node-types 4.4.1 明确要求；写成别的值设计器解析不到字段源）。
 # 2026-09-21 实测：不白名单它们，凡是带运算节点/统计条数的流程都会被误判成
 # 「不是本应用的表码」——一个 9 条流程的应用报出 7 条假违例，把真违例埋了。
-_PSEUDO_CODES = {"_variable_", "function-fun", "function-record"}
+# 2026-09-22 实测补全：表码形态是 `function-{funType}`，**五种 funType 都要豁免**
+# （node-types「十八」：number / date / date-diff / record / fun）。
+# 旧表只列了 fun/record —— 财务报表V1.0 的「期初，期末，累计自动运算」等 3 条流程
+# 因此各报 6~13 条「不是本应用的表码」假违例（全是 date 运算节点的登记条目与取值引用）。
+_PSEUDO_CODES = {"_variable_", "function-fun", "function-record",
+                 "function-number", "function-date", "function-date-diff"}
 
 
 def _get(api, tok, tid, app, path, timeout=90):
@@ -68,11 +75,22 @@ def nonempty(v):
     return v not in (None, "", [], {})
 
 
+#: 节点 type → 取值引用该用的 formNodeType（batch-flows.md「引擎侧的对应叫法」表）
+KIND_BY_ID = {}
+
+
 def check_flow(name, pj):
     ns = nodes_of(pj)
     nadd = {}           # 节点 id -> 节点（供 callActivity 反查上游）
     for n in ns:
         nadd[n.get("id")] = n
+    # 节点 id -> 该用哪种 formNodeType（校验 funContext／变量引用有没有打错标）
+    KIND_BY_ID.clear()
+    for n in ns:
+        k = {"data_get_one": "search", "data_get_more": "getMore",
+             "data_add": "plus", "start": "table"}.get(n.get("type"))
+        if k and n.get("id"):
+            KIND_BY_ID[n["id"]] = k
     # 子流程「本行」的 nodeId 是**父流程**那个 get_more 节点 —— 它不在本流程的节点树里，
     # 所以按 id 反查必然落空。更新对象指向它时是**合法**的，必须豁免，否则全量误报。
     own_row = {str(e.get("nodeId")) for e in (pj.get("formTableList") or [])
@@ -188,6 +206,10 @@ def check_flow(name, pj):
             fm = a.get("formModel") or n.get("formModel")
             if not nonempty(fm):
                 BAD.append("%s: data_add 的 formModel 为空 → 面板全空、运行时建空记录" % nm)
+            for k, v in (fm.items() if isinstance(fm, dict) else []):
+                if (str(k).startswith("date_") and isinstance(v, dict) and v.get("formNodeType") == "system"
+                        and v.get("variableValue") in ("nowDate", "nowTime")):
+                    BAD.append("%s: %s[%s] 往日期控件写系统变量 %s → 引擎落成 'yyyy-MM-dd HH:mm:ss' 字符串，与控件存的毫秒混格式；改用 millisecond（miniflow gotchas「2026-09-24 补正」）" % (nm, "formModel", k, v.get("variableValue")))
             for k in ("formTableCode", "formTableName"):
                 if not nonempty(a.get(k)):
                     BAD.append("%s: data_add 缺 %s" % (nm, k))
@@ -200,6 +222,20 @@ def check_flow(name, pj):
             if a.get("formTableId") != want:
                 BAD.append("%s: get_one.formTableId=%r 应为 %r"
                            % (nm, a.get("formTableId"), want))
+            # —— 排序（`flow_dsl.get_one(..., sort=, sort_type=)`）——
+            # 半配就是坏的：sortType 有值而 sortField 空 = 调用方以为写了排序、引擎当没有。
+            # ⚠️ 「该不该有排序」闸门判不了（多数 get_one 确实不需要），这里只判
+            # **配了但配坏**的形态；「排序字段能不能解析到本表」在 check_link_src 里查（那里有表元数据）。
+            sf = a.get("sortField")
+            if not nonempty(sf):
+                if nonempty(a.get("sortType")):
+                    BAD.append("%s: get_one 有 sortType=%r 但 sortField 为空 → 排序没生效"
+                               "（引擎按随机顺序取一条；`flow_dsl` 请用 "
+                               "get_one(..., sort='字段中文名', sort_type='asc')）"
+                               % (nm, a.get("sortType")))
+            elif (a.get("sortType") or "").lower() not in ("asc", "desc"):
+                BAD.append("%s: get_one.sortType=%r 只认 asc/desc"
+                           % (nm, a.get("sortType")))
             continue
 
         if t == "data_update":
@@ -212,6 +248,10 @@ def check_flow(name, pj):
                 v = u.get("val")
                 fld = u.get("field") or u.get("columnName") or "?"
                 # val 是对象（formNodeType 系）＝变量引用：条目顶层必须带 valueType=3 + valType
+                if (isinstance(v, dict) and v.get("formNodeType") == "system"
+                        and v.get("variableValue") in ("nowDate", "nowTime")
+                        and str(u.get("fieldType") or u.get("type") or "").startswith("date")):
+                    BAD.append("%s: %s[%s] 往日期控件写系统变量 %s → 引擎落成 'yyyy-MM-dd HH:mm:ss' 字符串，与控件存的毫秒混格式；改用 millisecond（miniflow gotchas「2026-09-24 补正」）" % (nm, "updateFields", fld, v.get("variableValue")))
                 if isinstance(v, dict) and v.get("formNodeType"):
                     if u.get("valueType") != 3:
                         BAD.append("%s: updateFields[%s] 引用变量但 valueType=%r 应为 3"
@@ -311,6 +351,30 @@ def check_flow(name, pj):
                     BAD.append("%s: function 缺渲染键 %s（设计器画布显示不全）" % (nm, k))
             if not nonempty(n.get("content")):
                 BAD.append("%s: function 的 content 为空 → 画布卡片空白" % nm)
+            # —— funContext 每条的 formNodeType 必须是**产出该值的节点的真实类型** ——
+            # 上下文行 table / data_get_one search / data_get_more getMore / data_add plus。
+            # ⚠️ 引用 get_one 却写成 table 时：**运算结果恒空** → 引用它的 data_add.formModel /
+            # data_update.updateFields 全部写空值，现象是「流程跑了，什么都没写」，而
+            # save/deploy 全绿（gotchas #127 / node-contract §9.4，2026-09-22 实测）。
+            # funContext 的 value 是「md5(紧凑 JSON) → URL 编码的该 JSON」；
+            # `funType=record`（统计条数）那档是普通 dict，不是这一形态 —— 用 md5 自证来区分。
+            for h, enc in (a.get("funContext") or {}).items():
+                if not isinstance(enc, str):
+                    continue
+                try:
+                    canon = urllib.parse.unquote(enc)
+                    if hashlib.md5(canon.encode("utf-8")).hexdigest() != h:
+                        continue
+                    ent = json.loads(canon)
+                except Exception:                        # noqa: BLE001
+                    continue
+                src_id = ent.get("formNodeId")
+                real = KIND_BY_ID.get(src_id)
+                if real and ent.get("formNodeType") != real:
+                    BAD.append("%s: funContext 条目 %s 的 formNodeType=%r 应为 %r"
+                               "（来源节点 %s 是 %s）→ 运算结果恒空、下游全写空值"
+                               % (nm, (ent.get("fieldText") or ent.get("field") or "?")[:24],
+                                  ent.get("formNodeType"), real, src_id, real))
             continue
 
         if t in ("databranch", "exclusive"):
@@ -404,6 +468,97 @@ def check_flow(name, pj):
                    % (name, ftl[fis[0]].get("formTableCode") or "function", fis[0], si + 1))
 
 
+# ================= 审批人能不能解析到人（2026-09-24 加）=================
+# 一句话建应用第 1 轮三个应用同时踩：审批节点 save/deploy/契约/审计**全绿**，但
+#   · `approverIds:["user.admin"]`（消息节点 toUserIds 的写法混进审批组）→ 任务派给不存在的人；
+#   · `roleIds:["部门经理"]`（角色**名**，引擎按 roleCode 归集）→ 任务谁都收不到；
+#   · `${applyUserDeptLeaderId}` → 本机 Flowable 抛 Unknown property，实例起不来、单据卡在「审批中」；
+#   · 外科补丁只改了 attr.approverGroups，BPMN 取的是**顶层** approverGroups → 改了等于没改。
+# 只有冒烟 + 后端日志才看得见。下面四条把它们变成违例。
+
+#: main() 联网时填：本租户 {roleCode: roleName}；None = 没取到，跳过「角色存在」这一项
+TENANT_ROLES = None
+#: main() 联网时填：账号 → 是否存在于本租户（带缓存）；None = 跳过「账号存在」这一项
+USER_EXISTS = None
+
+_EXP_OK = [re.compile(p) for p in (
+    r"^\$\{applyUserId\}$",
+    r"^\$\{flowNodeExpression\.(getDepartLeaders|getLevel[123]DepartLeaders)\(applyUserId\)\}$",
+    r"^\$\{flowNodeExpression\.getApplyDepartLeaders\(execution\)\}$",
+    r"^\$\{flowNodeExpression\.getFormDepartLeaders\(execution,\s*'[^']+'\)\}$",
+    r"^\$\{oaFlowExpression\.getUserSuperPositionLevel[123]\(applyUserId\)\}$",
+)]
+_EXP_KNOWN_BAD = {
+    "${applyUserDeptLeaderId}": "发起人部门负责人请用 ${flowNodeExpression.getDepartLeaders(applyUserId)}",
+    "${applyUserDeptId}": "它取的是部门 id 不是人",
+}
+
+
+def _grp_sig(groups):
+    """审批组的**生效键**签名（比对顶层 vs attr 两份用）。显示名/levelMode 之类不参与。"""
+    out = []
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        vc = g.get("variableContent")
+        out.append((g.get("approverType"), g.get("assigneeType"),
+                    tuple(g.get("approverIds") or []), tuple(g.get("roleIds") or []),
+                    tuple(g.get("deptIds") or []), tuple(g.get("postIds") or []),
+                    tuple(g.get("expressionsIds") or []),
+                    tuple((x or {}).get("fieldName") for x in vc) if isinstance(vc, list) else ()))
+    return out
+
+
+def check_approvers(name, pj):
+    for n in nodes_of(pj):
+        t = n.get("type")
+        if t not in ("edit", "approver"):
+            continue
+        nm = "%s/%s" % (name, n.get("name"))
+        a = n.get("attr") or {}
+        top, inner = n.get("approverGroups"), a.get("approverGroups")
+        if nonempty(top) and nonempty(inner) and _grp_sig(top) != _grp_sig(inner):
+            BAD.append("%s: %s 顶层 approverGroups 与 attr.approverGroups 不一致 —— BPMN 取**顶层**那份，"
+                       "只改 attr 等于没改（两份必须同改）" % (nm, t))
+        seen = set()
+        for g in list(top or []) + list(inner or []):
+            if not isinstance(g, dict):
+                continue
+            key = json.dumps(_grp_sig([g]), ensure_ascii=False, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            at = g.get("assigneeType")
+            if at == "assigneeByName":
+                for uid in (g.get("approverIds") or []):
+                    u = str(uid)
+                    if u.startswith("user."):
+                        BAD.append("%s: %s 审批组 approverIds=%r 带 `user.` 前缀 —— 那是消息节点 toUserIds 的写法，"
+                                   "审批组要写**裸账号**，否则任务派给不存在的人（无人待办）" % (nm, t, u))
+                    elif USER_EXISTS is not None and USER_EXISTS(u) is False:
+                        BAD.append("%s: %s 审批组 approverIds 里的账号 %r 在本租户不存在 → 任务无人可办"
+                                   % (nm, t, u))
+                if TENANT_ROLES is not None:
+                    for rid in (g.get("roleIds") or []):
+                        if str(rid) not in TENANT_ROLES:
+                            hint = next((c for c, nn in TENANT_ROLES.items() if nn == rid), None)
+                            BAD.append("%s: %s 审批组 roleIds=%r 不是本租户的 roleCode%s → 任务谁都收不到"
+                                       "（可用：%s）"
+                                       % (nm, t, rid,
+                                          "（这是角色**名**，编码应为 %r）" % hint if hint else "",
+                                          "、".join("%s(%s)" % (v, k) for k, v in
+                                                   sorted(TENANT_ROLES.items())[:20])))
+            elif at == "assigneeByExp":
+                for e in (g.get("expressionsIds") or []):
+                    es = str(e).strip()
+                    if es in _EXP_KNOWN_BAD:
+                        BAD.append("%s: %s 表达式 %s 在本机 Flowable 抛 Unknown property → 实例起不来、"
+                                   "单据卡在前置节点写的状态（%s）" % (nm, t, es, _EXP_KNOWN_BAD[es]))
+                    elif not any(r.match(es) for r in _EXP_OK):
+                        BAD.append("%s: %s 表达式 %r 不在已验证白名单里（miniflow-node-types.md「表达式」表）"
+                                   "—— 解析不了时实例起不来且所有闸门全绿" % (nm, t, es))
+
+
 SUB_DEFAULT_NAMES = {"data_get_one": "获取单条数据", "data_update": "更新记录",
                      "data_add": "添加记录", "databranch": "数据分支"}
 NAME_ALLOW = {"系统", "流程参数"}
@@ -440,6 +595,14 @@ def check_link_src(nm, pj, ctx):
             continue
         a = n.get("attr") or {}
         tf = fields_of(api, tok, tid, app, a.get("formTableCode"))
+        # 「取单条」的排序字段必须能在**本节点那张表**里解析到。写错时设计器「排序」下拉
+        # 空白、运行时排序不生效 → 引擎从命中的多条里随机取一条（FIFO 的「取最早一批」直接算错），
+        # 而 save/deploy/其他闸门全绿。这里用真机字段表查，静态查不了。
+        if n.get("type") == "data_get_one" and a.get("sortField") and tf:
+            if a["sortField"] not in tf:
+                BAD.append("%s: get_one.sortField=%r 不在表 %s 的字段里 → 排序不生效、"
+                           "取到哪一条是随机的"
+                           % (nm, a["sortField"], a.get("formTableCode")))
         for g in (a.get("searchFieldGroup") or []):
             for it in (g.get("queryItems") or []):
                 v = it.get("val")
@@ -775,16 +938,29 @@ def check_display(name, pj):
             if nonempty(e.get(k)):
                 codes.add(str(e[k]))
 
+    # 子流程的「输入行」= 父流程那条 get_more 节点（`formTableList` 里 isSubStart 那条的 nodeId）。
+    # 子流程内 `data_update` 更新「本行」时，`attr.formTableId` 按规范就写成
+    # `form_<父getMore节点id>_<表code>`（`build_flows._fix_sub_ownrow_refs()` 的产出形态，
+    # 金标 自动报价2「更新报价明细」同形）——该 nodeId **不属于本流程**，拿本流程 id 全集解析必误报。
+    # 2026-09-22 实测：财务报表V1.0「刷新凭证子号」等子流程因此各报 1 条假违例。
+    sub_src = next((str(e.get("nodeId")) for e in ftl
+                    if isinstance(e, dict) and e.get("isSubStart")), None)
+
     # ① 引用解析 + ② 可读性：节点自身带的引用与显示串
     for n in ns:
         t = n.get("type")
         a = n.get("attr") or {}
         nm = "%s / %s" % (name, n.get("name") or t)
         if nonempty(a.get("formTableId")):
-            why = why_ftid(a["formTableId"], ids, codes)
-            if why:
-                BAD.append("%s: attr.formTableId=%r 无法解析 —— %s"
-                           % (nm, a["formTableId"], why))
+            _ftid = str(a["formTableId"])
+            _nid = _ftid[len("form_"):].split("_", 1)[0] if _ftid.startswith("form_") else None
+            if sub_src and _nid == sub_src:
+                pass                      # 子流程更新输入行 → 父流程取数节点，豁免
+            else:
+                why = why_ftid(a["formTableId"], ids, codes)
+                if why:
+                    BAD.append("%s: attr.formTableId=%r 无法解析 —— %s"
+                               % (nm, a["formTableId"], why))
         if t == "function":
             # funText 只有在「统计条数」(funType=record) 时才是 `form_<节点id>_<表code>` 引用；
             # 四则/函数运算 (funType=fun/number) 的 funText 是**表达式**（`{{<hash>.<model>}}-{{…}}`），
@@ -836,6 +1012,7 @@ def check_display(name, pj):
 
     # 子流程：登记条目可以指向父流程的 getMore 节点，见 why_ftid 的 foreign_ok
     is_sub = str(pj.get("startType") or "") == "subEvent"
+    start_type = str((pj.get("attr") or {}).get("startType") or pj.get("startType") or "")
 
     # ③ 完整性：formTableList 每条都要能对上一个真实节点，且 id 段与 nodeId 一致
     reg = set()
@@ -853,6 +1030,10 @@ def check_display(name, pj):
             BAD.append("%s: formTableList[%d].nodeId=%r 在本流程里不存在（悬空登记）"
                        % (name, i, nid))
         if not nonempty(e.get("formTableId")):
+            continue
+        if start_type == "dateFieldEvent" and str(e["formTableId"]).isdigit():
+            # 按日期字段触发：触发表登记的就是工作表真实 DB id（trigger-types.md dateFieldEvent 参数表，
+            # 写 form_start_ 反而 UI 显示错表名）。以前一律按 form_ 形态判，项目管理-速测17/18 各 2 条假违例
             continue
         why = why_ftid(e["formTableId"], ids, codes, foreign_ok=foreign)
         if why:
@@ -1068,6 +1249,38 @@ def self_test():
     if any("formTableSourceNodeType" in b for b in BAD):
         fails.append("来源类型正确（search）却被误报: %s" % BAD)
 
+    # 审批人能不能解析到人（2026-09-24）
+    global TENANT_ROLES, USER_EXISTS
+    save_roles, save_ue = TENANT_ROLES, USER_EXISTS
+    TENANT_ROLES = {"dept_manager": "部门经理"}
+    USER_EXISTS = lambda acc: acc == "admin"                      # noqa: E731
+
+    def _apj(groups, attr_groups=None):
+        return {"childNode": {"type": "approver", "name": "审批", "content": "x",
+                              "approverGroups": groups,
+                              "attr": {"approverGroups": groups if attr_groups is None else attr_groups}}}
+    _g_ok = [{"approverType": "candidateGroups", "assigneeType": "assigneeByName",
+              "roleIds": ["dept_manager"], "roleNames": ["部门经理"]},
+             {"approverType": "candidateUser", "assigneeType": "assigneeByName", "approverIds": ["admin"]},
+             {"approverType": "candidateUsers", "assigneeType": "assigneeByExp",
+              "expressionsIds": ["${flowNodeExpression.getDepartLeaders(applyUserId)}"]}]
+    for label, grp, attr_g, want in (
+            ("审批人-user前缀", [{"assigneeType": "assigneeByName", "approverIds": ["user.admin"]}], None, "user."),
+            ("审批人-角色名", [{"assigneeType": "assigneeByName", "roleIds": ["部门经理"]}], None, "dept_manager"),
+            ("审批人-坏表达式", [{"assigneeType": "assigneeByExp",
+                                   "expressionsIds": ["${applyUserDeptLeaderId}"]}], None, "Unknown property"),
+            ("审批人-账号不存在", [{"assigneeType": "assigneeByName", "approverIds": ["nobody"]}], None, "不存在"),
+            ("审批人-两份不一致", _g_ok, _g_ok[:1], "不一致")):
+        del BAD[:], WARN[:]
+        check_approvers("合成样例", _apj(grp, attr_g))
+        if not any(want in b for b in BAD):
+            fails.append("没抓出「%s」（期望含 %r，实际 BAD=%s）" % (label, want, BAD))
+    del BAD[:], WARN[:]
+    check_approvers("干净审批样例", _apj(_g_ok))
+    if BAD:
+        fails.append("干净审批样例被误报: %s" % BAD)
+    TENANT_ROLES, USER_EXISTS = save_roles, save_ue
+
     # 同名副本
     del BAD[:], WARN[:]
     got = duplicate_name_bad([{"processName": "A", "id": "1"},
@@ -1086,6 +1299,7 @@ def self_test():
     print("  %s 干净样例不误报" % ("✗" if any("干净样例" in f for f in fails) else "✓"))
     print("  %s 四则运算节点不误报" % ("✗" if any("四则运算" in f for f in fails) else "✓"))
     print("  %s 同名重复副本" % ("✗" if any("同名副本" in f for f in fails) else "✓"))
+    print("  %s 审批人能解析到人（5 类坏形态 + 干净样例）" % ("✗" if any("审批" in f for f in fails) else "✓"))
     if fails:
         print("\n自测失败：")
         for f in fails:
@@ -1198,6 +1412,32 @@ def main():
     else:
         print("[check] 本应用表码 %d 个" % len(APP_CODES))
 
+    # 本租户角色与账号（审批人能不能解析到人，见 check_approvers）
+    global TENANT_ROLES, USER_EXISTS
+    try:
+        rd = _get(a.api_base, a.token, a.tenant_id, a.app_id, "/sys/role/list?pageNo=1&pageSize=500")
+        rr = rd.get("result")
+        rrecs = rr.get("records") if isinstance(rr, dict) else rr
+        TENANT_ROLES = {str(r.get("roleCode")): r.get("roleName") for r in (rrecs or [])
+                        if r.get("roleCode") and str(r.get("tenantId") or a.tenant_id) == str(a.tenant_id)} or None
+    except Exception:                                    # noqa: BLE001
+        TENANT_ROLES = None
+    if TENANT_ROLES is None:
+        print("  ! 未取到租户角色，跳过「审批角色 roleCode 存在」检查")
+    _ucache = {}
+
+    def _user_exists(acc):
+        if acc not in _ucache:
+            try:
+                ud = _get(a.api_base, a.token, a.tenant_id, a.app_id,
+                          "/sys/user/list?pageNo=1&pageSize=10&username=%s" % urllib.parse.quote(acc))
+                ur = (ud.get("result") or {}).get("records") or []
+                _ucache[acc] = any(x.get("username") == acc for x in ur)
+            except Exception:                            # noqa: BLE001
+                _ucache[acc] = None
+        return _ucache[acc]
+    USER_EXISTS = _user_exists
+
     for x in recs:
         nm = x.get("processName") or ""
         if a.only and a.only not in nm:
@@ -1222,6 +1462,7 @@ def main():
         if not isinstance(pj, dict):
             continue
         check_flow(nm, pj)
+        check_approvers(nm, pj)
         check_extra(nm, det, pj, call_meta, DEF_KEYS, str(x.get("id")) in called)
         check_link_src(nm, pj, (a.api_base, a.token, a.tenant_id, a.app_id))
         check_display(nm, pj)

@@ -245,8 +245,8 @@ for i, (cname, fac) in enumerate([('名称', SUB_INPUT), ('手机', SUB_PHONE), 
    `design['config']['hasWidgets']` 里补 `sub-table-design`
 4. **保存前本地自检**：递归扫 design，任何 `tuple`、或 `columns[].list` 里的非 dict 项 → 直接放弃保存
 5. `export_design_json` → 改 → `save_design_from_file` → `save_auth_from_design`
-6. **⛔ `SUMMARY()` / `FORMULA()` 返回的「已经是包好的 card」** —— 与 `SUB_*`（返回 `(widget, key, model)` 三元组、
-   要取 `[0]`）**不是一套形态**。按 `SUB_*` 的习惯再自己包一层 card，会得到 `card → card → 控件` 的双层嵌套，
+6. **⛔ `SUMMARY()` / `FORMULA()` 返回 `(card, key, model)` 三元组，`[0]` 已经是包好的 card** —— 与 `SUB_*`
+   （`[0]` 是裸控件）**不是一套形态**（考勤-速测19：本条旧写法「返回的已经是包好的 card」被读成不是元组）。按 `SUB_*` 的习惯再自己包一层 card，会得到 `card → card → 控件` 的双层嵌套，
    后果**静默**：`save_design_from_file` 照常回「设计JSON保存成功」、递归按 `name` 找控件也**找得到**
    （2026-09-22 销售管理实测）。
    只有 `regroup_layout.py` 会露馅：它只往 card 里看一层 → 报「字段『X』在这张工作表里找不到」，

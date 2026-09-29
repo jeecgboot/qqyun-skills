@@ -146,6 +146,27 @@ $QQY set-chart-filter API TOKEN --tenant-id TID --app-name APP --page-name PAGE 
 # 口语「数字」且表无该字段 → 回落到图 valueFields；--clear
 ```
 
+> ⛔ **`--value` 对「选项/字典类」字段必须写 `itemValue`，不能写显示文案。**
+>
+> 脚本**不转**这个值 —— 你把「潜在客户」传进去，它就原样落进
+> `config.filter.conditionFields[].fieldValue`（接口 success、回读也是这一串），
+> 而表单里存的是 `"0"` → **卡片恒 0**，且**没有任何闸门会报**。
+>
+> ```bash
+> # ❌ 落 fieldValue="潜在客户" → 恒 0
+> $QQY set-chart-filter … --name 潜在客户数 --field 客户分类 --op 等于 --value 潜在客户
+> # ✅ 落 fieldValue="0"（先查该选项的 itemValue）
+> $QQY set-chart-filter … --name 潜在客户数 --field 客户分类 --op 等于 --value 0
+> ```
+>
+> `itemValue` 来源：应用字典查 `lowapp_dict.py --action query`（或用同族 `fieldValue` 的既有写法）。
+> 成功判据是脚本打的 **`FILTERED=<图> field=<model>(<中文名>) op=1 value=<v>`** —— 念一遍 `value=`，
+> 确认它是 `itemValue` 而不是文案。
+>
+> **这条是跨 skill 的同一条规则**（lowapp 按钮条件 / miniflow `cond`·`updateFields`·`pass_` /
+> 看板 `conditionFields`），三处都是**静默失效**：lowapp 见 `fast-full-chain.md` ⑧「字典值形态」行，
+> miniflow 见 `gotchas.md` #40/#51，本页是看板这一档。
+
 ## 计算值
 
 ≠ rebind。聚合码：`1`求和 `2`最大 `3`最小 `4`平均 `5`计算。须同步 `calcFields`+`valueFields`。  

@@ -87,8 +87,8 @@ __all__ = [
     "flow", "subflow", "get_one", "get_more", "update", "add", "approve",
     "appr", "fill", "gateway", "data_branch", "compute", "compute_record",
     "call_sub", "delay",
-    "calc", "note", "ref", "lit", "inc", "dec", "var", "result", "START",
-    "record_id", "upsert", "DATA_BRANCH_NAME",
+    "calc", "note", "ref", "lit", "inc", "dec", "var", "result", "now", "START",
+    "record_id", "upsert", "DATA_BRANCH_NAME", "approve_result",
 ]
 
 START = "start"
@@ -98,10 +98,16 @@ DATA_BRANCH_NAME = "数据分支"
 #：表达式取人的三个内置选项：显示名 → (expressionsIds, expressionsNames)
 #  ⚠️ 名称与 id 必须成对，别自己拼——写「获取发起人」却绑 `${applyUserDeptLeaderId}`，
 #  设计器卡片显示的和实际取的人会不一致。
+#: 审批/填写节点「按表达式取人」。⚠️ 2026-09-24 实测：旧表 `${applyUserDeptLeaderId}` /
+#  `${applyUserDeptId}` 在本机 Flowable 报 `Unknown property used in expression` —— 实例起不来，
+#  前面「状态=审批中」却已写入，单据卡死；save/deploy/契约/审计全绿。改用 miniflow-node-types.md
+#  表达式表里的 flowNodeExpression 系列（「部门负责人」已真机验证进待办）。「部门」一档已删：
+#  它取的是部门 id 不是人。「上级部门负责人」真机验证：表达式可用，但上级部门**没设负责人**时
+#  实例照起、任务无人可办、不报错 —— 只在确认组织架构有上级负责人时用，别当默认。
 APPLY_EXPR = {
-    "发起人":      ("${applyUserId}", "获取发起人"),
-    "部门":        ("${applyUserDeptId}", "获取发起人部门"),
-    "部门负责人":  ("${applyUserDeptLeaderId}", "获取发起人部门负责人"),
+    "发起人":         ("${applyUserId}", "获取发起人"),
+    "部门负责人":     ("${flowNodeExpression.getDepartLeaders(applyUserId)}", "发起人部门负责人"),
+    "上级部门负责人": ("${flowNodeExpression.getLevel1DepartLeaders(applyUserId)}", "发起人上一级部门负责人"),
 }
 
 #：引擎约定：updateFields 的 optType（"1" 设值 / "2" 增加 / "3" 减少）
@@ -123,6 +129,15 @@ def inc(value):
 def dec(value):
     """更新时**扣减**（optType="3"）。见 `inc()`。"""
     return {"$dec": value}
+
+def now():
+    """当前时刻，写**日期**字段用：update("任务", {"完成日期": now()})。
+
+    落成系统变量 millisecond（毫秒时间戳，与日期控件的存储一致）。引擎的「当前日期」nowDate 写进去是
+    'yyyy-MM-dd HH:mm:ss' 字符串，同一列会和页面新增的毫秒混格式（2026-09-24 实测，以前 DSL 没有这个写法）。
+    """
+    return {"$sys": "millisecond"}
+
 
 def ref(field, node=START):
     """引用字段值。node=START 表示流程上下文表（主流程=触发表；子流程=上下文表）；
@@ -220,7 +235,8 @@ def subflow(name, context, params=None, nodes=None, **kw):
 
 # ---------------- 节点 ----------------
 
-def get_one(table, cond=None, empty="继续", name=None, fields=None):
+def get_one(table, cond=None, empty="继续", name=None, fields=None,
+            sort=None, sort_type=None):
     """取[表](条件) —— 取单条数据。
 
     cond 两种写法：
@@ -231,9 +247,22 @@ def get_one(table, cond=None, empty="继续", name=None, fields=None):
                                        ("产品编码", "等于", ref("产品编码"))])`
 
     empty: 继续 / 新增 / 中止 / **分支**（配 `data_branch()` 用，见该函数）。
+    ⚠️ **「中止」会给发起人发一条「流程结束通知：查找结果无数据」**，每触发一次收件箱多一条
+    （2026-09-24 项目申报-一句话10 报；同日对照实测确认）。「查不到就什么都不做」写
+    `empty="分支"` + `data_branch(found=[…], missing=[])`：missing 留空，流程正常结束、不发通知（同日实测）。
+
+    sort / sort_type: **排序字段（中文名）+ asc|desc**，落库 `attr.sortField/sortType`。
+    ⚠️ **凡是「取最早 / 最新 / 最优先的一条」都必须给**（FIFO 的「取入库日期最早的批次」、
+    取最近一次记录…）—— 不排序时引擎取哪一条是**随机**的，设计器面板「排序」也是空的；
+    而 save/deploy/回读全绿，只有业务账目错。
+
+        get_one("库存明细", cond=[("产品名称", "等于", ref("产品名称")),
+                                  ("库存数量", "大于", 0)],
+                empty="分支", sort="入库日期", sort_type="asc")
     """
     return {"type": "get_one", "table": table, "cond": cond or [],
-            "empty": empty, "name": name or ("获取%s" % table), "fields": fields}
+            "empty": empty, "name": name or ("获取%s" % table), "fields": fields,
+            "sort": sort, "sort_type": sort_type}
 
 
 def data_branch(name=None, found=None, missing=None):
@@ -327,6 +356,22 @@ def get_more(table, cond=None, sort=None, limit=0, from_=None, name=None):
             "name": name or ("获取多条%s" % table)}
 
 
+def _as_node_name(v, fn, param):
+    """`source=` / `via=` 收的是**节点名(字符串)**，不是节点对象。
+
+    ⚠️ 传 `get_one()` / `get_more()` 的返回值（节点对象）时，错误会一路带到构建阶段才炸，
+    报 `unhashable type: 'dict'`，**且不指出是哪个参数**（2026-09-23 实测，4~5 轮最小复现才定位）。
+    收节点对象的是 `postbuild_flows` 的 `src=` —— 两套构建器约定相反，别混。
+    None 合法（= 让上游自动绑定）。
+    """
+    if v is None or isinstance(v, str):
+        return v
+    raise TypeError(
+        "%s() 的 %s= 要传**节点名(字符串)**，收到 %s。"
+        "节点对象是 postbuild_flows 的 src= 约定；这里请写该上游节点 name= 时给的那个名字。"
+        % (fn, param, type(v).__name__))
+
+
 def update(table, mapping, name=None, source=None):
     """更新[表]:字段。mapping = {字段名: 值}；值是字符串/数字=固定值，`ref(...)`=引用。
 
@@ -344,13 +389,15 @@ def update(table, mapping, name=None, source=None):
     被落成「更新触发行」：设计器面板「更新对象」显示错、运行时更新不到刚查到的那行。
     """
     return {"type": "data_update", "table": table, "mapping": mapping,
-            "source": source, "name": name or ("更新%s" % table)}
+            "source": _as_node_name(source, "update", "source"),
+            "name": name or ("更新%s" % table)}
 
 
 def add(table, mapping=None, from_=None, name=None, source=START):
     """新增[表]。mapping 不给则用流程上下文行整行。"""
     return {"type": "data_add", "table": table, "mapping": mapping or {},
-            "from": from_, "source": source, "name": name or ("新增%s" % table)}
+            "from": from_, "source": _as_node_name(source, "add", "source"),
+            "name": name or ("新增%s" % table)}
 
 
 def approve(name, users=None, roles=None, mode=1):
@@ -377,7 +424,7 @@ def fill(name, users=None, roles=None, who=None):
         fill("仓库收货检验", users=["张三"])               # 指定人填写
         fill("财务处理", who="部门负责人")                 # 按表达式取人
 
-    who 只能取 `APPLY_EXPR` 的三个名字之一（发起人 / 部门 / 部门负责人）。
+    who 只能取 `APPLY_EXPR` 的名字（发起人 / 部门负责人 / 上级部门负责人）。
     不给 users/roles/who → 默认「发起人」。要设字段权限，建完流程后调
     `/act/process/extActProcessNodePermission/saveOrUpdateBatch`（见 `field-perm-rule.md`）。
     """
@@ -388,7 +435,7 @@ def fill(name, users=None, roles=None, who=None):
 def appr(name, who="发起人"):
     """审批[名称]，**审批人按表达式取**（默认流程发起人：`assigneeByExp` + `${applyUserId}`）。
 
-    who 取 `APPLY_EXPR` 的三个名字：发起人 / 部门 / 部门负责人。
+    who 取 `APPLY_EXPR` 的名字：发起人 / 部门负责人 / 上级部门负责人。
 
     落库形态（回读 processJson 确认过）：
         approverGroups[0] = {approverType: "candidateUser",
@@ -399,6 +446,24 @@ def appr(name, who="发起人"):
     """
     return {"type": "approver", "name": name, "users": [], "roles": [],
             "mode": 1, "who": who}
+
+
+def approve_result(ok=None, reject=None, name=None):
+    """**审批结果分支**：紧跟在 approve()/appr() 后面，按审批人点的「同意 / 不同意」分两支。
+
+        approve("部门经理审批", users=["admin"]),
+        approve_result(ok=[update("请假申请", {"审批结果": "同意"}, source=START)],
+                       reject=[update("请假申请", {"审批结果": "不同意"}, source=START)]),
+
+    与「意见分支」（suggest，按钮名=分支名）不是一回事：本节点落库 type=approve_result，两支固定叫
+    「通过 / 否决」（resultVal Y/N），构建器会给前面的审批节点补 hasResultBranch=true 与 addable=false
+    （少了前者后端不生成 ApproveResultBranchListener，一发起就报 Unknown property approve_result_xxx）。
+    以前 flow_dsl 没有它，「驳回写回作废/不同意」只能不建（2026-09-24 人事OA/CRM/项目管理-速测18 共 10 条流程降级）。
+    两支内部照常写节点；两支都可以为空（空支 = 什么都不做，流程结束）。
+    """
+    return {"type": "approve_result", "name": name or "审批结果分支",
+            "branches": [{"name": "通过", "nodes": list(ok or [])},
+                         {"name": "否决", "nodes": list(reject or [])}]}
 
 
 def gateway(name=None, branches=None, default=None):
@@ -451,7 +516,7 @@ def call_sub(sub_name, multi=True, pass_=None, name=None, via=None):
     没有数据对象 → 设计器里数据对象空白、子流程绑不上、运行时一行都不进子流程。
     """
     return {"type": "subprocess", "sub": sub_name, "multi": multi,
-            "pass": pass_ or {}, "via": via,
+            "pass": pass_ or {}, "via": _as_node_name(via, "call_sub", "via"),
             "name": name or ("调用%s" % sub_name)}
 
 

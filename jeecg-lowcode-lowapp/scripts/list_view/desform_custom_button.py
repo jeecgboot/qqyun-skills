@@ -91,9 +91,22 @@ def _rule_set_for(ftype: str):
 CONFIRM_TEXT_DEFAULTS = {'tip': '你确认对记录执行此操作吗？', 'ok': '确认', 'cancel': '取消'}
 
 
+# 系统字段（不在设计器控件里，但按钮条件 UI 能选）：中文名 → (model, 条件项 type)。
+# 以前「流程状态」原样落库成 field='流程状态'，按钮永远不按条件显示，
+# postbuild_verify 又报「不是本表字段」（项目管理-速测17/18 C）。
+SYS_FIELDS = {'流程状态': ('bpm_status', 'select'), '创建人': ('create_by', 'select-user'),
+              '创建时间': ('create_time', 'date'), '修改人': ('update_by', 'select-user'),
+              '修改时间': ('update_time', 'date'), '所属部门': ('sys_org_code', 'select-depart')}
+#: bpm_status 字典（desform-filter-rules.md）：显示名 → 编码
+BPM_STATUS = {'待提交': '1', '处理中': '2', '进行中': '2', '已完成': '3', '已作废': '4', '已挂起': '5',
+              '退回中': 'rejectProcess'}
+
+
 def _to_model(code: str, token, fields_map):
     if token in fields_map:
         return fields_map[token]['model']
+    if token in SYS_FIELDS:
+        return SYS_FIELDS[token][0]
     for f in fields_map.values():
         if token in (f.get('model'), f.get('key')):
             return f.get('model')
@@ -115,6 +128,13 @@ def _normalise_condition_items(items, code, fields_map, where):
         info = next((f for f in fields_map.values() if f.get('model') == it.get('field')), None)
         if info:
             it.setdefault('type', info.get('type'))
+        else:
+            sys_t = next((t for m, t in SYS_FIELDS.values() if m == it.get('field')), None)
+            if sys_t:
+                it.setdefault('type', sys_t)
+            if it.get('field') == 'bpm_status' and isinstance(it.get('val'), str):
+                # 流程状态存编码：写「处理中」「已完成」这类显示名时翻成 1~5（逗号多值逐个翻）
+                it['val'] = ','.join(BPM_STATUS.get(x.strip(), x.strip()) for x in it['val'].split(','))
         rule = it.get('rule')
         if rule is not None and rule not in _COND_RULES:
             raise ValueError('%s 的 rule 只能为 %s（不能用 = 等符号）: %s'
@@ -205,6 +225,26 @@ def _find_link_in(design, key):
     return walk(design)
 
 
+def _find_link_by_name(design, name):
+    """在设计 JSON 中按**中文名**定位 link-record 控件（名字与段标题 divider 重名时用）"""
+    def walk(n):
+        if isinstance(n, dict):
+            if n.get('type') == 'link-record' and n.get('name') == name:
+                return n
+            for x in n.values():
+                r = walk(x)
+                if r:
+                    return r
+        elif isinstance(n, list):
+            for x in n:
+                r = walk(x)
+                if r:
+                    return r
+        return None
+
+    return walk(design) if design else None
+
+
 def _link_record_widget(code: str, key):
     return _find_link_in(_design_json(code), key)
 
@@ -271,6 +311,13 @@ def _normalise_form_config(cfg: dict, code: str, *, strict: bool = False):
         if key is None:
             raise ValueError('%s 未找到字段: %s' % (where, token))
         info = find_info(fmap, key)
+        if info.get('type') != 'link-record':
+            # 字段表按名字做键，段标题 divider 与关联字段同名时会顶掉后者（2026-09-24 任务-一句话5：
+            # 「工时记录」段标题 → 报「类型为 divider」，被迫改段标题名）→ 到设计里按名字再找关联记录控件
+            alt = _find_link_by_name(design, token)
+            if alt is not None:
+                info = {'key': alt.get('key'), 'type': 'link-record'}
+                key = alt.get('key')
         if info.get('type') != 'link-record':
             raise ValueError('%s 必须是关联记录字段（link-record），「%s」类型为 %s'
                              % (where, token, info.get('type')))

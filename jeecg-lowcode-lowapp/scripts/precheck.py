@@ -188,6 +188,13 @@ def build_eff(spec):
                 '歧义，请写成要指定的那个控件名'
                 % (t, fld, tgt, len(back), t, '、'.join(names)))
 
+    for lk in links:
+        stray = [x for x in (lk.get('仅显示') or [])
+                 if x not in (lk.get('带出') or []) and x not in (lk.get('带出映射') or {})]
+        if stray:
+            err('links：%s.%s 的「仅显示」%s 不在这条关联的 带出/带出映射 里（仅显示只是给带出字段打标记）'
+                % (lk.get('表'), lk.get('字段'), stray))
+
     for sm in (spec.get('summaries') or []):
         t, fld = sm.get('表'), sm.get('字段')
         lkf, col = sm.get('关联字段'), sm.get('汇总列')
@@ -207,8 +214,13 @@ def build_eff(spec):
         if tgt:
             lk = next((l for l in (spec.get('links') or [])
                        if l.get('表') == t and l.get('字段') == lkf), None)
-            back = any(l.get('表') == tgt and l.get('目标') == t for l in (spec.get('links') or []))
-            if lk is not None and back and not lk.get('双向'):
+            back_rows = [l for l in (spec.get('links') or []) if l.get('表') == tgt and l.get('目标') == t]
+            back = bool(back_rows)
+            # 「双向」标在对面（单条）那一行也是这一对：patch_fields 两侧互填，写哪侧都一样。
+            # 以前只看父表这一行，照 requirement-design「标在其中一行」写在子表侧就报 3 条假错（担保-一句话10）
+            paired = lk is not None and (lk.get('双向') or any(
+                b.get('双向') is True or b.get('双向') == lkf for b in back_rows))
+            if lk is not None and back and not paired:
                 err('summaries：%s.%s 汇总的是关联「%s」，而「%s」也有指回「%s」的关联 —— '
                     '这一对必须写「双向」: true，否则从子表侧建的行不会进父表控件，汇总恒为空'
                     % (t, fld, lkf, tgt, t))
@@ -285,6 +297,10 @@ def check_forms(spec):
                 continue
             kw, want = hit                      # 命中的关键词 / 建议档位
             cur = (f.get('日期粒度') or {}).get(fld)
+            if cur is None and (f.get('类型') or {}).get(fld) == '日期':
+                continue                        # 类型里已写明「日期」= 就要年月日（人事OA-速测18 3 条误报）
+            if cur is None and (f.get('类型') or {}).get(fld) not in (None, '日期'):
+                continue                        # 类型里写明了别的（「归属年份」= 单行文本），名字线索作废（考勤-速测19）
             if cur is None:
                 warn('表「%s」的「%s」名字像「%s」，但没写 `日期粒度` —— 默认会落成年月日。'
                      '若需求是「%s」请写 {"%s": "%s"}' % (name, fld, kw, kw, fld, want))
@@ -377,6 +393,8 @@ def check_types(spec):
                 err('表「%s」的「%s」类型不合法：%s' % (name, fld, e))
                 continue
             shadow = [k for k in TYPE_SHADOW_KEYS if fld in (f.get(k) or {})]
+            if shadow == ['日期粒度'] and tn == '日期':
+                continue                        # 同是日期控件，粒度只是细化，不存在「盖错」
             if shadow:
                 warn('表「%s」的「%s」同时写了 `类型` 和 %s —— 建壳的 if/elif 里后者优先，'
                      '`类型` 会被盖掉；两个档一致就没事，不一致请二选一'
@@ -419,11 +437,21 @@ def check_undeclared(spec):
             if lk.get('表') == name:
                 patchy.add(lk.get('字段'))
                 patchy |= set(lk.get('带出') or [])
+                patchy |= set((lk.get('带出映射') or {}).keys())
         patchy |= {s.get('字段') for s in (spec.get('summaries') or [])
                    if s.get('表') == name}
+        # 建后套件会改类型的（TO_LINKFIELD / LINKDATA，--struct 时读）：不是「兜底成单行文本」（CRM/销售/进销存-速测19）
+        patchy |= {fld for (t, fld) in STRUCT_TYPED if t == name}
         patchy |= set((f.get('中转字段') or {}).keys())
+        title = f.get('标题')
+        # 标题字段本来就该是单行文本：列进「兜底」提示纯属噪音（2026-09-24 三个应用都被它多逼一轮 precheck）。
+        # 反过来，标题被名字推成多行文本/附件这类（`检查项内容` → textarea）才是要提示的。
+        if title and title not in declared and title not in patchy and infer(title) != 'input':
+            warn('表「%s」的标题「%s」会被名字推断成 %s —— 关联下拉/卡片显示的就是它，'
+                 '标题应是单行文本：改名（别以 内容/描述/说明 结尾）或在 `类型` 里写「单行文本」'
+                 % (name, title, infer(title)))
         for x in (f.get('字段') or []):
-            if x in declared or x in patchy or x.startswith('__'):
+            if x in declared or x in patchy or x.startswith('__') or x == title:
                 continue
             if infer(x) == 'input':          # 兜底 = 名字没有任何线索引出别的类型
                 loose.append('%s.%s' % (name, x))
@@ -431,7 +459,9 @@ def check_undeclared(spec):
         warn('有 %d 个字段既没写类型声明、名字也无线索，控件种类**兜底成单行文本**：%s '
              '—— 逐个核对需求：如果需求写的是「关联记录 / 下拉 / 金额 / 附件」这类，'
              '必须显式写进 `类型` 或 `links`（猜错不影响 save/deploy，界面上一眼才看得出）；'
-             '建完用 postbuild_types.py --prompt <需求文档> 逐字段对一遍'
+             '建完用 postbuild_types.py --work <postbuild_probe 产物目录> 逐字段对一遍'
+             '（它**没有 --prompt 参数**；需求原文要按 `1. 表名 （标题字段：X）` + `   1) 字段 （类型）`'
+             '的格式从 **stdin** 管进去）'
              % (len(loose), '、'.join(loose)))
 
 
@@ -483,6 +513,8 @@ def check_layouts(spec):
             if l.get('表') == name:
                 have |= set(l.get('带出') or [])
         have |= {s.get('字段') for s in (spec.get('summaries') or []) if s.get('表') == name}
+        # 容器名可以写进分节名单：build_app 装完容器后按名单把选项卡排到这个位置
+        have |= {c.get('名称') for c in (f.get('容器') or []) if isinstance(c, dict) and c.get('名称')}
         placed = []
         for s in secs:
             if not (s.get('字段') or s.get('标题')):
@@ -494,6 +526,13 @@ def check_layouts(spec):
         dup = sorted({x for x in placed if placed.count(x) > 1})
         if dup:
             err('layouts「%s」里这些字段被放了多次：%s' % (name, '、'.join(dup)))
+        # 段标题（落成 divider）与本表字段/关联字段同名：按名字解析控件的脚本可能取到 divider
+        # （2026-09-24 任务-一句话5「工时记录」、担保-一句话5「调查结论/评审结论」各返工一次）
+        ctl = have | {l.get('字段') for l in (spec.get('links') or []) if l.get('表') == name}
+        same = [s.get('标题') for s in secs if s.get('标题') and s.get('标题') in ctl]
+        if same:
+            warn('layouts「%s」的段标题与本表字段同名：%s —— 按名字引用字段（按钮新建关联、流程取值）'
+                 '可能取到段标题，建议段标题换个说法（如「工时记录」→「工时登记」）' % (name, '、'.join(same)))
         # 容器字段**故意不写进分节**（写了会被容器段摘走、只剩一条孤儿分隔线，
         # check_containers 会报错）。它们不归分节管，所以不该算「没点名」。
         in_cons = {x for c in normalize_containers(f)[0]
@@ -816,7 +855,9 @@ def apply_flow_rules(flows, spec):
             if n.get('type') == 'data_add':
                 added.setdefault(n.get('table'), set()).update((n.get('mapping') or {}).keys())
     for t, cols in sorted(inc_cols.items()):
-        bare = sorted(c for c in cols if c not in added.get(t, set()))
+        # `--struct` 给了建后套件配置时，DEFAULTS() 里已有默认值的列也算有初值
+        # （2026-09-24 一句话建应用三应用：`static('任务','实际工时',0)` 写了，这条提示照报，属误报）
+        bare = sorted(c for c in cols if c not in added.get(t, set()) and (t, c) not in DEFAULTED)
         if bare:
             warn('表「%s」的 %s 会被流程累加，但没有任何 add() 给它们初值 —— API/页面建的行上'
                  '第一次「增加/减少」会被静默吞掉；请在建后套件 DEFAULTS() 里给 0'
@@ -857,6 +898,47 @@ def check_flows(flows, spec):
                 err('流程「%s」引用了不存在的表「%s」' % (name, t))
         for node in (f.get('nodes') or []):
             _check_node(name, ctx, ctxf, node)
+    _check_shared_subflows(flows, subs)
+
+
+def _check_shared_subflows(flows, subs):
+    """同一条子流程被 ≥2 条流程逐行调用，而子流程里取了「本行」字段 → 只能绑一个调用方。
+
+    build_flows 回填时把子流程里「本行」引用改成**调用方那个取多条节点的 id**；第二个调用方的节点 id
+    不同，引用仍指向第一个 → 从第二个父流程调用时本行取值**全空**，四道闸门都不报
+    （2026-09-24 进销存-速测18：销售换货复用应收明细子流程，数量为空）。每个调用方各建一条子流程。"""
+    callers = {}
+
+    def walk(nodes, fname):
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            if n.get('type') == 'subprocess' and n.get('multi', True):
+                callers.setdefault(n.get('sub'), set()).add(fname)
+            for b in (n.get('branches') or []):
+                walk((b or {}).get('nodes'), fname)
+            for k in ('found', 'missing', 'default', 'nodes'):
+                if isinstance(n.get(k), list):
+                    walk(n[k], fname)
+
+    for f in flows:
+        walk(f.get('nodes'), f.get('name'))
+
+    def uses_row(o):
+        if isinstance(o, dict):
+            if '$ref' in o and o.get('$node') in (None, 'start'):
+                return True
+            return any(uses_row(v) for v in o.values())
+        if isinstance(o, list):
+            return any(uses_row(v) for v in o)
+        return False
+
+    for f in subs:
+        who = sorted(callers.get(f.get('name')) or ())
+        if len(who) > 1 and uses_row(f.get('nodes')):
+            err('子流程「%s」被 %d 条流程逐行调用（%s），且子流程里取了本行字段 ref() —— '
+                '本行取值只能绑定一个调用方，其余调用方调用时取值全空。每个调用方各建一条子流程'
+                % (f.get('name'), len(who), '、'.join(who)))
 
 
 def _node_map(nodes, ctx, out=None):
@@ -913,6 +995,10 @@ def _check_node(fname, ctx, ctxf, node, depth=0):
         for k in (node.get('mapping') or {}):
             if k not in EFF.get(tb, set()):
                 err('流程「%s」写 %s.%s：目标表没有该字段' % (fname, tb, k))
+    elif t == 'approve_result':
+        for b in (node.get('branches') or []):
+            for n in (b.get('nodes') or []):
+                _check_node(fname, ctx, ctxf, n, depth + 1)
     elif t == 'subprocess':
         if node.get('sub') not in SUBS:
             err('流程「%s」call_sub 调了未定义的子流程「%s」' % (fname, node.get('sub')))
@@ -935,7 +1021,12 @@ def _check_node(fname, ctx, ctxf, node, depth=0):
                 # 做 `in ctxf`，抛 `TypeError: unhashable type: 'dict'` 把整个预检带崩。
                 if isinstance(fld, dict):
                     rn = fld.get('$result')
-                    if rn is not None and rn not in (NODES.get(fname) or {}):
+                    if rn is None:
+                        # ref(字段, node=取单条节点) 当主语：build_flows 会拒（落库形态未实测），这里先拦
+                        err('流程「%s」网关判据写成了 %s —— 主语只能是触发行字段名或 result(运算节点)；'
+                            '按查到的记录判：compute("取值", "$x$", {"x": ref(字段, node=节点名)}) 再 result("取值")，'
+                            '或并进 get_one 的 cond 用 empty="分支" + data_branch()' % (fname, fld))
+                    elif rn not in (NODES.get(fname) or {}):
                         err('流程「%s」网关判据 result("%s")：前面没有叫这个名字的运算节点' % (fname, rn))
                     continue
                 if fld not in ctxf:
@@ -989,6 +1080,152 @@ def check_flow_refs(flows):
                     % (name, r, nd, tb))
 
 
+# ---------------- 数值用途 ----------------
+
+NUMERIC_OK = {'money', 'number', 'integer', 'formula', 'summary', 'capital-money', 'rate'}
+# ⚠️ 别叫 DATE_TYPES：同名模块级常量会覆盖上面日期粒度的合法集（year/datetime…），
+# 2026-09-24 实测把所有 datetime/year 日期粒度判成不合法（第 14 轮四个应用全中）。
+NUM_DATE_OK = {'date', 'time'}
+CMP_RULES = {'大于', '大于等于', '小于', '小于等于', 'gt', 'ge', 'lt', 'le'}
+SUM_NUMERIC = {'求和', '合计', '平均', '平均值', '均值'}
+SUM_EXTREME = {'最大', '最大值', '最小', '最小值'}
+TEXT_FUNCS = re.compile(r'\b(CONCAT|TEXT|LEFT|RIGHT|MID|SUBSTR\w*|REPLACE|UPPER|LOWER|TRIM)\s*\(', re.I)
+TYPE_HINT = {'input': '单行文本', 'textarea': '多行文本', 'select': '下拉', 'radio': '单选',
+             'checkbox': '多选', 'link-record': '关联记录', 'auto-number': '自动编号',
+             'select-user': '选择用户', 'select-depart': '选择部门', 'phone': '手机号',
+             'file-upload': '附件', 'imgupload': '图片', 'area-linkage': '省市区', 'date': '日期'}
+
+
+def field_type(spec, table, fld, depth=0):
+    """规格 → (表, 字段) 建出来会是什么控件。按 build_app `_split_fields` 的优先级复刻；
+    判不出（系统字段、带出追不到源、中转字段）返回 None —— 调用方跳过，不猜。"""
+    f = BY_NAME.get(table)
+    if f is None or depth > 6:
+        return None
+    for lk in (spec.get('links') or []):
+        if lk.get('表') != table:
+            continue
+        if lk.get('字段') == fld:
+            return 'link-record'
+        if fld in (lk.get('带出') or []):
+            return field_type(spec, lk.get('目标'), fld, depth + 1)
+        src = (lk.get('带出映射') or {}).get(fld)
+        if src:
+            return field_type(spec, lk.get('目标'), src, depth + 1)
+    if any(s.get('表') == table and s.get('字段') == fld for s in (spec.get('summaries') or [])):
+        return 'summary'
+    if fld not in (f.get('字段') or []) or fld in (f.get('中转字段') or {}):
+        return None
+    if fld in (f.get('字典') or {}) or fld in (f.get('静态下拉') or {}):
+        return 'select'
+    if fld in (f.get('静态多选') or {}):
+        return 'checkbox'
+    if fld in (f.get('静态单选') or {}):
+        return 'radio'
+    if fld in (f.get('日期粒度') or {}):
+        return 'date'
+    if fld in (f.get('编号') or {}):
+        return 'auto-number'
+    if fld in (f.get('公式') or {}):
+        return 'formula'
+    from spec_infer import explicit, infer
+    tn = (f.get('类型') or {}).get(fld)
+    if tn:
+        try:
+            return explicit(tn)
+        except ValueError:
+            return None             # check_types 已报
+    return infer(fld)
+
+
+def _numeric_err(table, fld, typ, used_by, ok):
+    if typ is None or typ in ok:
+        return
+    err('表「%s」的「%s」被%s当数值用，但它会建成「%s」(%s) —— 文本上的比较/求和接口全绿、结果全错。'
+        '修：在 forms[名称=%s].类型 里写 "%s": "金额"（或 "数字"/"整数"）'
+        % (table, fld, used_by, TYPE_HINT.get(typ, typ), typ, table, fld))
+
+
+def _walk_conds(fname, nodes, ctx, out):
+    """收集流程里所有 (表, 字段, 规则, 出处) 条件：网关/分支按上下文表，取数节点按目标表。"""
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            continue
+        t = n.get('type')
+        tb = n.get('table') if t in ('get_one', 'get_more', 'upsert') else ctx
+        for c in (n.get('cond') or []):
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                out.append((tb, c[0], c[1], '流程「%s」节点「%s」的条件' % (fname, n.get('name') or t)))
+        for b in (n.get('branches') or []):
+            for c in (b.get('cond') or []):
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    out.append((ctx, c[0], c[1], '流程「%s」分支「%s」的条件'
+                                % (fname, b.get('name') or n.get('name') or '分支')))
+            _walk_conds(fname, b.get('nodes'), ctx, out)
+        for k in ('found', 'missing', 'nodes'):
+            _walk_conds(fname, n.get(k), ctx, out)
+
+
+def check_numeric_usage(spec, flows, flow_spec=None):
+    """**被当数值用的字段必须建成数值控件**（2026-09-24 加）。
+
+    一句话建应用时，规格作者（模型）自己起字段名，`计划资金` `拜访费用` 这类名字
+    没有「金额」二字 → `infer()` 兜底成单行文本；而审批网关「计划资金 大于等于 200」、
+    汇总「拜访费用 求和」、公式「$拜访费用$+$差旅费用$」都把它当数值用。
+    接口、save/deploy、契约闸门全绿，只有结果错（文本比较 "90" > "200"、文本求和 0）。
+    `check_undeclared` 只给一条汇总 warn，淹在提示里 —— 这里按**用途**判 err。
+
+    日期可以参与比较（到期日 小于 今天）、极值汇总（最近跟进时间 = 最大值）和公式运算（日期差），
+    只有求和/平均必须是纯数值。
+
+    汇总/公式建表时按**规格原名**编译，用 spec；流程条件写的是 RENAME 后的现名，用 flow_spec
+    （项目管理-兵团：RENAME 把关联「人力成本预算明细」改成与汇总同名，按现名判公式会误报 3 条）。
+    """
+    flow_spec = flow_spec or spec
+    for sm in spec.get('summaries') or []:
+        way = sm.get('方式') or '求和'
+        if way not in SUM_NUMERIC | SUM_EXTREME:
+            continue
+        tgt = next((lk.get('目标') for lk in (spec.get('links') or [])
+                    if lk.get('表') == sm.get('表') and lk.get('字段') == sm.get('关联字段')), None)
+        col = sm.get('汇总列')
+        if not tgt or not col:
+            continue
+        ok = NUMERIC_OK if way in SUM_NUMERIC else NUMERIC_OK | NUM_DATE_OK
+        _numeric_err(tgt, col, field_type(spec, tgt, col),
+                     '汇总 %s.%s（%s）' % (sm.get('表'), sm.get('字段'), way), ok)
+
+    for f in spec.get('forms') or []:
+        t = f.get('名称')
+        for k, expr in (f.get('公式') or {}).items():
+            expr = expr or ''
+            if TEXT_FUNCS.search(expr):
+                continue
+            # 只判**直接参与四则运算**的占位符：左右紧挨 + - * /。
+            # 函数参数（`DATEIF($开始日期$,$完成日期$,1,'d')`）不在此列。
+            for m in re.finditer(r'\$([^$]+)\$', expr):
+                before = expr[:m.start()].rstrip()[-1:]
+                after = expr[m.end():].lstrip()[:1]
+                if (before and before in '+-*/') or (after and after in '+-*/'):
+                    _numeric_err(t, m.group(1), field_type(spec, t, m.group(1)),
+                                 '公式 %s.%s' % (t, k), NUMERIC_OK | NUM_DATE_OK)
+
+    conds = []
+    for fl in flows or []:
+        ctx = fl.get('table') or fl.get('context')
+        for c in (fl.get('cond') or []):
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                conds.append((ctx, c[0], c[1], '流程「%s」的触发条件' % fl.get('name')))
+        _walk_conds(fl.get('name'), fl.get('nodes'), ctx, conds)
+    seen = set()
+    for tb, fld, rule, used_by in conds:
+        if rule not in CMP_RULES or not isinstance(fld, str) or (tb, fld, used_by) in seen:
+            continue
+        seen.add((tb, fld, used_by))
+        _numeric_err(tb, fld, field_type(flow_spec, tb, fld),
+                     '%s（%s）' % (used_by, rule), NUMERIC_OK | NUM_DATE_OK)
+
+
 # ---------------- 数量 ----------------
 
 def check_counts(spec, expect):
@@ -1007,6 +1244,85 @@ def check_counts(spec, expect):
             err('%s 数 %d ≠ 期望 %d' % (k, got.get(k), want))
 
 
+#: 建后套件 DEFAULTS() 里配了默认值的 (表, 字段)；只在传 --struct 时填充
+DEFAULTED = set()
+#: 建后套件会改控件类型的 (表, 字段)：TO_LINKFIELD（→ 他表字段）、LINKDATA（→ 下拉来自工作表）
+STRUCT_TYPED = set()
+
+
+def load_struct_typed(path):
+    ns = {}
+    try:
+        exec(compile(open(path, encoding='utf-8').read(), path, 'exec'), ns)
+    except Exception:                  # noqa: BLE001  读不全只影响「兜底」提示，不拦
+        return set()
+    out = set()
+    for t, rows in (ns.get('TO_LINKFIELD') or {}).items():
+        for row in rows or []:
+            if row:
+                out.add((t, row[0]))
+    for row in ns.get('LINKDATA') or []:
+        if row and len(row) >= 2:
+            out.add((row[0], row[1]))
+    return out
+
+
+def load_struct_defaults(path):
+    """离线执行 struct_cfg.py 的 DEFAULTS()：助手全换成**只记名**的桩，不联网、不读 probe。
+
+    只关心「哪些 (表, 字段) 有默认值」—— 给「流程累加目标缺初值」这条提示消误报用。
+    配置里用到桩以外的名字时只提示、不中断预检。
+    """
+    got = set()
+
+    def _pairs(pairs):
+        for t, n in pairs or []:
+            got.add((t, n))
+
+    def _one(t, name, *a, **k):
+        got.add((t, name))
+
+    ns = {'__name__': 'struct_cfg', '__file__': path}
+    ns.update({'current_user': _pairs, 'current_dept': _pairs, 'today': _pairs, 'now': _pairs,
+               'static': _one, 'compose': _one, 'func': _one, 'take': _one, 'same': _one,
+               'lookup': _one, 'lookup_count': _one,
+               'F': lambda t, n: '$%s.%s$' % (t, n), 'COUNT': lambda *a: 'COUNT()'})
+    try:
+        exec(compile(open(path, encoding='utf-8').read(), path, 'exec'), ns)
+        if callable(ns.get('DEFAULTS')):
+            ns['DEFAULTS']()
+    except Exception as ex:          # 桩覆盖不到的写法：不拦预检，只提示
+        warn('--struct %s 的 DEFAULTS() 没能离线读全（%s: %s）—— 「累加缺初值」提示可能有误报'
+             % (path, type(ex).__name__, ex))
+    return got
+
+
+def _renamed_for_flows(spec, struct_path):
+    """流程里写的是建后 RENAME 之后的真机现名（带 `/元` 等），规格里是改名前的名字 ——
+    以前 `--struct` 只读 DEFAULTS()，流程段照旧名比对，进销存一轮 95 条假违例（速测16/18 S3）。
+    这里把 RENAME 套到规格上（与 app_audit.apply_rename 同一实现），并同步 EFF/BY_NAME/SPEC，
+    **只影响后面的流程段**：规格自身的校验已经按原名跑完。"""
+    ns = {}
+    try:
+        exec(compile(open(struct_path, encoding='utf-8').read(), struct_path, 'exec'), ns)
+    except Exception as ex:                      # noqa: BLE001
+        warn('--struct %s 读 RENAME 失败（%s）—— 流程段按规格原名校验' % (struct_path, ex))
+        return spec
+    ren = ns.get('RENAME') or {}
+    if not ren:
+        return spec
+    from app_audit import apply_rename
+    rspec = apply_rename(spec, struct_path)
+    for t, m in ren.items():
+        if t in EFF:                             # 新旧名都认：看板可能建在改名前，也可能在改名后
+            EFF[t] = set(EFF[t]) | {m.get(x, x) for x in EFF[t]}
+    BY_NAME.update({f.get('名称'): f for f in (rspec.get('forms') or [])})
+    SPEC.clear()
+    SPEC.update(rspec)
+    print('  （--struct：看板/流程段按 RENAME 后的真机现名校验，%d 张表有改名）' % len(ren))
+    return rspec
+
+
 def main():
     ap = argparse.ArgumentParser(description='零真机预检：规格 + 流程静态校验，不联网')
     ap.add_argument('--spec', required=True)
@@ -1015,7 +1331,13 @@ def main():
                     help='显式声明本应用没有流程（跳过「漏传 --flows」的拦截）')
     ap.add_argument('--expect', default='',
                     help='数量期望，如 "汇总=7,表单=52,字典=22,看板=25"')
+    ap.add_argument('--struct', default='',
+                    help='建后套件配置 struct_cfg.py（可选）：读其 DEFAULTS()，已给默认值的累加列不再提示缺初值；'
+                         '读其 RENAME，流程段按改名后的真机现名校验')
     a = ap.parse_args()
+    if a.struct:
+        DEFAULTED.update(load_struct_defaults(a.struct))
+        STRUCT_TYPED.update(load_struct_typed(a.struct))
 
     spec = load_spec(a.spec)
     global BY_NAME
@@ -1048,16 +1370,20 @@ def main():
     check_types(spec)
     check_undeclared(spec)
 
-    print('—— 看板 ——')
-    check_pages(spec)
+    # 看板/流程写的是建后 RENAME 之后的真机现名：规格自身的校验按原名跑完，这里再套 RENAME
+    fspec = _renamed_for_flows(spec, a.struct) if a.struct else spec
 
+    print('—— 看板 ——')
+    check_pages(fspec)
+
+    flows = []
     if a.flows:
         print('—— 流程 ——')
         flows = load_flows(a.flows)
         print('  流程：%d（子 %d / 主 %d）'
               % (len(flows), len([x for x in flows if x.get('kind') == 'sub']),
                  len([x for x in flows if x.get('kind') == 'main'])))
-        check_flows(flows, spec)
+        check_flows(flows, fspec)
         check_flow_refs(flows)
     elif not a.no_flows:
         # ⚠️ 2026-09-17 实测事故：漏传 --flows 时流程段**整段不跑**，
@@ -1084,6 +1410,9 @@ def main():
             err('漏传 --flows，流程段整段没校验（发现 %s）。'
                 '流程的错只会在真机上暴露 —— 用 --flows <flows.py> 重跑；'
                 '确实没有流程就加 --no-flows 显式跳过' % '、'.join(cand))
+
+    print('—— 数值用途（汇总 / 公式 / 流程比较）——')
+    check_numeric_usage(spec, list(flows) + list(spec.get('flows') or []), fspec)
 
     print()
     if warns:

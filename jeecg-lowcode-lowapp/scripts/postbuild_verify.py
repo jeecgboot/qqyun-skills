@@ -31,7 +31,8 @@ ap.add_argument('--self-test', action='store_true')
 ap.add_argument('--no-buttons', action='store_true')
 A = ap.parse_args()
 AID = A.app_id
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', AID)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(AID)   # 该应用的工作目录
 os.makedirs(WORK, exist_ok=True)
 TID = int(A.tenant_id) if str(A.tenant_id).isdigit() else A.tenant_id
 init_lowapp(A.api_base, A.token, tenant_id=TID, app_id=AID)
@@ -301,24 +302,43 @@ if not A.no_buttons and not A.self_test:
     if os.path.exists(dicts_p):
         for items in json.load(open(dicts_p, encoding='utf-8')).values():
             labels |= set(items.keys()); values |= {str(x) for x in items.values()}
-    cli = os.path.join(HERE, 'list_view', 'desform_custom_button.py')
+    # ⚠️ 这里是本脚本的**唯一热区**：原来每张表起一个 `desform_custom_button.py`
+    # 子进程（47 次解释器冷启动 ≈ 3~5 分钟），而它只是调一次 `/desform/button/list`。
+    # 改成**进程内直调** `desform_button_utils.list_buttons`（共用本进程已 init 的连接）；
+    # import 失败再回落到原来的子进程路径，行为不变（2026-09-23）。
     dec, nb = json.JSONDecoder(), 0
-    for t in CODE:
+    try:
+        from desform_button_utils import list_buttons as _list_buttons
+    except Exception:                                    # noqa: BLE001
+        _list_buttons = None
+    cli = os.path.join(HERE, 'list_view', 'desform_custom_button.py')
+
+    def _buttons_of(t):
+        """返回该表的按钮列表；进程内路径失败时回落子进程 CLI。"""
+        if _list_buttons is not None:
+            try:
+                return _list_buttons(form_code=CODE[t]) or []
+            except Exception:                            # noqa: BLE001
+                pass
         p = os.path.join(WORK, 'verify_btn.json')
         json.dump({'action': 'list', 'worksheet': t}, open(p, 'w', encoding='utf-8'), ensure_ascii=False)
         r = subprocess.run([sys.executable, cli, '--api-base', A.api_base, '--token', A.token,
                             '--tenant-id', str(A.tenant_id), '--app-id', AID, '--config', p],
                            capture_output=True, text=True, encoding='utf-8')
-        out, res = (r.stdout or '') + '\n' + (r.stderr or ''), {}
-        for i, ch in enumerate(out):                    # stdout/stderr 混排，取第一个带 success 的 JSON 对象
+        out = (r.stdout or '') + '\n' + (r.stderr or '')
+        for i, ch in enumerate(out):                     # stdout/stderr 混排，取第一个带 success 的 JSON 对象
             if ch == '{':
                 try:
                     obj, _e = dec.raw_decode(out[i:])
                 except Exception:
                     continue
                 if isinstance(obj, dict) and 'success' in obj:
-                    res = obj; break
-        for b in ((res.get('result') or {}).get('buttons') or []):
+                    return ((obj.get('result') or {}).get('buttons') or [])
+        return []
+
+    _SYS_MODELS = {'bpm_status', 'create_by', 'create_time', 'update_by', 'update_time', 'sys_org_code'}
+    for t in CODE:
+        for b in _buttons_of(t):
             nb += 1
             pid = b.get('processId')
             if pid and FLOW_IDS and pid not in FLOW_IDS:
@@ -328,6 +348,8 @@ if not A.no_buttons and not A.self_test:
                     if q.get('rule') in ('empty', 'not_empty'):
                         continue
                     fw, v = BYMODEL[t].get(q.get('field')), q.get('val')
+                    if fw is None and q.get('field') in _SYS_MODELS:
+                        continue                 # 系统字段（流程状态 bpm_status 等）：不在设计器控件里，但是合法条件
                     if fw is None:
                         BAD.append('按钮 %s/%s 条件字段 %s 不是本表字段' % (t, b.get('label'), q.get('field')))
                     elif v in (None, ''):

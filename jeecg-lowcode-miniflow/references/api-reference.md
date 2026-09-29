@@ -6,6 +6,7 @@
 - [创建/修改/发布简流](#创建修改发布简流)
 - [Desform 自定义按钮 API](#desform-自定义按钮-api)
 - [节点字段权限 API](#节点字段权限-api)
+- [运行时验收接口](#运行时验收接口)
 
 ---
 
@@ -344,3 +345,23 @@ GET /act/process/open/{processKey}     # 激活（恢复）
 | `/act/designer/miniDesFlow/api/backupAppProcess` | PUT | 备份应用流程 |
 | `/act/designer/miniDesFlow/api/coverAppProcess` | PUT | 从备份还原 |
 | `/act/designer/miniDesFlow/api/deleteAppProcess?appId=` | DELETE | 删除应用下全部流程（危险，慎用） |
+
+---
+
+## 运行时验收接口
+
+冒烟/验收审批流用（`lowapp/scripts/smoke_flows.py` 的 `approval` 断言就是这几条；2026-09-24 真机验证）。
+请求头都要带 `X-Access-Token` + `X-Tenant-Id`。
+
+| 接口 | 方法 | 用途 / 要点 |
+|---|---|---|
+| `/act/process/extActProcess/list?lowAppId=&pageNo=&pageSize=` | GET | 本应用流程：`processName` ↔ `processKey`（实例的 `processDefinitionId` 冒号前就是 key） |
+| `/act/task/myApplyProcessList?pageNo=&pageSize=` | GET | 我发起的实例，按发起时间倒序：`processInstanceId`、`currentTaskName`、`endTime`、`bpmStatus`。**没有单据 id**；`bpmBizTitle` 有时是「表名【标题】」有时为空，别拿它对应单据——用「触发前后实例 id 做差」 |
+| `/act/task/myTodo?pageNo=&pageSize=` | GET | 当前 token 用户的待办：`taskId`、`taskName`、`processInstanceId`。任务不在这里 = 审批人配置没解析到人 |
+| `/act/task/processHistoryList?processInstanceId=` | GET | 实例的节点历史；`id != 'start'` 且无 `endTime` 的是未办任务（`id` 即 taskId） |
+| `/act/task/getProcessTaskTransInfo?taskId=` | GET | 取 `result.transitionList[0].nextnode`，办结要用 |
+| `/act/task/processComplete` | POST JSON | `{taskId, nextnode, processModel: 1, reason}` 按「通过」办结一个任务；循环到无未办任务 = 实例结束。验审批通过后的回写就靠它 |
+| `/act/processInstance/clear?processInstanceId=` | GET | 清空实例（界面「清空流程」），冒烟收尾用；**删记录不会结束实例**，先清实例再删记录 |
+| `/act/designer/miniDesFlow/api/buttonStartProcess` | POST | 按钮流触发（任务管理 R1 冒烟用过，参数以前端请求为准） |
+
+`/act/task/invalidProcess`、`/act/task/callBackProcess` 对 admin 返回「没有权限」（本机实测），不要用。

@@ -22,7 +22,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from desform_lowapp_utils import init_lowapp, get_apps, get_menus  # noqa: E402
-from desform_utils import query_form, update_widget, save_design_from_file  # noqa: E402
+from desform_utils import query_form, update_widget, save_design_from_file, api_request  # noqa: E402
 from lowapp_creator import list_current_tenants  # noqa: E402
 
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
@@ -261,6 +261,32 @@ def find_link_record(design, field_name):
     raise SystemExit(f"未找到关联记录: {raw}；现有: {names}")
 
 
+_DICTS = None
+
+
+def option_labels(src):
+    """选项类字段的 {显示文案: 存储值}：静态选项读控件自己的 options，字典字段查应用字典。"""
+    global _DICTS
+    o = src.get("options") or {}
+    out = {}
+    for x in o.get("options") or []:
+        if isinstance(x, dict) and x.get("value") is not None:
+            out[str(x.get("label"))] = str(x.get("value"))
+    code = o.get("dictCode")
+    if code:
+        if _DICTS is None:
+            _DICTS = {}
+            try:
+                r = api_request("/sys/dict/getDictListByLowAppId", method="GET") or {}
+                for d in (r.get("result") or []):
+                    _DICTS[d.get("dictCode")] = {str(it.get("itemText")): str(it.get("itemValue"))
+                                                 for it in (d.get("dictItemsList") or [])}
+            except Exception:                    # noqa: BLE001
+                pass
+        out.update(_DICTS.get(code) or {})
+    return out
+
+
 def build_filter_rule(item, source_widgets, current_widgets):
     src = resolve_field(item.get("field") or item.get("name"), source_widgets)
     rule = norm_filter_rule(item.get("rule") or item.get("op") or "EQ")
@@ -277,9 +303,25 @@ def build_filter_rule(item, source_widgets, current_widgets):
         value = as_list(item.get("value"))
         if rule not in ("EMPTY", "NOT_EMPTY") and not value:
             raise SystemExit(f'筛选「{src.get("name")}」缺少 value')
+        # 选项类字段：写显示文案（「申报中」）时翻成存储值（"0"），valueText 保留文案。
+        # 以前原样存文案 → 查 0 条、下拉选不到任何记录，保存/闸门全绿（项目申报-一句话11，r17 起挂着）
+        labels = option_labels(src) if src.get("type") in ("select", "radio", "checkbox") else {}
+        texts = []
+        if labels:
+            back = {v: k for k, v in labels.items()}
+            conv = []
+            for v in value:
+                sv = str(v)
+                if sv in labels:
+                    conv.append(labels[sv]); texts.append(sv)
+                elif sv in back:
+                    conv.append(sv); texts.append(back[sv])
+                else:
+                    raise SystemExit(f'筛选「{src.get("name")}」的值「{sv}」不是它的选项；可选：{"、".join(labels)}')
+            value = conv
         value_text = item.get("valueText")
         if value_text is None:
-            value_text = ",".join(value)
+            value_text = ",".join(texts) if texts else ",".join(value)
     sq = FILTER_SQ.get(rule)
     if not sq:
         raise SystemExit(f"筛选规则 {rule} 没有 sqParam 映射")
@@ -532,8 +574,8 @@ def main():
         old_adv = dict(link.get("advancedSetting") or {})
         old_adv["defaultValue"] = adv["defaultValue"]
         link["advancedSetting"] = old_adv
-        path = os.path.join(tempfile.gettempdir(), "jeecg-desform", f"{code}_linkage_fix.json")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        import desform_utils as DU
+        path = os.path.join(DU.app_tmpdir('link'), f"{code}_linkage_fix.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(design, f, ensure_ascii=False)
         r = save_design_from_file(code, path)

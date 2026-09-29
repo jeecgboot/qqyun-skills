@@ -4,7 +4,7 @@
 > 零代码、自然语言驱动 —— 依托敲敲云表单引擎、流程引擎、仪表盘引擎，AI 自动生成全套配置。
 
 <p>
-  <a href="https://www.qiaoqiaoyun.com/skills"><img src="https://img.shields.io/badge/Skills专题页-qiaoqiaoyun.com%2Fskills-1677ff?style=flat-square"></a>
+  <a href="https://www.qiaoqiaoyun.com/skills"><img src="https://img.shields.io/badge/Skills%E4%B8%93%E9%A2%98%E9%A1%B5-qiaoqiaoyun.com%2Fskills-1677ff?style=flat-square"></a>
   <a href="https://gitee.com/jeecg/qqyun-skills"><img src="https://img.shields.io/badge/Gitee-jeecg%2Fqqyun--skills-C71D23?style=flat-square&logo=gitee"></a>
   <a href="https://github.com/jeecgboot/qqyun-skills"><img src="https://img.shields.io/badge/GitHub-jeecgboot%2Fqqyun--skills-181717?style=flat-square&logo=github"></a>
   <img src="https://img.shields.io/badge/License-Apache%202.0-52c41a?style=flat-square">

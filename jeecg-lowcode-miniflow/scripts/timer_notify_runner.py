@@ -25,6 +25,9 @@ CYCLE_MAP = {'每分钟': '1', '每小时': '2', '每天': '3', '每月1号': '4
              '周一到周五': '6', '每年12月31日': '7', '自定义': 'custom'}
 
 def load_creds():
+    # 写死的是作者机器上的路径：别的机器没有这个文件，以前直接 FileNotFoundError（项目管理-速测20）
+    if not os.path.exists(CRED_FILE):
+        raise SystemExit('缺少凭证：请传 --api <API Base> --token <X-Access-Token>')
     txt = open(CRED_FILE, encoding='utf-8').read()
     api = re.search(r'\*\*API Base\*\*：`([^`]+)`', txt).group(1)
     tok = re.search(r'\*\*X-Access-Token\*\*：`([^`]+)`', txt).group(1)

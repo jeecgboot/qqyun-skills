@@ -19,27 +19,27 @@ $QQY forms  "$API" "$TOKEN" --tenant-id 1008 --app-name 仓储系统管理
 # fields 仅在点名字段疑似不存在时追加
 ```
 
-## 2. specs（并行 Write 至 $HOME/.claude/tmp-qqy/；字面量可照抄本单）
+## 2. specs（并行 Write 至 {该应用的工作目录}/dashboard_inventory/；字面量可照抄本单）
 
 布局：y0 KPI×4(w6)；y17 柱×2；y49 饼+柱；y81 折+饼；y113 透视整行。
 
 ```json
 # a_ck.json → ws_ab7352cfbb 仓库档案
-[{"comp":"JNumber","title":"仓库总数","x":0,"y":0,"w":6,"h":17,"dim":[],"val":"record_count"}]
+[{"comp":"JNumber","title":"仓库总数","x":0,"y":0,"w":6,"h":12,"dim":[],"val":"record_count"}]
 # b_wl.json → ws_18f7bd57d5 物料档案
-[{"comp":"JNumber","title":"物料SKU数","x":6,"y":0,"w":6,"h":17,"dim":[],"val":"record_count"}]
+[{"comp":"JNumber","title":"物料SKU数","x":6,"y":0,"w":6,"h":12,"dim":[],"val":"record_count"}]
 # c_kc.json → ws_65609158de 实时库存
-[{"comp":"JNumber","title":"实时库存总量","x":12,"y":0,"w":6,"h":17,"dim":[],"val":"库存数量"},
- {"comp":"JBar","title":"各仓库库存","x":0,"y":17,"w":12,"h":32,"dim":"关联仓库","val":"库存数量"},
- {"comp":"JBar","title":"物料库存排行","x":12,"y":17,"w":12,"h":32,"dim":"关联物料","val":"库存数量","sorts":{"name":"库存数量","type":"desc"}},
- {"comp":"JPie","title":"库存按仓库分布","x":0,"y":49,"w":12,"h":32,"dim":"关联仓库","val":"库存数量","percentLabel":true},
- {"comp":"JPivotTable","title":"仓库×物料库存","x":0,"y":113,"w":24,"h":34,"dim":"关联仓库","val":"库存数量"}]
+[{"comp":"JNumber","title":"实时库存总量","x":12,"y":0,"w":6,"h":12,"dim":[],"val":"库存数量"},
+ {"comp":"JBar","title":"各仓库库存","x":0,"y":12,"w":12,"h":32,"dim":"关联仓库","val":"库存数量"},
+ {"comp":"JBar","title":"物料库存排行","x":12,"y":12,"w":12,"h":32,"dim":"关联物料","val":"库存数量","sorts":{"name":"库存数量","type":"desc"}},
+ {"comp":"JPie","title":"库存按仓库分布","x":0,"y":44,"w":12,"h":32,"dim":"关联仓库","val":"库存数量","percentLabel":true},
+ {"comp":"JPivotTable","title":"仓库×物料库存","x":0,"y":108,"w":24,"h":34,"dim":"关联仓库","val":"库存数量"}]
 # d_rk.json → ws_8c84e36570 入库单
-[{"comp":"JNumber","title":"本月入库单数","x":18,"y":0,"w":6,"h":17,"dim":[],"val":"record_count","queryRange":"month"},
- {"comp":"JBar","title":"本月各仓库入库对比","x":12,"y":49,"w":12,"h":32,"dim":"关联仓库","val":"record_count","queryRange":"month"},
- {"comp":"JPie","title":"入库单状态","x":12,"y":81,"w":12,"h":32,"dim":"审批状态","val":"record_count"}]
+[{"comp":"JNumber","title":"本月入库单数","x":18,"y":0,"w":6,"h":12,"dim":[],"val":"record_count","queryRange":"month"},
+ {"comp":"JBar","title":"本月各仓库入库对比","x":12,"y":44,"w":12,"h":32,"dim":"关联仓库","val":"record_count","queryRange":"month"},
+ {"comp":"JPie","title":"入库单状态","x":12,"y":76,"w":12,"h":32,"dim":"审批状态","val":"record_count"}]
 # e_mx.json → ws_c615616613 入库明细（无日期字段→create_time 按日）
-[{"comp":"JLine","title":"本月每日入库量","x":0,"y":81,"w":12,"h":32,"dim":"create_time","val":"入库数量","dateGroup":"3","queryRange":"month"}]
+[{"comp":"JLine","title":"本月每日入库量","x":0,"y":76,"w":12,"h":32,"dim":"create_time","val":"入库数量","dateGroup":"3","queryRange":"month"}]
 ```
 
 注：透视列维度（typeFields）CLI 侧未确认支持，`grp` 不展开——两维矩阵需前端把列维度拖入，勿中途探究。
@@ -64,7 +64,7 @@ $QQY forms  "$API" "$TOKEN" --tenant-id 1008 --app-name 仓储系统管理
 
 ```bash
 set -e
-S=$HOME/.claude/tmp-qqy
+S="$(python "<lowapp>/scripts/skill_temp_path.py" --app-id 2095784150765826050 --sub dashboard_inventory)"
 $QQY create-page "$API" "$TOKEN" --tenant-id 1008 --app-id 2095784150765826050 --name 库存管理看板 --group 库存管理 && echo STEP1_OK && \
 $QQY add-charts  "$API" "$TOKEN" --tenant-id 1008 --app-name 仓储系统管理 --page-name 库存管理看板 --form-code ws_ab7352cfbb  --specs-file $S/a_ck.json && echo STEP2_OK && \
 $QQY add-charts  "$API" "$TOKEN" --tenant-id 1008 --app-name 仓储系统管理 --page-name 库存管理看板 --form-code ws_18f7bd57d5 --specs-file $S/b_wl.json && echo STEP3_OK && \

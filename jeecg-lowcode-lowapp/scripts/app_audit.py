@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -136,10 +137,23 @@ def patch_fields_of(spec, table):
 # ---------------------------------------------------------------- 各段校验
 
 
-def apply_rename(spec, struct_path):
+def apply_rename(spec, struct_path, carry_namespace='local'):
     """按 struct 配置的 RENAME={表:{旧名:新名}} 把规格里的字段名换成真机现名。
-    审计只吃规格，而 app-spec 的「字段名不写 /元」规矩 + 建后 RENAME 让规格名与真机名分家 ——
-    2026-09-22 CRM 实测 60 条、销售管理 5 条全是这一类假阳性。"""
+    审计只吃规格，而**建后 RENAME** 会让规格名与真机名分家 ——
+    2026-09-22 CRM 实测 60 条、销售管理 5 条全是这一类假阳性。
+
+    ⚠️ 2026-09-24：RENAME 的**由来**（「规格里斜杠 = 与，写不了 `X/元`」）已被证伪 ——
+    代码从来没有按 `/` 拆字段名的地方，规格直接写 `X/元` 就是最终名（见 `app-spec.md`
+    「四条硬规矩」第 1 条）。所以新规格**不该再有 RENAME**，这个参数只为读得懂存量配置。
+
+    `carry_namespace` 决定 `links[].带出` 按**谁**的映射改名 —— 两个检查器理解相反：
+      · `'local'`（默认）：按**本表**改。把带出当成「本表要建的那些他表字段控件名」，
+        与 `app_audit` 的校验口径一致（它核的是本表控件存在）—— 改不得，会把它从 0 条
+        变成一堆假违例。
+      · `'target'`：按**目标表**改。把带出当成「要从目标表带出哪些字段」——这是真机语义
+        （`报价单.选择客户.showFields` 存的是**客户表**的 model），也是 `precheck` 的校验口径
+        （`c not in eff[目标]`）。
+    带出在 RENAME 前两套名字重合，改名后分家，所以一个值满足不了两边 —— 只能按调用方给。"""
     ns = {}
     try:
         exec(compile(open(struct_path, encoding='utf-8').read(), struct_path, 'exec'), ns)
@@ -169,11 +183,14 @@ def apply_rename(spec, struct_path):
     # TO_LINKFIELD：(本表字段, 经由关联控件, 源表, 源表字段) → 该字段真机上已是他表字段，
     # 挂到对应关联的「带出映射」里：控件类型那一档跳过它、关联那一档核它存在且存储
     for t, rows in to_lf.items():
-        for fld, via, _src, src_f in rows:
+        for row in rows:
+            fld, via, _src, src_f = row[:4]
             lk = next((l for l in (spec.get('links') or []) if l.get('表') == t and l.get('字段') == via), None)
             if lk is None:
                 continue
             lk.setdefault('带出映射', {})[fld] = src_f
+            if len(row) > 4 and row[4] == 'view':       # 第 5 项 'view' = 仅显示，审计不要求存储（销售-速测19 #2）
+                lk.setdefault('仅显示', []).append(fld)
             if fld in (lk.get('带出') or []):
                 lk['带出'].remove(fld)
     # DELETE_THEN_MOVE：(要删控件名, 要删类型, 搬入原位的控件名, 其类型) → 被删的名字从规格里拿掉
@@ -193,6 +210,13 @@ def apply_rename(spec, struct_path):
     def rn(t, name):
         return (ren.get(t) or {}).get(name, name)
 
+    def rn_expr(expr, m):
+        """把公式表达式里的 $占位符$ 按本表映射改名。m 为空/非字符串时原样返回。"""
+        if not isinstance(expr, str) or not m:
+            return expr
+        return re.sub(r'\$([^$]+)\$',
+                      lambda mo: '$%s$' % m.get(mo.group(1), mo.group(1)), expr)
+
     for f in spec.get('forms') or []:
         t = f.get('名称')
         if t not in ren:
@@ -202,6 +226,12 @@ def apply_rename(spec, struct_path):
         for k in ('字典', '编号', '公式', '类型', '选项', '静态多选', '静态单选', '静态下拉', '日期粒度', '中转字段'):
             if isinstance(f.get(k), dict):
                 f[k] = {rn(t, kk): v for kk, v in f[k].items()}
+        # ⚠️ 公式的**表达式正文**里还有 $占位符$，上面那行只改了字典的键。
+        # 不补这一步，「成本单价」→「成本单价/元」之后公式仍写 `$成本单价$`，
+        # 静态检查就会报「引用了本表没有的字段」——2026-09-24 实测 48 条假违例。
+        if isinstance(f.get('公式'), dict):
+            f['公式'] = {rn(t, kk): rn_expr(v, ren.get(t) or {})
+                         for kk, v in f['公式'].items()}
         if f.get('标题'):
             f['标题'] = rn(t, f['标题'])
     for lk in spec.get('links') or []:
@@ -209,10 +239,13 @@ def apply_rename(spec, struct_path):
         if t in ren:
             lk['字段'] = rn(t, lk.get('字段'))
             lk['带出'] = [rn(t, x) for x in (lk.get('带出') or [])]     # 带出控件在本表的名字
+            lk['仅显示'] = [rn(t, x) for x in (lk.get('仅显示') or [])]
             if isinstance(lk.get('带出映射'), dict):
                 lk['带出映射'] = {rn(t, k): v for k, v in lk['带出映射'].items()}
         if tgt in ren:
             lk['显示字段'] = [rn(tgt, x) for x in (lk.get('显示字段') or [])]
+            if carry_namespace == 'target':
+                lk['带出'] = [rn(tgt, x) for x in (lk.get('带出') or [])]  # 要从目标表带出哪些字段
             if isinstance(lk.get('带出映射'), dict):
                 lk['带出映射'] = {k: rn(tgt, v) for k, v in lk['带出映射'].items()}
     for sm in spec.get('summaries') or []:
@@ -423,11 +456,12 @@ def check_links(spec, forms_by_name, design_of, code_of, only=None):
                            o.get('twoWayModel'), (bw.get('options') or {}).get('twoWayModel')))
         # 带出：本表要有他表字段控件，且**存储**（view 的话流程取到空值）
         expect_carry = list(l.get('带出') or []) + list((l.get('带出映射') or {}).keys())
+        view_only = set(l.get('仅显示') or [])          # 需求明写「仅显示」的：不要求存储（流程用到时下面的键推导仍会拦）
         for c in expect_carry:
             cw = find_widget(d, c)
             if not cw:
                 err('%s.%s 带出「%s」控件不存在' % (t, fld, c))
-            elif not is_saved_field(cw):
+            elif c not in view_only and not is_saved_field(cw):
                 err('%s.%s 带出「%s」是只显示（saveType=%s），流程取不到值'
                     % (t, fld, c, (cw.get('options') or {}).get('saveType')))
         # 显示字段：只展示、不建控件，但名字必须真在目标表上
@@ -463,7 +497,9 @@ def check_summaries(spec, design_of, code_of, only=None):
                 err('%s.%s 的 linkTable=%s 没指向关联「%s」' % (t, fld, lt, lkf))
         tgt = next((x.get('目标') for x in (spec.get('links') or [])
                     if x.get('表') == t and x.get('字段') == lkf), None)
-        if tgt and col not in widget_index(design_of(tgt)):
+        # 「计数」汇总不需要汇总列（数记录条数，precheck 也接受不写）——以前按 None 去找列，
+        # 每个计数汇总都误报一条（2026-09-24 任务-一句话5 报 4 条）
+        if tgt and col and col not in widget_index(design_of(tgt)):
             err('%s.%s 的汇总列「%s」不在 %s 上' % (t, fld, col, tgt))
         n += 1
     ok('汇总 %d 条已回读' % n)
@@ -748,6 +784,8 @@ def main():
     ap.add_argument('--app-id', required=True)
     ap.add_argument('--spec', required=True, help='app_spec.json（app_audit 只吃这一份）')
     ap.add_argument('--flows', default='', help='flows.py；给了才校验流程条数与字段可见性')
+    ap.add_argument('--no-flows', action='store_true',
+                    help='与 precheck 同口径：显式声明没有流程（等同不给 --flows；以前这里报参数错，CRM-速测18）')
     ap.add_argument('--expect', default='', help='如 "表单=47,字典=32,看板=16"')
     ap.add_argument('--form', default='', help='只查这一张表（单表小样）')
     ap.add_argument('--struct', default='', help='建后套件的 struct 配置（读其 RENAME，把规格旧名换成真机现名再比对）')

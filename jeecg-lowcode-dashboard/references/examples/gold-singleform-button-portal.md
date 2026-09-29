@@ -22,10 +22,10 @@ PYTHONIOENCODING=utf-8 PYTHONPATH="$SKILL_REFS:$SKILL_REFS/scripts" \
 ```json
 {
   "charts": [
-    {"comp": "JNumber", "title": "产品总数", "x": 0, "y": 0, "w": 12, "h": 17, "dim": [], "val": "record_count"},
-    {"comp": "JNumber", "title": "数字合计", "x": 12, "y": 0, "w": 12, "h": 17, "dim": [], "val": "销量"},
-    {"comp": "JBar", "title": "本月按日销量", "x": 0, "y": 17, "w": 12, "h": 32, "dim": "create_time", "val": "销量", "dateGroup": "按日", "queryRange": "本月"},
-    {"comp": "JLine", "title": "本月销量折线图", "x": 12, "y": 17, "w": 12, "h": 32, "dim": "create_time", "val": "销量", "dateGroup": "按日", "queryRange": "本月"}
+    {"comp": "JNumber", "title": "产品总数", "x": 0, "y": 0, "w": 12, "h": 12, "dim": [], "val": "record_count"},
+    {"comp": "JNumber", "title": "数字合计", "x": 12, "y": 0, "w": 12, "h": 12, "dim": [], "val": "销量"},
+    {"comp": "JBar", "title": "本月按日销量", "x": 0, "y": 12, "w": 12, "h": 32, "dim": "create_time", "val": "销量", "dateGroup": "按日", "queryRange": "本月"},
+    {"comp": "JLine", "title": "本月销量折线图", "x": 12, "y": 12, "w": 12, "h": 32, "dim": "create_time", "val": "销量", "dateGroup": "按日", "queryRange": "本月"}
   ],
   "buttons": {
     "rowNum": 2,

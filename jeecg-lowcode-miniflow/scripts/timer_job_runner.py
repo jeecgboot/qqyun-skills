@@ -49,7 +49,8 @@ from miniflow_creator import fetch_app_forms, build_process_json, save_flow, dep
 t0 = time.time()
 
 
-_APPS_CACHE = os.path.join(tempfile.gettempdir(), 'miniflow_apps_cache.json')
+# 与 lowapp/scripts/skill_temp_path.cache_dir 同一规则：跨应用短 TTL 缓存（内部按 api|tenant 分 key）
+_APPS_CACHE = os.path.join(tempfile.gettempdir(), 'jeecg-lowcode', '_cache', 'miniflow_apps.json')
 _APPS_TTL = 300   # 秒；tenantAppFormList 服务端 ~0.9s，连续建流命中缓存跳过（2026-09-09 剖析实测）
 
 
@@ -69,6 +70,7 @@ def app_find(api, tok, tenant, want):
     if apps is None:
         apps = fetch_app_forms(api, tok, tenant)
         try:
+            os.makedirs(os.path.dirname(_APPS_CACHE), exist_ok=True)
             with open(_APPS_CACHE, 'w', encoding='utf-8') as f:
                 json.dump({'key': key, 'apps': apps}, f, ensure_ascii=False)
         except Exception:
@@ -124,10 +126,14 @@ def parse_begin(a):
 
 
 def no_dup(api, h, name):
-    rr = requests.get(api + '/act/process/extActProcess/list', params={'processName': name, 'pageSize': 20},
+    rr = requests.get(api + '/act/process/extActProcess/list', params={'processName': name, 'pageSize': 500},
                       headers=h, timeout=30).json()
     recs = (rr.get('result') or {}).get('records') or (rr.get('result') or [])
-    if isinstance(recs, list) and recs:
+    # 后端 processName 是模糊查且不分应用: 只认本应用内全名相同 (定时流程名常是子流程名的子串; 已删应用的流程会残留)
+    appid = str(h.get('X-Low-App-ID') or '')
+    recs = [x for x in recs if isinstance(x, dict) and x.get('processName') == name
+            and (not appid or str(x.get('lowAppId') or '') == appid)] if isinstance(recs, list) else []
+    if recs:
         raise SystemExit(f'同名流程已存在,中止: {name} {[x.get("id") for x in recs]}')
 
 
@@ -394,12 +400,25 @@ def cmd_announce(a, api, tok, app, appid, tenant):
     print(f"✅ announce: {a.name}({fid}) | {a.begin} 起 {mode} | 收件 {len(uids)} 人 | 总耗时 {time.time()-t0:.1f}s")
 
 
+def _pick_form(forms, key):
+    """按表名/表 code 精确匹配，其次唯一的子串命中；子串命中多张表直接报错。
+    以前一律子串匹配、取第一个：「项目」命中「项目变更记录」「项目预算」（项目管理-速测18/20）。"""
+    hit = next((f for f in forms if key in (f.get('name'), f.get('code'))), None)
+    if hit:
+        return hit
+    subs = [f for f in forms if key in (f.get('name') or '')]
+    if len(subs) > 1:
+        raise SystemExit('「%s」模糊命中多张表 %s，请写全名或表 code'
+                         % (key, json.dumps([f.get('name') for f in subs], ensure_ascii=False)))
+    return subs[0] if subs else None
+
+
 # ---------------- scan ----------------
 def cmd_scan(a, api, tok, app, appid, tenant):
     h = {'X-Access-Token': tok, 'X-Tenant-Id': str(tenant), 'X-Low-App-ID': appid}
     t1 = time.time()
     forms = app.get('forms') or []
-    hit = next((f for f in forms if a.scan in (f.get('name') or '')), None)
+    hit = _pick_form(forms, a.scan)
     if not hit:
         raise SystemExit(f'扫描表不存在(--scan): ' + json.dumps([f.get('name') for f in forms], ensure_ascii=False))
     code, name = hit['code'], hit['name']
@@ -415,7 +434,7 @@ def cmd_scan(a, api, tok, app, appid, tenant):
     add = None
     if a.add:
         tname, _, maps = a.add.partition(':')
-        tf = next((f for f in forms if tname in (f.get('name') or '')), None)
+        tf = _pick_form(forms, tname)
         if not tf:
             raise SystemExit(f'--add 目标表不存在: {tname} 现有 ' + json.dumps([f.get('name') for f in forms], ensure_ascii=False))
         add = (tf, maps)
@@ -547,7 +566,7 @@ def cmd_check(a, api, tok, app, appid, tenant):
     h = {'X-Access-Token': tok, 'X-Tenant-Id': str(tenant), 'X-Low-App-ID': appid}
     t1 = time.time()
     forms = app.get('forms') or []
-    hit = next((f for f in forms if a.scan in (f.get('name') or '')), None)
+    hit = _pick_form(forms, a.scan)
     if not hit:
         raise SystemExit(f'检查表不存在(--scan): ' + json.dumps([f.get('name') for f in forms], ensure_ascii=False))
     code, name = hit['code'], hit['name']
@@ -709,7 +728,15 @@ def cmd_datefield(a, api, tok, app, appid, tenant):
     h = {'X-Access-Token': tok, 'X-Tenant-Id': tenant, 'X-Low-App-ID': appid}
     t1 = time.time()
     forms = app.get('forms') or []
-    hit = next((f for f in forms if a.table in (f.get('name') or '')), None)
+    # 先精确（表名或表 code），再唯一的子串命中：以前只做子串匹配，
+    # 「项目」命中了排在前面的「项目预算」（2026-09-24 项目管理-速测18）
+    hit = next((f for f in forms if a.table in (f.get('name'), f.get('code'))), None)
+    if not hit:
+        subs = [f for f in forms if a.table in (f.get('name') or '')]
+        if len(subs) > 1:
+            raise SystemExit('--table「%s」模糊命中多张表 %s，请写全名或表 code'
+                             % (a.table, json.dumps([f.get('name') for f in subs], ensure_ascii=False)))
+        hit = subs[0] if subs else None
     if not hit:
         raise SystemExit(f'工作表不存在(--table): ' + json.dumps([f.get('name') for f in forms], ensure_ascii=False))
     code, name = hit['code'], hit['name']

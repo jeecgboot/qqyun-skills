@@ -34,12 +34,30 @@ description: JeecgBoot 简流（MiniFlow）设计器 AI 自动创建器。Use wh
 > 建完**必须跑** `scripts/check_node_contract.py --api-base … --token … --tenant-id … --app-id …`：
 > 它逐节点回读 `processJson` 对照 `references/node-contract.md`，违例非 0 即退出码 1。
 > 2026-09-17 实测：它在我这里报 36 条违例，而同一次 `build_flows` 报的是「建 63 / 失败 0」。
+>
+> **`build_flows.py` 默认已内建「部署后置补丁」**（2026-09-23 起）：建/更完自动跑
+> `scripts/postdeploy.py`，失败即 `FAIL:postdeploy` 并以退出码 1 结束 —— 不要用 `--no-postdeploy` 绕过。
+> 它兜的是 `--update` **从规格无条件重新生成、整份覆盖**时冲掉的两样 **save / deploy / 回读计数全绿** 的东西：
+> ① `data_get_one` 的 `sortField`（「取最早的一条」静默变成「取任意一条」，FIFO 这类靠排序的逻辑直接失真）；
+> ② `function` 节点 funContext 里指向 get_one 的条目 `formNodeType`（必须是 `search`，写成 `table` → 运算结果恒空）；
+> ③ `empty` 文案对应的 `noDataType`（口径 `继续=1 / 新增=2 / 中止=3`，builder 曾整体错位一格）。
+> 脚本按节点 id 对齐规格与真机、回灌规格里声明而 builder 丢弃的键，并按**字段 model** 自愈 funText 占位符
+> （不依赖「key 改没改」，天然幂等）；**通用、不含任何应用知识**，排序字段可写显示名。
+> 单独跑：`scripts/postdeploy.py --api-base … --token … --tenant-id … --app-id … --spec flows.py [--dry-run]`。
+> 2026-09-23 实测：重跑 `--update` 后它当场检出 17 处损坏（4 处排序 + 3 处取值源 + 6 处 funText），修完才通过端到端造单。
+>
+> **流程带「单 → 建凭证单 → 凭证单自己再确认/记账」这类链时要额外小心**：`data_add` 建出的记录
+> 默认不触发下游（要 `trigger_other=True`），且**建单 / 建明细 / 翻确认位**三步有顺序竞态 ——
+> 三条都是静默的，`save` / `deploy` / `check_node_contract` / `app_audit` 全绿。
+> 详情与正解写法见 `references/gotchas.md` **#131**（同文件 **#130** 是 `get_one(empty=)` 的落库口径错位）。
 
 | 用户在说 | 只读 | 禁止读 |
 |---------|------|--------|
 | 同轮要**批量新建多条流程**（≥3 条） | **先读 `references/node-contract.md`**（每种节点的必填键；不读 = 必有静默错配）；再读 `create-flow.md`「**批量建流程**」节：探查一次共享 JSON + 自愈硬清单 + 代理拆分 + `miniflow_helpers`（FunBuilder/publish_subflow/check_app_flows）。⚠️ **填写（edit）节点卡片文案 `content` 必须写「填写人显示名」**：绑定字段写字段中文名（`'直接上级'`/`'姓名'`），**表达式填写人写语义名**（`${applyUserId}` → `'获取发起人'`，即 `approverGroups[0].expressionsNames[0]`）——**禁止把 `assigneeByExp(${applyUserId})` 这类表达式原文写进 content**，画布卡片会原样显示这段代码（2026-09-16 用户实测指着卡片纠正）；收尾断言 content 非空且不含 `$`/`assigneeBy` | 每条流程各读一遍 create-flow.md；各代理重复 fetch 字段；子流程手工走 5 步发布配方 |
 | **「<某应用>下新建 XX 流程」**——"应用" = 敲敲云/QQY 低代码应用（如「流程应用」「应用1」「应用2」） | 本文件路由表后续行 + `create-flow.md`。**判定只看「应用」二字**：句中出现「应用 / 工作表 / 敲敲云 / QQY / lowAppId」任一 → 必是本 skill | ⛔ **jeecg-bpmn / BPMN**——BPMN 是系统级引擎、**无"应用"归属**。⚠️ **四个反陷阱（实测会踩）：① 应用名本身可能就叫「流程应用」，其中的「流程」二字属于应用名、不是 BPMN 信号；②「获取单条数据」「获取多条数据」「或签」「审批人列表（多选人员）」全是简流原生节点/概念，不是 BPMN 专有——出现这些词反而更该走简流；③ 不得以"我先把 bpmn 载进来再读凭证 memory"为借口**——选 skill 前先 Read 凭证 memory（含各应用 lowAppId 与已建简流）再决定（2026-09-10 误加载 bpmn、用户纠正；gotchas #79）；④ **「包含分支 / 包容分支 / 排他分支 / 互斥分支 / 并行分支」全是设计器节点名**——「包含分支审批」要读成「包含分支 + 审批节点」，**不能读成动词「包含」+「分支」**（2026-09-10「全控件表单」误建成 exclusive、用户纠正后改 inclusive 返工）；分支类需求建流前必须让用户在 **互斥 / 包含 / 并行** 三选一，**禁止默认按互斥建**（消歧段见 `create-flow.md`）；⑤ **「表单内每个组件一条分支」类需求，条件规则必须按控件族分流**——范围查询只属日期/时间/数值，文本与公式**无「在范围内」**、文件类仅 为空/不为空（写不匹配的 rule 服务端不校验：save/deploy/回读全绿但设计器下拉无该项，见 gotchas #85、node-types 二十节） |
 | 同一句还要**建应用 / 工作表 / 仪表盘** | 只读 `jeecg-lowcode-lowapp/references/fast-full-chain.md` | 本文件全文；node-types；`example/`（含入库审批）；dashboard SKILL |
+| 建/改**并行分支**（并行里带条件网关、`聚合` 不触发、流程跑不完、实例卡死） | `gotchas.md` 搜「聚合」→ **#129**：**每条分支必须单出口**——分支内最后一个网关的 `childNode` 指向本路「收口节点」，空分支与支链尾都会落到它；分支内要判断就并成单节点（`data_get_one`+`noDataType=2`）。验收＝BPMN 里聚合入边数 == 分支数 | 直接把网关塞进并行分支（分了又合 → 聚合入边数 > 令牌数 → 永远等不齐）；把同一节点挂到两处（save 报 Duplicate key） |
+| 需求含**「查不到就新增 / 没有则新建」**（查工作表：有就用、没有就建一条再往下走） | 只读 `references/example/获取单条数据.md`（§1 精简示例 + §附录完整 JSON）与 `miniflow-node-types.md` 十二节：`data_get_one` 的 `attr.noDataType=2`（界面「未获取到数据时 = 在工作表中新增记录后继续执行」，仅 `selectType=1`）+ `attr.formModel`（新增记录表单，值形态同 `data_add`）——**一个节点即终态** | 拆成「查询 + 数据分支 + 新增」三件套；gotchas 全文 |
 | 在**已有流程**加 / 改 / 删某个节点 | 本文件「凭证」+「修改已有简流」（get_more 精简 config 已内嵌）。**点名的节点类型精简 config 没有**（如 api / aiOrchestration / message_*）→ 走下方默认段例外：grep node-types 标题后只读命中节 | `miniflow_creator.py`；gotchas；`example/`；trigger-types；`create-flow.md`；其他 skill |
 | **工作表新增→单审批→改记录字段→结束**（最高频 OA 型：「新增记录触发」「审批通过后把状态改成已通过」「审批人直接指定用户/角色/部门」） | `create-flow.md`「**组合 J**」——含完整可抄 config + 落库位置 + 自愈，**单轮 1 次 py 即终态**（2026-09-10 实证）；解析/断言自伤预防见 gotchas #81。**脚本节点测算 + 排他分支变体 → 同文件「组合 J 变体」（流程变量四处同名·变量名用中文，gotchas #83）** | 入库审批示例全文、node-types 审批/更新节、`example/`、gotchas 全文 |
 | 改**工作表事件触发筛选 / 触发条件**（startCondition 规则、值、触发字段、条件组） | 本文件「凭证」+「修改已有简流」+「startCondition 规则码（改触发条件必读）」段（下方内嵌） | 凭记忆写规则码；**把「在范围内」拆成两条 ge+le AND**（有独立 `range` 规则，2026-09-07 用户截图纠正，见 gotchas #50）；**日期类字段 val 写日期字符串**（必须毫秒时间戳 int，见下方规则码段/gotchas #52） |

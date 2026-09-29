@@ -49,12 +49,26 @@ _COVER_IMAGES = [f'coverImage{str(i).zfill(3)}' for i in range(1, 13)]
 # 初始化
 # ============================================================
 
-def init_lowapp(api_base, token, tenant_id, app_id=None):
+def init_lowapp(api_base, token, tenant_id, app_id=None, prewarm=True):
     """初始化 lowApp 模式上下文
 
     调用后，desform_utils 中所有表单操作函数（create_form、add_widget、
     update_widget 等）都会自动携带 x-tenant-id 和 x-low-app-id header，
     无需额外配置。
+
+    **并且默认预热「表单编码 → 表单 ID」缓存**（prewarm=True，2026-09-23 加）：
+    不预热时 `get_form_id()` 每遇到一张没缓存的表就要翻一次
+    `/desform/list`（全租户 1790 条 / 18 页 / 单页 2.4MB / **11~21 秒**），
+    47 张表的脚本白等 5~6 分钟；预热只发 **1 个**请求
+    `/online/lowApp/miniflow/tenantAppFormList?tenantId=…`（拉本租户表单列表）。
+    详见 `desform_utils.prewarm_form_ids()`。
+
+    ⚠️ **这一次请求的耗时随租户表数线性增长，不是常数。** 2026-09-24 实测本租户
+    154 张表时要 **22~38 秒**（≈150~250ms/表，疑似服务端 N+1）。
+    于是「一个操作起一个子进程」的写法会被它放大成灾难：
+    `build_app.py` 的字典段原本每字典 spawn 一个子进程 → 32 个字典 = 32 次预热
+    ≈ 800 秒，占整单 1728 秒的 **47%**（改 `prewarm=False` 后该段 860s → 60s）。
+    **凡只打 `/sys/dict/*` 这类与表单 ID 无关的接口，一律 `prewarm=False`。**
 
     Args:
         api_base: JeecgBoot 后端地址（如 'http://<host>:<port>/jeecgboot'）
@@ -62,11 +76,27 @@ def init_lowapp(api_base, token, tenant_id, app_id=None):
         tenant_id: 组织（租户）ID，整数
         app_id: 应用 ID（字符串）。操作具体应用内的工作表时必填；
                 仅操作应用本身（create_app 等）时可不填
+        prewarm: 是否预热表单 ID 缓存（默认 True；失败自动退回慢路径，不影响正确性）
     """
     desform_utils.init_api(api_base, token)
     desform_utils._TENANT_ID = str(tenant_id)
     desform_utils._LOW_APP_ID = str(app_id) if app_id else None
     print(f'initialized: tenant_id={tenant_id}, app_id={app_id or "未设置"}', file=sys.stderr)
+    if prewarm:
+        # 优先用父进程落盘的共享缓存（环境变量指向的文件），跳过那 11~14 秒的预热。
+        # 父进程只要 init_lowapp 一次 + dump_form_cache + 给子进程带上这个环境变量，
+        # 「一个操作一个子进程」的脚本就不再被乘 N 倍（见 desform_utils.FORM_CACHE_ENV）。
+        n, src = 0, '预热'
+        _shared = os.environ.get(desform_utils.FORM_CACHE_ENV)
+        if _shared:
+            n = desform_utils.load_form_cache(_shared)
+            if n:
+                src = '共享缓存'
+        if not n:
+            n = desform_utils.prewarm_form_ids(tenant_id)
+        if n:
+            print(f'prewarm: 表单 ID 缓存已灌入 {n} 条（来源={src}，省掉每表一次 /desform/list 翻页）',
+                  file=sys.stderr)
 
 
 def set_app(app_id):

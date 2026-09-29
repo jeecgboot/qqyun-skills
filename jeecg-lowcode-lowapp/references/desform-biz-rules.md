@@ -102,6 +102,16 @@
 | `"field"` | 字段值（与另一个字段的值比较） | `["other_field_model"]` |
 | `"system"` | 系统变量 | `["sysUserCode"]`（见下方系统变量表） |
 
+> ⛔ **不要发明 `NE_FIELD` / `EQ_FIELD` 这类带 `_FIELD` 后缀的算子名**（2026-09-28 实测）。
+> **算子（`rule`）只有下方词表里那几个**，「和另一个字段比」是靠 `valueType:"field"` 表达的，
+> 两者是**两个正交的档**，不要揉进同一个字符串：
+> - ✅ 正确的字段间比较：`{"rule":"NE","valueType":"field","value":["<裸 model>"],"valueText":"$<裸 model>$"}`
+> - ❌ `{"rule":"NE_FIELD","valueType":"field", ...}` —— 算子名不在词表内，**前端匹配不上**。
+>
+> **失败形态特别隐蔽**：它不报错、不置灰、回读也一切正常，而是**条件恒真**——
+> 「合同金额 ≠ 应收金额汇总」这条校验，在两边都是 50000 时照样弹红字。
+> 排查时把每条规则的 `rule` 拿去和下方词表对一遍，**词表里没有的就是写错了**。
+
 > ⚠️ **`valueType="field"` 的 `value` 必须写「裸 model」，不能带 `$...$` 包裹**（2026-09-17 实测）：
 > 正确 `{"valueType":"field","value":["summary_1789629720122_806986"],"valueText":"$summary_1789629720122_806986$"}`，
 > 写成 `"value":["$summary_...$"]` 时**设计器解析不了，条件处直接显示「字段已删除」**（用户截图报障）。
@@ -326,6 +336,17 @@ update_design_config('my_form_code', {"bizRuleConfig": rules})
 
 > **注意**：`bizRuleConfig` 是数组，`update_design_config` 对数组采用**整体替换**策略。
 > 如需追加规则，必须先查询现有规则再追加，不能只传新规则。
+
+> ⛔ **整单保存会静默抹掉 `bizRuleConfig`**（2026-09-28 实测）。`save_design_from_file` /
+> `update_form` 那条「读整份设计 JSON → 改 → 存回去」的路径**不保留业务规则**：你在构建中途
+> 用整单保存打过任何补丁（改宽度、改默认值、关填报通知…），先前写好的规则就**没了**，
+> 而接口返回 `success`、回读控件也都正常，只有打开表单才发现规则不生效。
+> 用户报障形态：「上面有值，下面没有放开」——规则该放开的子表 / 区块一直是灰的。
+> - **`update_widget` / `add_widget` 走单独接口，不影响业务规则**（同次实测：改完 hidden 回读规则仍在），
+>   所以「改控件属性 → 再写规则」是安全顺序；反过来用整单保存就必须**在最后重写一遍规则**。
+> - **每次整单保存后，都回读 `config.bizRuleConfig` 确认条数没归零**，别信 save 的返回值。
+> - 排障口诀：规则疑似不生效，**先 `query_form` 数一下 `bizRuleConfig` 的长度**，
+>   长度 0 = 被整单保存抹了，与规则本身写没写对无关。
 
 ```python
 from desform_utils import init_api, query_form, update_design_config

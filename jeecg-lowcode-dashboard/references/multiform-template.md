@@ -40,7 +40,7 @@ $QQY forms  "$API" "$TOKEN" --tenant-id <TID> --app-name <应用名>
 
 ## 3. 布局预设（坐标换算通用规则）
 
-- KPI 行：3 个 → 各 `w:8, y:0, h:17`；4 个 → 各 `w:6`；有环比/同比 h≥30
+- KPI 行：3 个 → 各 `w:8, y:0, h:12`；4 个 → 各 `w:6`；有环比/同比 h≥30（数字卡 h>12 会贴底，finalize 会按行修回 12）
 - 图表行：半行 `w:12, h:28–34`（柱/折/饼 30–32）；透视/大表 整行 `w:24, h:30–34`；地图 `w:12, h:35`（禁 w:24）
 - 同行 w 合计 = 24；`config.size` = w×75 / h×11（脚本算，勿手写像素）
 - specs 每条必带 x/y/w/h；省略 y 仅用于已有盘底部追加
@@ -55,10 +55,10 @@ $QQY forms  "$API" "$TOKEN" --tenant-id <TID> --app-name <应用名>
 
 ## 5. 执行（主链单条 Bash · 同壳串行 = 合规）
 
-并行 Write 全部 JSON（`$HOME/.claude/tmp-qqy/`）后一条跑完，~40–60s：
+并行 Write 全部 JSON（`{该应用的工作目录}/dashboard_<slug>/`，slug 用英文/拼音缩写，禁中文，见 lowapp SKILL.md「临时目录标准」）后一条跑完，~40–60s：
 
 ```bash
-set -e; D=$HOME/.claude/tmp-qqy
+set -e; D="$(python "<lowapp>/scripts/skill_temp_path.py" --app-id <APP_ID> --sub dashboard_<slug>)"   # <lowapp> = jeecg-lowcode-lowapp skill 目录
 $QQY create-page "$API" "$TOKEN" --tenant-id <TID> --app-id <APP_ID> --name <盘名> --group <分组> && echo S1_OK && \
 $QQY add-charts "$API" "$TOKEN" --tenant-id <TID> --app-name <应用名> --page-name <盘名> --form-code <码A> --specs-file $D/a.json && echo S2_OK && \
 $QQY add-charts "$API" "$TOKEN" --tenant-id <TID> --app-name <应用名> --page-name <盘名> --form-code <码B> --specs-file $D/b.json && echo S3_OK && \

@@ -156,7 +156,9 @@ def reorder_buttons(button_id_list: list) -> bool:
         True 表示成功
     """
     payload = [{'id': bid, 'seq': idx + 1} for idx, bid in enumerate(button_id_list)]
-    result = _post('/desform/button/resetSequence', payload)
+    # 后端 resetSequence(@RequestBody JSONObject json) 取 json.getJSONArray("list")：必须包一层 list，
+    # 发裸数组报 JSON parse error（2026-09-24 项目管理-速测17 N1）
+    result = _post('/desform/button/resetSequence', {'list': payload})
     if not result.get('success'):
         raise RuntimeError(f"重排序失败：{result.get('message', result)}")
     return True

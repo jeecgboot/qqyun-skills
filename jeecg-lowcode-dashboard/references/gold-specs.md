@@ -8,14 +8,14 @@
 
 ```json
 [
-  {"comp":"JNumber","title":"总销量","x":0,"y":0,"w":8,"h":17,"dim":[],"val":"销量"},
-  {"comp":"JNumber","title":"总销售额","x":8,"y":0,"w":8,"h":17,"dim":[],"val":"售价"},
-  {"comp":"JNumber","title":"产品数","x":16,"y":0,"w":8,"h":17,"dim":[],"val":"record_count"},
-  {"comp":"JLine","title":"每日销量","x":0,"y":17,"w":12,"h":32,"dim":"create_time","val":"销量","dateGroup":"3"},
-  {"comp":"JLine","title":"每日销售额","x":12,"y":17,"w":12,"h":32,"dim":"create_time","val":"售价","dateGroup":"3"},
-  {"comp":"JBar","title":"各产品销量","x":0,"y":49,"w":12,"h":32,"dim":"产品名称","val":"销量"},
-  {"comp":"JBar","title":"各产品销售额","x":12,"y":49,"w":12,"h":32,"dim":"产品名称","val":"售价"},
-  {"comp":"JPivotTable","title":"产品明细","x":0,"y":81,"w":24,"h":36,"dim":"产品名称","val":"销量"}
+  {"comp":"JNumber","title":"总销量","x":0,"y":0,"w":8,"h":12,"dim":[],"val":"销量"},
+  {"comp":"JNumber","title":"总销售额","x":8,"y":0,"w":8,"h":12,"dim":[],"val":"售价"},
+  {"comp":"JNumber","title":"产品数","x":16,"y":0,"w":8,"h":12,"dim":[],"val":"record_count"},
+  {"comp":"JLine","title":"每日销量","x":0,"y":12,"w":12,"h":32,"dim":"create_time","val":"销量","dateGroup":"3"},
+  {"comp":"JLine","title":"每日销售额","x":12,"y":12,"w":12,"h":32,"dim":"create_time","val":"售价","dateGroup":"3"},
+  {"comp":"JBar","title":"各产品销量","x":0,"y":44,"w":12,"h":32,"dim":"产品名称","val":"销量"},
+  {"comp":"JBar","title":"各产品销售额","x":12,"y":44,"w":12,"h":32,"dim":"产品名称","val":"售价"},
+  {"comp":"JPivotTable","title":"产品明细","x":0,"y":76,"w":24,"h":36,"dim":"产品名称","val":"销量"}
 ]
 ```
 

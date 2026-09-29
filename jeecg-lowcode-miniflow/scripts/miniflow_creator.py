@@ -42,6 +42,9 @@ JeecgBoot 简流（MiniFlow）创建工具脚本
 """
 
 import urllib.request
+
+#: HTTP 超时（秒）。以前不设 → 后端卡住时脚本无输出干等（2026-09-24 进销存-速测17：子流程收尾挂了 3h20m）
+HTTP_TIMEOUT = 300
 import urllib.parse
 import json
 import sys
@@ -456,6 +459,21 @@ def fix_variable_titles(process_json):
     return fixes
 
 
+def _now_for_date_field(val):
+    """写进**日期控件**的「当前日期/当前时间」→ 系统变量 millisecond（毫秒时间戳）。
+
+    引擎把 nowDate/nowTime 一律格式化成 `yyyy-MM-dd HH:mm:ss` 字符串写库
+    （UpdateRecordDelegate：两者都用 DATE_TIME_FORMAT_SIMPLE），不看目标字段类型；
+    而日期控件（`timestamp:true`，技能建的默认如此）在页面/接口新增时存毫秒 —— 同一列混两种格式，
+    列表显示带时分秒、按日分组/排序/筛选对不齐（2026-09-24 萌萌科技任务管理、任务管理-一句话5 实测）。
+    `millisecond` 由引擎直接写 System.currentTimeMillis()，与控件存储一致。
+    """
+    if (isinstance(val, dict) and val.get("formNodeType") == "system"
+            and val.get("variableValue") in ("nowDate", "nowTime")):
+        return dict(val, variableValue="millisecond", variableName="当前时间戳毫秒")
+    return val
+
+
 def build_data_update_node(node_config, form_config, level, parent_id=None):
     """构建数据更新节点（data_update）"""
     node_id = node_config.get("id", gen_id("task"))
@@ -468,6 +486,9 @@ def build_data_update_node(node_config, form_config, level, parent_id=None):
     for uf in node_config.get("updateFields", []):
         field_id = uf.get("id", gen_id())
         val = uf.get("val", "")
+        # date / datetime 控件写毫秒；调用方标了 keepNowText（控件手工关了时间戳、存字符串）就不改写
+        if str(uf.get("fieldType") or uf.get("type") or "").startswith("date") and not uf.get("keepNowText"):
+            val = _now_for_date_field(val)
         # val 直接使用：固定值时为字符串，引用变量时为对象（由调用方传入正确格式）
         # ⚠️ 不要把字符串包装成 {"funText": val, "funContext": {}}，前端无法识别该格式
         item = {
@@ -1268,7 +1289,10 @@ def build_get_one_node(node_config, form_config, level, parent_id=None):
         "searchFieldGroup": search_field_group,  # 前端使用 searchFieldGroup，不再是 conditionGroup
         "sortField": node_config.get("orderField", node_config.get("sortField", "")),
         "ignoreSortRule": node_config.get("ignoreSortRule", False),
-        "sortType": node_config.get("orderType", node_config.get("sortType", "asc")),
+        # 没给排序字段时 sortType 必须留空：以前默认 "asc" → check_node_contract 判「有 sortType 但
+        # sortField 为空」违例，2026-09-23/24 连续两轮七个应用每个都要返工一次（默认参数本身违约）。
+        "sortType": node_config.get("orderType", node_config.get("sortType",
+                    "asc" if node_config.get("orderField", node_config.get("sortField")) else "")),
         "noDataType": node_config.get("emptyAction", node_config.get("noDataType", 0)),  # 前端使用 noDataType
         "level": str(level),
     }
@@ -1666,6 +1690,11 @@ def build_data_add_node(node_config, form_config, level, parent_id=None):
 
     # formModel：key=目标字段ID，value=字段值配置对象（由调用方直接提供）
     form_model = node_config.get("formModel", user_attr.get("formModel", {}))
+    # 日期控件的 model 以 `date_` 开头：「当前日期/时间」改写成毫秒（见 _now_for_date_field）
+    if isinstance(form_model, dict):
+        _keep = set(node_config.get("keepNowTextKeys") or [])   # 存字符串的日期控件：调用方点名不改写
+        form_model = {k: (_now_for_date_field(v) if str(k).startswith("date_") and k not in _keep else v)
+                      for k, v in form_model.items()}
 
     attr = {
         "addDataType": add_data_type,
@@ -1963,7 +1992,14 @@ def build_operation_node(node_config, form_config, level, parent_id=None):
                 "field": fid,
                 "formTableCode": f.get("formTableCode", form_config.get("formTableCode", "")),
                 "formNodeId": f.get("formNodeId", "start"),
-                "formNodeType": "table",
+                # ⚠️ **不能写死 `table`**（gotchas #127）：这里要的是「产出该值的那个节点的类型」
+                # —— 上下文行 `table` / get_one `search` / get_more `getMore` / add `plus`。
+                # 写死 `table` 时引用 get_one 结果的条目被打错标 → 运算结果**恒空** →
+                # 下游 data_add.formModel / data_update.updateFields 全写空值，
+                # 而 save/deploy 全绿、只有运行起来才发现「流程跑了什么都没写」。
+                # 调用方（build_flows）已在 funFields 条目里带上正确的 formNodeType；
+                # 手写 node_config 时不传才兜底回 `table`。
+                "formNodeType": f.get("formNodeType") or "table",
                 "variableValue": fid,
                 "formNodeName": f.get("formNodeName", "工作表事件触发"),
                 "tableText": f.get("tableText", form_config.get("formTableName", "")),
@@ -2545,6 +2581,8 @@ def build_node_chain(nodes, form_config, start_level=1, parent_id=None):
             prev = _get_convergence_child(current) or current
             if node.get("type") == "approve_result" and isinstance(prev, dict)                     and prev.get("type") == "approver":
                 prev.setdefault("attr", {})["hasResultBranch"] = True
+                # 金标（example/分支示例.md §6「三处必改」①）：挂结果分支的审批节点 addable=false
+                prev["addable"] = False
             # 若前一个节点有聚合子节点，将新节点接在聚合子节点之后
             conv = _get_convergence_child(current)
             if conv is not None:
@@ -3031,7 +3069,7 @@ def api_request(api_base, token, path, form_data=None, method='POST', extra_head
         req = urllib.request.Request(url, headers=headers, method=method)
 
     try:
-        resp = urllib.request.urlopen(req)
+        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         return json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
@@ -3055,7 +3093,7 @@ def api_json_request(api_base, token, path, data=None, method='POST', extra_head
         req = urllib.request.Request(url, headers=headers, method=method)
 
     try:
-        resp = urllib.request.urlopen(req)
+        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         return json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
@@ -3103,7 +3141,7 @@ def deploy_flow(api_base, token, flow_id, tenant_id=None, low_app_id=None):
                 })
                 url = f'{api_base}/act/process/extActProcess/listProcess?{params}'
                 req = urllib.request.Request(url, headers=headers)
-                resp = urllib.request.urlopen(req)
+                resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
                 data = json.loads(resp.read().decode('utf-8'))
                 records = (data.get('result') or {}).get('records') or []
                 for rec in records:
@@ -3198,7 +3236,7 @@ def query_flow(api_base, token, process_key=None, process_name=None, flow_id=Non
     if flow_id:
         url = f'{api_base}/act/process/extActProcess/queryById?id={urllib.parse.quote(str(flow_id))}'
         req = urllib.request.Request(url, headers=headers)
-        resp = urllib.request.urlopen(req)
+        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         data = json.loads(resp.read().decode('utf-8'))
         rec = data.get('result')
         return _parse_process_json(rec) if rec else None
@@ -3218,7 +3256,7 @@ def query_flow(api_base, token, process_key=None, process_name=None, flow_id=Non
         params = urllib.parse.urlencode(query)
         url = f'{api_base}/act/process/extActProcess/listProcess?{params}'
         req = urllib.request.Request(url, headers=headers)
-        resp = urllib.request.urlopen(req)
+        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         data = json.loads(resp.read().decode('utf-8'))
         records = data.get('result', {}).get('records', [])
         for rec in records:

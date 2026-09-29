@@ -63,7 +63,7 @@
 import sys, json, os, tempfile, urllib.parse
 sys.path.insert(0, r'<skill目录>/scripts')
 from desform_lowapp_utils import init_lowapp
-from desform_utils import query_form, save_design_from_file
+from desform_utils import query_form, save_design_from_file, app_tmpdir
 
 init_lowapp(api_base, token, tenant_id=..., app_id=...)
 design = json.loads(query_form(code)['desformDesignJson'])
@@ -73,7 +73,7 @@ design = json.loads(query_form(code)['desformDesignJson'])
 value = {str(i): ch for i, ch in enumerate(s)}        # 字符对象形态 ← 关键
 #    若已是 dict：保留数字键部分（0..N 字符），长键冗余段（见下）建议重建为与字符段同义内容或删除
 # 3) 修改后整单保存：
-path = os.path.join(tempfile.gettempdir(), 'jeecg-desform', code + '_design.json')
+path = os.path.join(app_tmpdir('patch'), code + '_design.json')   # <该应用的工作目录>/patch/
 json.dump(design, open(path, 'w', encoding='utf-8'), ensure_ascii=False)
 save_design_from_file(code, path)
 ```

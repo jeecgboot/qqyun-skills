@@ -1551,7 +1551,7 @@ a.setdefault('jsonContext', {})[h] = base64.b64encode(cs.encode('utf-8')).decode
 
 > ⚠️ **selectType=3 存储契约（2026-09-04 实证——上面简写只是 config DSL，落库与设计器 UI 读的都是 attr 形态）**
 > `build_process_json` 把简写平移进 attr 后会得到 UI 错乱 JSON：`attr.formTableCode` 成了**目标表**、缺 `linkFormTableCode/Name` → 设计器打开该节点时「节点对象」「关联字段」下拉为空/错位。**规范 attr**：
-> - `attr.formTableCode/Name/Id` = **源表**（记录从哪条来；源=start 时 `formTableId=form_start_{源表code}`）
+> - `attr.formTableCode/Name/Id` = **源表**（记录从哪条来；源=start 时 `formTableId=form_start_{源表code}`；源是别的取数节点时 `formTableId=form_{源节点id}_{源表code}`——**写成本节点自己的 id 是静默错配**，2026-09-24 实证：全应用 16 个 selectType=3 节点 13 个合此口径、3 个写成自身 id，用户在 UI 修「期初余额」即把自身 id 段改成 `start`）
 > - `attr.linkFormTableField` = 源表上 many link 的 model
 > - `attr.linkFormTableCode/Name/Type(=1)` = **关联目标表**（返回的记录表）
 > - `attr.selectType=3` + `formTableSourceTaskId` + `formTableSourceNodeType`（源=start→`"table"`，其它源→`"search"`）+ `getDataType=1` + `level`

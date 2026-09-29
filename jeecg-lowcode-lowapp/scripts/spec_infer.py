@@ -22,13 +22,16 @@ link-field/link-record，纯语义。剥掉语义类只推断叶子后，准确�
     near_names(["设备名称","设备编码"], "巡检设备名称")  -> ['设备名称']
 """
 
-__all__ = ["infer", "near_names", "resolve", "hint", "normalize_containers", "LEAF_TYPES"]
+import re
+
+__all__ = ["infer", "near_names", "resolve", "hint", "normalize_containers", "LEAF_TYPES",
+           "default_precision"]
 
 # infer() 可能返回的全部叶子类型（都与 desform_creator._TYPE_MAP 对齐）
 LEAF_TYPES = (
     "input", "textarea", "number", "integer", "money", "date", "time",
     "phone", "email", "select-user", "select-depart", "area-linkage",
-    "imgupload", "file-upload", "capital-money", "rate",
+    "imgupload", "file-upload", "capital-money", "rate", "markdown", "editor", "location",
 )
 
 #: 规格里 `类型` 映射可用的**中文类型名** → 叶子类型。
@@ -47,6 +50,17 @@ TYPE_CN = {
     # 开关（布尔）。`desform_creator._TYPE_MAP` 早就有 'switch': SWITCH，只是规格无处声明，
     # 名字推不出来，需求点名了就得能写死。
     "开关": "switch",
+    # 长文档类文本：研发/知识类（需求描述、重现步骤、用例步骤、会议纪要…）要排版、贴代码/截图，
+    # 「多行文本」只能纯文本。以前规格写不出这两档，只能建后换控件（2026-09-24 任务管理用户反馈）。
+    "Markdown": "markdown", "富文本": "editor",
+    # 定位（打卡/外勤签到）。`desform_creator._TYPE_MAP` 早就有 'location': LOCATION，只是规格无处声明，
+    # 于是落成单行文本、建后手换控件，app_audit 还按规格报类型不符（2026-09-24 人事OA/考勤-速测18）。
+    "定位": "location",
+    # 文本组合（把本表/关联带出的字段拼成一句展示文本，如「摘要」「标题」）。
+    # `desform_creator._TYPE_MAP` 早就有 'text-compose': TEXT_COMPOSE，只是规格无处声明，
+    # 于是「摘要」这类字段落成单行文本 —— 而单行文本**永远为空**（没人往里填，值要靠组合算出来），
+    # 只能建后整单改控件类型；改完 app_audit 反而按规格报「声明 input → 实际 text-compose」。
+    "文本组合": "text-compose",
 }
 
 
@@ -95,10 +109,19 @@ _RULES = (
     # —— 金额 —— 注意「价」要单独处理：中文里「XX价(含税)」「XX价(元)」
     # 这类括号后缀写法不带「金额/单价」字样，得靠下面的 _PRICE_CHARS 兜住
     (("金额", "单价", "售价", "成本", "税额", "合计", "总额", "总价", "毛利",
-      "额度", "价格", "原价"), "money"),
+      "额度", "价格", "原价",
+      # 2026-09-24 补：一句话建应用时字段名不再带「金额」二字，`计划资金` `拜访费用`
+      # `个人差旅费用` 以前全兜底成单行文本 —— 被审批网关「计划资金 大于等于 200」
+      # 和「拜访费用 求和」拿去当数值用，接口全绿、结果全错。
+      "费用", "资金", "预算", "报销", "借款", "担保额", "保证金", "贷款", "投资",
+      "营收", "收入", "支出", "利润", "报价",
+      # 担保/资产类：`在保余额` `反担保物评估价值` 以前兜底成文本
+      "余额", "价值", "估值", "估价", "市值"), "money"),
     # —— 数值 ——
     (("数量", "税率", "折扣率", "比例", "序号", "百分比", "库存", "总数",
-      "位数", "次数", "天数"), "number"),
+      "位数", "次数", "天数",
+      "*工时", "*时长", "*人数", "*个数", "*分值", "*得分",
+      "*总分", "*分数", "*打分"), "number"),
     # —— 日期 ——
     (("日期", "时间"), "date"),
 )
@@ -106,6 +129,42 @@ _RULES = (
 # 「价」在中文里既可做「价格」也可做「评价」，但业务表单里绝大多数是金额。
 # 单独处理是为了让它只在**明确的金额搭配**下生效，不误伤「评价」。
 _PRICE_CHARS = ("采购价", "售价", "单价", "原价", "价(", "价)")
+
+# 数值类（money/number）关键词**只描述数值的主题**，名字以这些词结尾时它其实是
+# 该主题的一个**属性**，不是数值本身：`费用类型` `报销事由` `资金来源` `报价日期`
+# `投资方` `报销人`。命中这些后缀就跳过 money/number 规则，往下落到日期或兜底文本。
+_NON_NUMERIC_SUFFIX = ("类型", "摘要", "事由", "来源", "说明", "方式", "状态", "名称",
+                       "编号", "编码", "类别", "科目", "分类", "性质", "用途", "等级",
+                       "级别", "日期", "时间", "年度", "年份", "月份", "项目",
+                       "人", "方", "单", "明细", "表", "记录", "清单", "期", "至",
+                       "期限", "周期")
+# 名字末尾的括号注释（`机会编号(报销用)`）不参与数值判定 —— 否则「报销」会把编号推成金额。
+# 单位括号（`（元）` `（万元）` `（%）`）不算注释，由 _RULES 的后缀规则先接住。
+_TAIL_NOTE = re.compile(r"[（(][^（）()]*[）)]$")
+_NUMERIC = ("money", "number")
+_NOT_YUAN = ("单元", "多元", "纪元", "公元")
+
+
+# 单位后缀 / 比率后缀：名字**以单位结尾**就是数值，语义最确定，在 _RULES 之前判 ——
+# `人员成本（元）` 以前先撞「人员」落成选择用户、`计入部门线索费用（元）` 先撞「部门」落成选择部门。
+_UNIT_MONEY = ("（元）", "(元)", "（万元）", "(万元)", "/元", "/万元", "万元")
+_UNIT_RATE = ("率", "%", "（%）", "(%)")
+# 「XX率」里不是数值的（`拜访频率` 一般填 每日/每周），不走比率后缀（2026-09-24 review）
+_NOT_RATE = ("频率",)
+# 数量类后缀：名字以它们结尾就是**数字**，哪怕前面带着金额主题词 ——
+# `保证金比例` `利润比例` `预算数量` `贷款天数` 以前被「保证金/利润/预算/贷款」子串抢成 money（2026-09-24 review）
+_UNIT_NUMBER = ("比例", "百分比", "数量", "天数", "次数", "个数", "人数", "笔数", "件数", "期数")
+
+
+def _unit_type(n):
+    """按单位后缀判数值类型；判不出返回 None。「元」单独结尾要躲开「单元」「公元」。"""
+    if n.endswith(_UNIT_MONEY) or (n.endswith("元") and len(n) > 1 and not n.endswith(_NOT_YUAN)):
+        return "money"
+    if n.endswith(_UNIT_RATE) and not n.endswith(_NOT_RATE):
+        return "number"
+    if n.endswith(_UNIT_NUMBER):
+        return "number"
+    return None
 
 
 def infer(name, first=False):
@@ -123,10 +182,24 @@ def infer(name, first=False):
     n = (name or "").strip()
     if not n:
         return "input"
+    # 大写金额优先于一切（`合同金额大写（元）` 仍是大写金额）
+    if "大写" in n:
+        return "capital-money"
+    unit = _unit_type(n)
+    if unit:
+        return unit
+    # 数值规则只看去掉括号注释后的名字，且名字以「属性后缀」结尾时整体跳过
+    base = _TAIL_NOTE.sub("", n) or n
+    attr = base.endswith(_NON_NUMERIC_SUFFIX)
     for keys, typ in _RULES:
-        if any((n.endswith(k[1:]) if k.startswith("*") else k in n) for k in keys):
+        s = n
+        if typ in _NUMERIC:
+            if attr:
+                continue
+            s = base
+        if any((s.endswith(k[1:]) if k.startswith("*") else k in s) for k in keys):
             return typ
-    if any(k in n for k in _PRICE_CHARS):
+    if not attr and any(k in n for k in _PRICE_CHARS):
         return "money"
     return "input"
 
@@ -312,3 +385,69 @@ def normalize_containers(form):
         out.append({'name': cname, 'panes': panes,
                     'hiddenOnAdd': bool(c.get('新增时隐藏'))})
     return out, errs
+
+
+# ---------------- 数值控件的默认小数位 ----------------
+_PCT_SUFFIX = ("率", "%", "（%）", "(%)", "比例", "百分比")
+
+
+def default_precision(name, typ, opts=None):
+    """建壳时 `number` 控件的默认 precision；返回 None = 不干预（用工厂默认）。
+
+    工厂对 number 默认 precision=0：费率/比例/百分比写成「数字」后 **1.5% 填不进**，
+    四道闸门都看不见（2026-09-24 担保应用：年担保费率、担保费率、抵押率、保证金比例全中）。
+    规则：字段名以 率 / % /（%）结尾，或 unitText 为 %，默认 2 位；显式写了 precision 的照旧。
+    """
+    opts = opts or {}
+    if typ != "number" or "precision" in opts:
+        return None
+    n = (name or "").strip()
+    if n.endswith(_PCT_SUFFIX) or (opts.get("unitText") or "").strip() in ("%", "％"):
+        return 2
+    return None
+
+
+_PREC_SELFTEST = (
+    (("担保费率", "number", {}), 2), (("抵押率", "number", {}), 2),
+    (("订单毛利率%", "number", {}), 2), (("完成比例（%）", "number", {}), 2),
+    (("投入比例", "number", {"unitText": "%"}), 2),
+    (("担保费率", "number", {"precision": 4}), None),      # 显式写了照旧
+    (("数量", "number", {}), None), (("工时", "number", {}), None),
+    (("担保费率", "money", {}), None),                      # 只管 number
+)
+
+
+# ---------------- 自测：python spec_infer.py ----------------
+_SELFTEST = (
+    # 2026-09-24 一句话建应用：名字里不带「金额」的数值字段
+    ("计划资金", "money"), ("拜访费用", "money"), ("个人差旅费用", "money"),
+    ("差旅费用（元）", "money"), ("申报预算（万元）", "money"), ("担保金额", "money"),
+    ("保证金", "money"), ("贷款余额", "money"), ("预计利润", "money"),
+    ("人员成本（元）", "money"), ("计入部门线索费用（元）", "money"),
+    ("完成率", "number"), ("工时", "number"), ("预计工时", "number"),
+    ("实际时长", "number"), ("参会人数", "number"), ("订单毛利率%", "number"),
+    # 数值主题的**属性**不是数值
+    ("费用类型", "input"), ("报销事由", "input"), ("资金来源", "input"),
+    ("费用摘要", "input"), ("报价日期", "date"), ("报销人", "input"),
+    ("投资方", "input"), ("机会编号(报销用)", "input"), ("价格等级", "input"),
+    ("报价有效期至", "input"), ("费用明细", "input"), ("贷款期限", "input"),
+    ("在保余额", "money"), ("反担保物评估价值", "money"), ("评审总分", "number"),
+    ("专家打分", "number"), ("价值类型", "input"),
+    # 旧正例不回归
+    ("订单金额", "money"), ("合同金额大写", "capital-money"), ("单价", "money"),
+    ("库存数量", "number"), ("税率", "number"), ("施工时间", "date"),
+    ("销售合同", "file-upload"), ("合同金额", "money"), ("负责人手机", "phone"),
+    ("所属部门", "select-depart"), ("项目负责人", "select-user"), ("备注", "textarea"),
+    ("评分", "input"), ("单元", "input"), ("采购价(含税)", "money"),
+)
+
+if __name__ == "__main__":
+    import sys
+    bad = [(n, want, infer(n)) for n, want in _SELFTEST if infer(n) != want]
+    bad += [("precision%r" % (a,), want, default_precision(*a))
+            for a, want in _PREC_SELFTEST if default_precision(*a) != want]
+    for n, want, got in bad:
+        print("FAIL %s: want %s got %s" % (n, want, got))
+    total = len(_SELFTEST) + len(_PREC_SELFTEST)
+    print("%d/%d ok" % (total - len(bad), total))
+    sys.exit(1 if bad else 0)

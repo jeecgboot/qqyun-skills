@@ -33,6 +33,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -120,6 +121,8 @@ def cond_value(family, v, rv):
     """
     if isinstance(v, dict):                       # 变量引用 / 运算结果：原样
         return v, None
+    if v is None or v == "":                     # 「为空 / 不为空」不带值：原样（日期族以前拿 None 去 _date_ms
+        return v, None                            # → .strip() 崩，2026-09-24 申报-一句话9 ("提交日期","不为空")）
     if family == "select-depart":
         # 写入侧 `field_value` 已把部门名翻成 id（2026-09-22 A2），条件侧同一值会再进这里：
         # 已是 id 的直接用、反查名称填 name；否则按名翻 id。不判就是「找不到部门「<id>」」（销售管理 R2 实测）
@@ -301,6 +304,58 @@ class Resolver(object):
                 flat(x.get("children"))
         flat(res)
 
+    # ---- 审批人解析（2026-09-24 一句话建应用三应用同时踩：四道闸门全绿、任务谁都收不到）----
+    def role(self, name_or_code):
+        """角色名或 roleCode → (roleCode, roleName)。
+
+        `candidateGroups.roleIds` 引擎按 **roleCode** 归集待办（gotchas #36）；以前 DSL 收到角色名就
+        原样写进 roleIds —— save/deploy/契约/审计全绿，实例能起，**任务谁都收不到**。
+        名字、编码都收；租户里没有就直接报错并列出可用角色（别让它静默落库）。
+        """
+        if getattr(self, "_roles", None) is None:
+            try:
+                r = MC.api_request(self.api, self.token, "/sys/role/list?pageNo=1&pageSize=500",
+                                   method="GET", extra_headers={"X-Tenant-Id": self.tenant})
+            except RuntimeError as e:
+                raise SystemExit("FAIL: 取租户角色失败（审批人按角色要 roleCode）：%s" % e)
+            recs = ((r.get("result") or {}).get("records") or [])
+            self._roles = [(x.get("roleCode"), x.get("roleName")) for x in recs
+                           if x.get("roleCode") and str(x.get("tenantId") or self.tenant) == self.tenant]
+        key = (name_or_code or "").strip()
+        for code, name in self._roles:
+            if key in (code, name):
+                return code, name
+        raise SystemExit("FAIL: 租户 %s 没有角色「%s」。可用：%s —— 审批人请从现有角色里选（写名称或 roleCode 都行）"
+                         % (self.tenant, key, "、".join("%s(%s)" % (n, c) for c, n in self._roles)))
+
+    def user_name(self, account, strict=True):
+        """账号 → 显示名（设计器卡片 / approverNames 用）；查不到就报错，不让不存在的账号落库。
+
+        strict=False 用于「没点名审批人时兜底 admin」：查不到只告警、显示名用账号本身，不中止整批构建（review #7）。"""
+        if getattr(self, "_unames", None) is None:
+            self._unames = {}
+        if account not in self._unames:
+            import urllib.parse
+            try:
+                r = MC.api_request(self.api, self.token,
+                                   "/sys/user/list?pageNo=1&pageSize=10&username=%s" % urllib.parse.quote(account),
+                                   method="GET", extra_headers={"X-Tenant-Id": self.tenant})
+            except Exception as e:                    # 网络/编码异常都在这里收口（中文账号以前 UnicodeEncodeError 直接崩）
+                if not strict:
+                    log("WARN: 查用户 %s 失败（%s），显示名用账号本身" % (account, str(e)[:80]))
+                    self._unames[account] = account
+                    return account
+                raise SystemExit("FAIL: 查用户 %s 失败：%s" % (account, e))
+            hit = [x for x in ((r.get("result") or {}).get("records") or []) if x.get("username") == account]
+            if not hit and not strict:
+                log("WARN: 本租户查无账号「%s」，兜底审批人仍写它，请确认" % account)
+                self._unames[account] = account
+                return account
+            if not hit:
+                raise SystemExit("FAIL: 本租户查无账号「%s」（审批人 users= 写**登录账号**）" % account)
+            self._unames[account] = hit[0].get("realname") or account
+        return self._unames[account]
+
     def dept_name(self, did):
         """部门 id → 部门名（条件项的 `name` 要名称数组）。"""
         self._load_depts()
@@ -460,6 +515,21 @@ class Resolver(object):
                     if meta.get("model"):
                         self._idx[meta["model"]] = (tname, fn, meta)
         return self._idx
+
+    def write_value(self, table, field, v):
+        """**写入**用的字面量：`field_value` 翻成存储值后，多选（checkbox）目标再包成数组。
+
+        条件比较要的是逗号串，所以不在 field_value 里包；只在 update/add/传参 三处写入点用它
+        （2026-09-24 进销存-速测16 E：流程写「调拨」落成字符串，页面新建的是 ['手工']，同列混格式）。"""
+        r = self.field_value(table, field, v)
+        if isinstance(r, str) and r != "":
+            try:
+                fam = self.family(table, field)
+            except SystemExit:
+                fam = None
+            if fam == "checkbox":
+                return [x for x in r.split(",") if x != ""]
+        return r
 
     def family(self, table, field, _seen=None):
         """条件条目的**控件族** —— 他表字段要递归解到最底层控件。
@@ -665,6 +735,11 @@ class Builder(object):
         if isinstance(v, dict) and ("$inc" in v or "$dec" in v):
             # flow_dsl.inc()/dec() 的标记：脱壳解析，optType 在 node() 里按字段补
             return self.value(v["$inc"] if "$inc" in v else v["$dec"], ctx_table, table)
+        if isinstance(v, dict) and "$sys" in v:
+            # flow_dsl.now()：系统变量。写日期控件用 millisecond（引擎 nowDate 写的是字符串，见 gotchas 2026-09-24 补正）
+            names = {"millisecond": "当前时间戳毫秒", "nowDate": "当前日期", "nowTime": "当前时间"}
+            return {"formNodeType": "system", "variableValue": v["$sys"],
+                    "variableName": names.get(v["$sys"], v["$sys"])}
         if isinstance(v, dict) and "$lit" in v:
             return v["$lit"]
         if isinstance(v, dict) and "$calc" in v:
@@ -729,7 +804,9 @@ class Builder(object):
                 raise KeyError("办理人只支持 %s，收到 %r"
                                % ("/".join(APPLY_EXPR), who))
             eid, ename = APPLY_EXPR[who]
-            groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByExp",
+            # 发起人 = 单人 candidateUser；部门负责人类表达式返回**多人** → candidateUsers（复数）
+            atype = "candidateUser" if eid == "${applyUserId}" else "candidateUsers"
+            groups.append({"approverType": atype, "assigneeType": "assigneeByExp",
                            "approverIds": [], "approverNames": [], "deptIds": [],
                            "roleIds": [], "postIds": [],
                            "expressionsIds": [eid],
@@ -737,14 +814,17 @@ class Builder(object):
                            "approverId": "", "approverName": "", "variableTitle": [],
                            "variableContent": "", "formTableType": ""})
         if spec.get("users"):
+            # ⚠️ approverIds 写**裸账号**：`user.xxx` 是消息节点 toUserIds 的写法，写进审批组时
+            # save/deploy/契约全绿、实例能起，任务派给 `user.admin` 这个不存在的人（2026-09-16、09-24 两次实测）
             groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByName",
-                           "approverIds": ["user.%s" % u for u in spec["users"]],
-                           "approverNames": list(spec["users"]), "levelMode": 1,
+                           "approverIds": list(spec["users"]),
+                           "approverNames": [self.rv.user_name(u) for u in spec["users"]], "levelMode": 1,
                            "approverId": "", "approverName": "", "deptIds": [], "roleIds": [],
                            "postIds": [], "expressionsIds": []})
         if spec.get("roles"):
+            rs = [self.rv.role(r) for r in spec["roles"]]      # 名称/编码 → (roleCode, roleName)
             groups.append({"approverType": "candidateGroups", "assigneeType": "assigneeByName",
-                           "roleIds": list(spec["roles"]), "roleNames": list(spec["roles"]),
+                           "roleIds": [c for c, _ in rs], "roleNames": [n for _, n in rs],
                            "levelMode": 1, "approverId": "", "approverName": "",
                            "approverIds": [], "deptIds": [], "postIds": [], "expressionsIds": []})
         if not groups:
@@ -757,7 +837,7 @@ class Builder(object):
                          "approverId": "", "approverName": "", "variableTitle": [],
                          "variableContent": "", "formTableType": ""}]
             groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByName",
-                           "approverIds": ["user.admin"], "approverNames": ["admin"],
+                           "approverIds": ["admin"], "approverNames": [self.rv.user_name("admin", strict=False)],
                            "levelMode": 1, "approverId": "", "approverName": "",
                            "deptIds": [], "roleIds": [], "postIds": [], "expressionsIds": []})
         return groups
@@ -819,16 +899,40 @@ class Builder(object):
         if t == "get_one":
             tb = spec["table"]
             conds = self._cond_items(spec.get("cond"), tb)
-            return {"type": "get_one", "name": spec["name"], "getType": 1,
-                    "formTableCode": self.rv.code(tb), "formTableName": tb,
+            d = {"type": "get_one", "name": spec["name"], "getType": 1,
+                 "formTableCode": self.rv.code(tb), "formTableName": tb,
                     # 显式写死 formTableId = form_<本节点 id>_<表 code>（node-contract §9）。
                     # 不写时靠 creator 的 selectType=1 默认分支推导：值一样，但推导过程
                     # 不可见，上游默认一变就静默漂走。
                     "formTableId": "form_%s_%s" % (spec["id"], self.rv.code(tb)),
                     "conditions": conds,
-                    # 3 = 中止流程，或继续执行查找结果分支（配 data_branch）
-                    "emptyAction": {"继续": 0, "新增": 1, "中止": 2,
-                                    "分支": 3}.get(spec.get("empty"), 0)}
+                    # ⚠️ 「未查到数据时」的口径以**设计器**为准（miniflow_creator
+                    # `build_get_one_node` 文首，2026-09-15 设计器源码实证）：
+                    #     1 = 继续执行 / 2 = **在工作表中新增记录后继续** / 3 = 中止，或进查找结果分支
+                    # 早先这里是 {继续:0, 新增:1, 中止:2, 分支:3} —— **整体错位一格**，
+                    # 于是 `empty="中止"` 被落成 noDataType=2 =「新增记录后继续」：
+                    # 子流程每次查不到就**在工作表里建一条空记录**。
+                    # 2026-09-23 进销存实测：销售/采购的数量回写子流程每跑一次就往
+                    # 销售产品明细 / 采购订单产品明细 各扔一条空行（8 轮冒烟攒了 16 条），
+                    # 而 save/deploy/契约/审计全绿 —— 只有数数据才看得见。
+                    # `empty="分支"` 与「中止」同为 3，所以那条链一直是对的。
+                     "emptyAction": {"继续": 1, "新增": 2, "中止": 3,
+                                     "分支": 3}.get(spec.get("empty"), 1)}
+            # ⚠️ **排序**（`flow_dsl.get_one(..., sort=, sort_type=)`）。
+            # 不写这一步时 `attr.sortField` 恒空 → 引擎从命中的多条里**随机**取一条，
+            # 而 save/deploy/回读全绿、设计器「排序」面板也是空的：
+            # FIFO 的「取入库日期最早的批次」会变成「取随便一批」，账目错得毫无征兆
+            # （2026-10-01 前实测：库存先进先出应用的 4 个取批次节点全部缺 sortField，
+            #   只能在建后用外科补丁补 attr）。
+            # 键名走 creator 的 config DSL：orderField/orderType（`build_get_one_node`
+            # 读的就是这两个，`sortField`/`sortType` 是它的同义写法），**值必须是 model**。
+            if spec.get("sort"):
+                d["orderField"] = self.rv.f(tb, spec["sort"])["model"]
+                d["orderType"] = (spec.get("sort_type") or "asc").lower()
+                if d["orderType"] not in ("asc", "desc"):
+                    raise KeyError("get_one(%r)：sort_type 只认 asc/desc，收到 %r"
+                                   % (spec["name"], spec.get("sort_type")))
+            return d
 
         if t == "get_more":
             tb = spec["table"]
@@ -851,6 +955,13 @@ class Builder(object):
                         "  查两处：① 主表 %r 上确实存在一条关联到 %r 的关联记录字段（子表/关联工作表都算）；"
                         "② get_more 的第一个参数写的是那张明细表。"
                         % (spec["name"], ctx_table, tb, ctx_table, tb))
+                # ⚠️ 静默故障防线（2026-09-25 进销存-兵团实测）：selectType=3 不带筛选，
+                # 旧行为把 cond 直接丢掉 → 盘亏凭证把零数量行也建了明细，建流程/契约全绿（gotchas「想用 cond 过滤行」）
+                if spec.get("cond"):
+                    raise KeyError(
+                        "get_more(%r, from_='start', cond=...)：「取本单关联明细」(selectType=3) 不支持筛选条件，cond 会被丢掉。\n"
+                        "  改法：去掉 cond，在子流程里用 compute + gateway(result()>0) 挡掉不要的行；"
+                        "或不写 from_（按表查，cond 生效，但不能喂 call_sub）" % spec["name"])
                 self._last_get_more = {"id": spec["id"], "code": self.rv.code(tb),
                                        "name": spec["name"],
                                        "main": self.rv.code(ctx_table),
@@ -917,7 +1028,7 @@ class Builder(object):
                     opt = OPT_INC
                 elif isinstance(v, dict) and "$dec" in v:
                     opt = OPT_DEC
-                val = self.rv.field_value(tb, fname, self.value(v, ctx_table))
+                val = self.rv.write_value(tb, fname, self.value(v, ctx_table))
                 # 变量对象还要带全两样，否则设计器解析不完整（二者都只在真跑/前端才暴露）：
                 #   ① function 型（运算结果）要 `fieldType` = **写入字段的类型**；
                 #   ② 写**日期字段**要 `options.format`（值取该字段自己的 format）。
@@ -973,7 +1084,7 @@ class Builder(object):
                 tf = self.rv.f(tb, fname)
                 if isinstance(v, dict) and "$var" in v:
                     self.var_targets[(self._cur_name, v["$var"])] = (tb, fname)
-                form_model[tf["model"]] = self.rv.field_value(
+                form_model[tf["model"]] = self.rv.write_value(
                     tb, fname, self.value(v, ctx_table))
             # 登记：后面 call_sub 的「传 record id」要指向它
             self._last_add = {"id": spec["id"], "name": spec["name"],
@@ -994,48 +1105,31 @@ class Builder(object):
             # 参照实现：`miniflow_creator.py` 的 `build_data_add_node`（addDataType=2 时
             # 这 5 个键一起落）和 `postbuild_flows.py` 的 `_batch` 分支
             # （从上游 get_more 节点的 formTableCode 推出 Code / Id）。
-            return {"type": "data_add", "name": spec["name"],
-                    "formTableCode": self.rv.code(tb), "formTableName": tb,
-                    # 线上 28 条 data_add 的这两个键**都是空串**（来源是「本节点自己」，
-                    # 不是触发行）；写成 "start"/"table" 会让面板的来源标注错
-                    "formTableSourceTaskId": "", "formTableSourceNodeType": "",
-                    "formModel": form_model, "addDataType": 1, "formType": 2, "noDataType": 1,
-                    "expressionType": "delegateExpression",
-                    "expressionValue": "${addRecordDelegate}"}
+            d = {"type": "data_add", "name": spec["name"],
+                 "formTableCode": self.rv.code(tb), "formTableName": tb,
+                 # 线上 28 条 data_add 的这两个键**都是空串**（来源是「本节点自己」，
+                 # 不是触发行）；写成 "start"/"table" 会让面板的来源标注错
+                 "formTableSourceTaskId": "", "formTableSourceNodeType": "",
+                 "formModel": form_model, "addDataType": 1, "formType": 2, "noDataType": 1,
+                 "expressionType": "delegateExpression",
+                 "expressionValue": "${addRecordDelegate}"}
+            src = spec.get("from")
+            if src and str(src) not in ("start", "工作表事件触发"):
+                # add(..., from_="<取多条节点>") = **批量逐条新增**（get_more 几条建几条）。以前这里忽略 from_，
+                # 一律单条新增 —— 静默只建第一条、所有闸门全绿（2026-09-24 项目管理-速测16：模板任务每层只生成 1 条）。
+                b = self.built.get(src)
+                if not b or b.get("type") != "get_more":
+                    raise KeyError("add(from_=%r)：from_ 只能指向前面 get_more() 建的「取多条」节点" % src)
+                scode = self.rv.code(b.get("detail_table") or b["table"])
+                d.update({"addDataType": 2, "formTableSourceTaskId": b["id"],
+                          "formTableSourceNodeType": "getMore", "formTableSourceCode": scode,
+                          "formTableSourceId": "form_%s_%s" % (b["id"], scode),
+                          "formTableSourceGetDataType": b.get("get_data_type", 1)})
+            return d
 
         if t == "approver":
-            groups = []
-            if spec.get("_exp"):        # flow_dsl.appr()：审批人 = 发起人
-                # expressionsNames 是设计器卡片上的「填写人」显示名，别塞表达式原文
-                groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByExp",
-                               "approverIds": [], "approverNames": [], "deptIds": [],
-                               "roleIds": [], "postIds": [],
-                               "expressionsIds": ["${applyUserId}"],
-                               "expressionsNames": [spec["_exp"]], "levelMode": 1,
-                               "approverId": "", "approverName": "", "variableTitle": [],
-                               "variableContent": "", "formTableType": ""})
-            if spec.get("users"):
-                # ⚠️ approverIds 写**裸账号**，不能带 `user.` 前缀——`user.xxx` 是**消息节点
-                # toUserIds** 的写法；写成前缀时 save/deploy 全绿、新增记录也起实例，
-                # 但**任务谁都收不到**（2026-09-16 用户实测报障「指定成员的任务没人收到」，
-                # 线上参照应用的 2 条指定成员组落库均为裸账号）。
-                groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByName",
-                               "approverIds": [u for u in spec["users"]],
-                               "approverNames": list(spec["users"]), "levelMode": 1,
-                               "approverId": "", "approverName": "", "deptIds": [], "roleIds": [],
-                               "postIds": [], "expressionsIds": []})
-            if spec.get("roles"):
-                # ⚠️ candidateGroups 的 roleIds 按文档必须填**角色 Code**（如 "admin"），
-                # 而 DSL 这里收的是角色名——名字≠Code 时同样静默解析不到人。未实测，用到请先核。
-                groups.append({"approverType": "candidateGroups", "assigneeType": "assigneeByName",
-                               "roleIds": list(spec["roles"]), "roleNames": list(spec["roles"]),
-                               "levelMode": 1, "approverId": "", "approverName": "",
-                               "approverIds": [], "deptIds": [], "postIds": [], "expressionsIds": []})
-            if not groups:      # 没点名审批人 → 兜底 admin
-                groups.append({"approverType": "candidateUser", "assigneeType": "assigneeByName",
-                               "approverIds": ["admin"], "approverNames": ["admin"],
-                               "levelMode": 1, "approverId": "", "approverName": "",
-                               "deptIds": [], "roleIds": [], "postIds": [], "expressionsIds": []})
+            # 审批人一律走 self.groups()（与填写节点同一实现）。这里以前另有一份不生效的拼装代码，
+            # 它写裸账号、groups() 写 `user.` 前缀 —— 读代码的人看的是对的那份，跑的是错的那份。
             return {"type": "approver", "name": spec["name"],
                     "approvalMode": 3 if spec.get("mode") == 3 else 1,
                     "approverGroups": self.groups(spec, dflt="admin")}
@@ -1090,6 +1184,16 @@ class Builder(object):
                                        "formNodeId": rb["id"],
                                        "formNodeType": "function"}
                         continue
+                    if isinstance(fname, dict):
+                        # 主语写成 ref(字段, node=取单条节点) —— 以前直接进 self.rv.f() 报
+                        # `unhashable type: 'dict'`，看不出错在哪（2026-09-24 销售-速测18 #4）。
+                        # 分支按「前面节点查到的记录」判的落库形态未实测，不猜，给出两条实测可靠的写法。
+                        raise ValueError(
+                            "网关「%s」分支「%s」的判据写成了 %s —— 分支条件的主语只能是**触发行字段名**"
+                            "或 result(运算节点)。要按前面 get_one 查到的记录判：① compute(\"取值\", \"$x$\", "
+                            "{\"x\": ref(字段, node=节点名)}) 后用 result(\"取值\") 当主语；② 把条件并进 "
+                            "get_one 的 cond、用 empty=\"分支\" + data_branch() 分流"
+                            % (spec["name"], b.get("name"), fname))
                     if isinstance(val, dict) and ("$ref" in val or "$var" in val):
                         # 排他网关的分支条件**只支持「字段 vs 字面量」**：值写 ref()/var() 时
                         # 引擎仍按 valueType:"1" 当字面量比，条件恒假，而且实测父流程会卡在
@@ -1135,6 +1239,15 @@ class Builder(object):
                         "请给每条分支写明确条件，要兜底就用「为空」这类显式条件。"
                         % (spec["name"], "、".join(bad)))
             return {"type": t, "name": spec["name"], "conditionNodes": brs}
+
+        if t == "approve_result":
+            # 审批结果分支（flow_dsl.approve_result）：两支固定「通过 Y / 否决 N」，
+            # 前置审批节点的 hasResultBranch / addable 由 miniflow_creator.build_node_chain 补
+            brs = spec.get("branches") or []
+            return {"type": "approve_result", "name": spec["name"], "conditionNodes": [
+                {"name": b.get("name") or ("通过" if i == 0 else "否决"), "resultVal": "Y" if i == 0 else "N",
+                 "nodes": [self.node(x, ctx_table) for x in (b.get("nodes") or [])]}
+                for i, b in enumerate(brs[:2])]}
 
         if t == "data_branch":
             # 数据判断分支：必须紧跟在 get_one(empty="分支") 之后（creator 会校验）
@@ -1183,10 +1296,18 @@ class Builder(object):
                 src_table = (ctx_table if src_node in ("start", "子流程", "工作表事件触发")
                              else (self.built.get(src_node) or {}).get("table"))
                 fi = self.rv.f(src_table, ref_v["$ref"])
+                # ⚠️ **`formNodeType` 必须带**（gotchas #127 / node-contract §9.4）：
+                # 它是「产出该值的那个节点的类型」—— get_one→`search` / get_more→`getMore` /
+                # add→`plus` / 上下文行→`table`。早先这里整个键不发，creator 兜底写 `table`，
+                # 于是引用 get_one 结果的运算条目被标成 `table` → **运算结果恒空** →
+                # 引用它的 data_add.formModel / data_update.updateFields 全部写空值，
+                # 现象是「流程跑了，什么都没写」，而 save/deploy/契约闸门全绿
+                # （该闸门对 function 节点零覆盖）。`self.value()` 已经算好 ftype，照抄即可。
                 fun_fields.append({
                     "field": fi["model"], "formTableCode": val["formTableCode"],
                     "fieldText": ref_v["$ref"], "formNodeId": val["formNodeId"],
                     "formNodeName": val["formNodeName"], "tableText": src_table or "",
+                    "formNodeType": val.get("formNodeType") or "table",
                 })
                 expr = expr.replace("$%s$" % label, "{{%d}}" % (len(fun_fields) - 1))
             if "{{" not in expr:
@@ -1251,7 +1372,7 @@ class Builder(object):
                 # 子流程先建，所以这里已知道该参数写进了哪张表哪个字段。
                 tgt = self.var_targets.get((spec["sub"], pname))
                 if tgt and not isinstance(pv, dict):
-                    pv = self.rv.field_value(tgt[0], tgt[1], pv)
+                    pv = self.rv.write_value(tgt[0], tgt[1], pv)
                 val = self.value(pv, ctx_table)
                 var_list.append({
                     "id": MC.gen_id(), "optType": "1",
@@ -1495,6 +1616,33 @@ def deployed_keys(api, token, tenant, app):
     return out
 
 
+def deployed_key_of(api, token, tenant, app, db_id):
+    """单条流程定义的**权威**判据：`queryById` 回的 `processXml`（base64）解码后，
+    根节点必须是 `<process id="process<DBid>">`。返回实际定义 key，取不到返回 None。
+
+    ⛔ **不要拿 `/act/process/list` 当判据**：该接口实测 read timeout / 返回空，
+    会把已注册的定义**整批报成未注册**。2026-09-28 进销存 47 表实测：`postbuild_subpub.py`
+    按本判据报「30/30 已就绪」，而同一次 barrier 用 `/act/process/list` 报「30/30 未注册」，
+    连报两趟，白烧两轮（第一轮建完子流程、补发之后再跑一轮仍是全红）。
+    ⛔ 也不要用记录里的 `customProcessId`：`saveFlow` 拿它拼 BPMN 但**不回写该列**，
+    `queryById` 回读恒为 `None`（拿它当判据会把已就绪的全报成待补发）。
+    """
+    import requests, base64, re
+    try:
+        r = requests.get(api + "/act/process/extActProcess/queryById",
+                         params={"id": db_id},
+                         headers={"X-Access-Token": token, "X-Tenant-Id": str(tenant),
+                                  "X-Low-App-ID": str(app)}, timeout=60)
+        xml_b64 = ((r.json() or {}).get("result") or {}).get("processXml") or ""
+        if not xml_b64:
+            return None
+        xml = base64.b64decode(xml_b64).decode("utf-8", "ignore")
+        m = re.search(r'<process[^>]*\bid="([^"]+)"', xml)
+        return m.group(1) if m else None
+    except Exception:                                             # noqa: BLE001
+        return None
+
+
 # 说明：子流程「本行字段」引用的定形**只有一个实现** —— 见下面的
 # `_fix_sub_ownrow_refs()`（formNodeName 写别名 "子流程"）。这里曾短暂存在过另一个
 # 版本（把 formNodeName 写成父流程 get_more 节点的名字），已删除：两份实现形态不同，
@@ -1616,6 +1764,13 @@ def main():
     ap.add_argument("--strict", action="store_true", help="flow_rules 的告警（未验证的网关判据等）升级为报错")
     ap.add_argument("--lenient", action="store_true",
                     help="flow_rules 的「运算节点取数来源」报错降级为告警（确认目标引擎已修复时才用）")
+    ap.add_argument("--no-postdeploy", action="store_true",
+                    help="关掉部署后置补丁（默认开）。**默认必须开**：本脚本是从规格整份"
+                         "重新生成，会冲掉两样静默的东西 —— data_get_one 的 sortField"
+                         "（「取最早的一条」变成「取任意一条」）和 function 节点里取自 get_one"
+                         "的 formNodeType（写成 table → 运算结果恒空）。两者 save/deploy/回读"
+                         "计数全绿，只有造单才暴露。postdeploy.py 按节点 id 对齐规格与真机回灌，"
+                         "幂等、无副作用；真机已一致时只打印「改动 0 处」。")
     a = ap.parse_args()
 
     flows = load_spec(a.spec)
@@ -1689,7 +1844,7 @@ def main():
 
     b = Builder(rv)
     t0 = time.time()
-    ok = skip = fail = 0
+    ok = skip = fail = n_backfill = 0
     sub_links = []      # 主流程 callActivity → 子流程的引用，供第 ③ 趟回填
 
     # ① 子流程：save → deploy → 注册 → 补 customProcessId → 再 deploy → 校验
@@ -1758,23 +1913,35 @@ def main():
     # 2026-09-17 实测 22 条子流程踩坑、2026-09-20 又靠流程外脚本补跑一次 ——
     # 「事后补救」这条路已经证明走不通，所以这里直接拦住。
     if b.sub_ids:
-        keys = deployed_keys(a.api_base, a.token, a.tenant_id, a.app_id)
-        missing = [(nm, v["process_key"]) for nm, v in b.sub_ids.items()
-                   if v["process_key"] not in keys]
-        if missing and not a.force:
-            for nm, pk in missing:
-                log("FAIL:barrier 子流程 %s 的 processKey=%s 在引擎里没有已部署定义"
-                    % (nm, pk))
+        # 判据分两层，**权威的放前面**（2026-09-28 修）：
+        #   ① 逐条 `queryById` 解 `processXml` —— 快、准，就是 postbuild_subpub 用的那条口径；
+        #   ② ① 报「没有」的，再用 `/act/process/list` 兜一次并集 —— 那个接口会被
+        #      read timeout 吞成空集（一票否全会把已注册的整批报成未注册），
+        #      所以它**只能救误报、不能一票否决**，也只在 ① 有缺口时才发（省掉它的超时等待）。
+        bad = []
+        for nm, v in b.sub_ids.items():
+            got = deployed_key_of(a.api_base, a.token, a.tenant_id, a.app_id, v["db_id"])
+            if got != v["process_key"]:
+                bad.append((nm, v["process_key"], v["db_id"], got))
+        if bad:
+            keys = deployed_keys(a.api_base, a.token, a.tenant_id, a.app_id)
+            bad = [x for x in bad if x[1] not in keys]
+        if bad and not a.force:
+            for nm, pk, dbid, got in bad:
+                log("FAIL:barrier 子流程 %s 的定义 key 不对：期望 %s / 实际 %s（记录 id=%s）"
+                    % (nm, pk, got, dbid))
             log("FAIL:barrier %d/%d 条子流程未注册，已拦住父流程不建。修法："
-                "子流程须带 customProcessId=<DBid> + processKey=process<DBid> 重存再 "
-                "deployProcess（gotchas #47）。确认要带病继续再加 --force。"
-                % (len(missing), len(b.sub_ids)))
+                "先跑 `jeecg-lowcode-lowapp/scripts/postbuild_subpub.py`（它按同一条 "
+                "queryById+processXml 口径补发 customProcessId + processKey 并 deploy），"
+                "再重跑本脚本 —— 屏障会自动放行。确认要带病继续才加 --force。"
+                % (len(bad), len(b.sub_ids)))
             sys.exit(1)
-        if missing:
+        if bad:
             log("WARN:barrier --force 放行 %d 条未注册子流程：%s"
-                % (len(missing), "、".join(nm for nm, _ in missing)))
+                % (len(bad), "、".join(nm for nm, _, _, _ in bad)))
         else:
-            log("OK:barrier 子流程 %d 条 processKey 全部已在引擎注册" % len(b.sub_ids))
+            log("OK:barrier 子流程 %d 条 processKey 全部已在引擎注册（queryById 口径）"
+                % len(b.sub_ids))
 
     # ② 主流程：call_sub 已能解析到新子流程 id
     for f in mains:
@@ -1846,7 +2013,17 @@ def main():
     #    子流程侧：`formTableList[0]`（数据源）+ `subFlowSourceInfo`（谁调我）。
     if a.update or True:
         log("OK:backfill 子流程登记回填 %d 条引用" % len(sub_links))
+        bound = {}      # 子流程 id → (父流程名, 取数节点 id, 改写的本行引用数)
         for lk in sub_links:
+            prev = bound.get(lk["sub_id"])
+            if prev and prev[1] != (lk["obj"] or {}).get("nodeId") and prev[2]:
+                # 本行引用已经绑到第一个调用方的取数节点；再绑第二个会把第一个调坏，不绑又让第二个取空。
+                # 只能拆成每个调用方一条子流程（precheck 的 _check_shared_subflows 同一条规则，进销存-速测18 S4）
+                log("FAIL:backfill 子流程 %s 同时被「%s」和「%s」逐行调用，且取了本行字段 —— "
+                    "本行取值只能绑一个调用方（已绑前者），「%s」调用时取值全空。每个调用方各建一条子流程"
+                    % (lk["sub_name"], prev[0], lk["main_name"], lk["main_name"]))
+                fail += 1
+                continue
             try:
                 srec = MC.query_flow(a.api_base, a.token, flow_id=lk["sub_id"],
                                      tenant_id=a.tenant_id)
@@ -1890,6 +2067,10 @@ def main():
                         "（search 形态在这种拓扑下运行时取空）" % lk["sub_name"])
                 else:
                     _fix_sub_ownrow_refs(spj, obj.get("nodeId"), log)
+                    if lk["sub_id"] not in bound:
+                        # 数「现在指向这个取数节点」的引用，不是「这次改了几处」—— 重跑时已改好、改写数为 0
+                        n_bound = json.dumps(spj, ensure_ascii=False).count('"formNodeId": "%s"' % obj.get("nodeId"))
+                        bound[lk["sub_id"]] = (lk["main_name"], obj.get("nodeId"), n_bound)
                 # ⚠️ 第一个参数必须是**建流程时的 config**（processName/processKey/startType…），
                 # 不能拿 processJson 顶替 —— 那里面没有这些键，save 会把 processName/
                 # processKey 写成空串，流程记录当场被写坏。
@@ -1902,13 +2083,33 @@ def main():
                 # 改写细节由 _fix_sub_ownrow_refs 自己打（OK:subrow …），此处只报回填本身
                 log("OK:backfill %s ← %s / %s"
                     % (lk["sub_name"], lk["main_name"], lk["node_name"]))
-                ok += 1
+                n_backfill += 1                   # 单独计：以前算进 ok，58 条流程打成「建 88」（进销存-速测19）
             except Exception as e:                                # noqa: BLE001
                 log("FAIL:backfill %s %s" % (lk["sub_name"], str(e)[:150]))
                 fail += 1
 
-    log("OK:done %s %d / 跳过 %d / 失败 %d，%.1fs"
-        % ("更新" if a.update else "建", ok, skip, fail, time.time() - t0))
+    log("OK:done %s %d / 跳过 %d / 失败 %d / 子流程回填 %d 次，%.1fs"
+        % ("更新" if a.update else "建", ok, skip, fail, n_backfill, time.time() - t0))
+
+    # ── 部署后置补丁（默认开，见 --no-postdeploy 的 help）──
+    # 本脚本生成流程时，flow_dsl 不暴露的两样东西落不了地：get_one 的排序、
+    # function 里取自 get_one 的 formNodeType。它们是**静默**失效的，所以这一步
+    # 不能靠「记得单独跑」。postdeploy.py 幂等，已一致时只打印「改动 0 处」。
+    if not a.dry_run and not a.no_postdeploy and (ok or skip):
+        tc = time.time()
+        cmd = [sys.executable,
+               os.path.join(os.path.dirname(os.path.abspath(__file__)), "postdeploy.py"),
+               "--api-base", a.api_base, "--token", a.token,
+               "--tenant-id", a.tenant_id, "--app-id", a.app_id, "--spec", a.spec]
+        if a.only:
+            cmd += ["--only", a.only]
+        if subprocess.call(cmd) != 0:
+            log("FAIL:postdeploy 未通过 —— 排序 / 运算节点取值源可能没修好，"
+                "别当成功交付（加 --no-postdeploy 可跳过，但不建议）")
+            fail += 1
+        else:
+            log("OK:postdeploy 通过，%.1fs" % (time.time() - tc))
+
     if fail:
         sys.exit(1)
 

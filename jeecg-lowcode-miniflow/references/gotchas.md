@@ -51,6 +51,8 @@
 53. [switch（开关）控件触发条件值 = activeValue 字符串](#53-switch开关控件触发条件值--activevalue-字符串)
 54. [queryById 返回的 processJson 是 JSON 字符串，回读前必须 json.loads](#54-querybyid-返回的-processjson-是-json-字符串回读前必须-jsonloads)
 61. [组织查询条件值跨租户陷阱：部门树与角色列表必须按当前租户过滤（2026-09-09 实测）](#61-组织查询条件值跨租户陷阱部门树与角色列表必须按当前租户过滤2026-09-09-实测)
+130. [`get_one(empty=)` 落库 `noDataType` 错位一格 → 「查不到」变成「新增一条空记录」](#130-get_oneempty-落库-nodatatype-错位一格--查不到变成新增一条空记录)
+131. [「业务单 → 建凭证单 → 凭证单自己再确认」三重坑：`trigger_other` / 监听事件 / 建单顺序竞态](#131-业务单--建凭证单--凭证单自己再确认三重坑trigger_other--监听事件--建单顺序竞态)
 
 > 注：目录 37–41 为文档演进遗留编号，正文含 #40 / #41，不影响使用。
 
@@ -605,6 +607,8 @@ opinion_node = {"type": "suggest", "id": "...", "conditionNodes": [...]}  # 没�
 > 📌 **2026-09-20 用户纠正（上面这条只解决「写 `''` 不自动填」，不是「当前日期」的标准形态）**：规格里写「【X】= 当前日期 / 当前时间」时，**正确形态 = 直接引用系统变量**——`updateFields` 的 `val` / data_add 的 `formModel` 写 `{"formNodeType":"system","variableValue":"nowDate"/"nowTime","variableName":"当前日期"/"当前时间"}`（见 `miniflow-node-types.md` §3.1 类型 2、§九 ③），**不要为「当前日期」插 `+0D` 运算节点**：会凭空多出一个节点、与规格/实际流程不符（本地 CRM【线索领取】因此返工重建）。运算节点（#41）只用于「当前日期 +N 天 / 时间差 / 需要引用其结果的表达式」这类偏移场合。此规则已写入 `create-flow.md`「批量建流程」自愈硬清单。
 
 > ✅ **2026-09-20 销售管理二次实证（补落库证据）**：临时应用建 `tableEvent` 流程，`updateFields` 的 `val` 直接写 `{"formNodeType":"system","variableValue":"nowTime","variableName":"当前时间"}` + `valueType:3` + `valType:"variable"`，**无任何运算节点**，灌一条记录即回读落库 `2026-09-20 14:25:03`、`bpmStatus=3`。即本形态**确实写得进去**，「形态正确但落库为空」的担心不成立——放心删掉 `+0D` 运算节点。自愈/排查细节见 #90。
+
+> 🔧 **2026-09-24 补正（写进「日期」控件时）**：引擎把 `nowDate`/`nowTime` **一律**格式化成 `yyyy-MM-dd HH:mm:ss` 字符串写库（`UpdateRecordDelegate` 两个分支用同一个 DATE_TIME_FORMAT_SIMPLE），不看目标字段；而日期控件（`timestamp:true`，技能建的默认）页面/接口新增存**毫秒**——同一列混两种格式，列表显示带时分秒、按日统计对不齐。写日期控件用系统变量 **`millisecond`**（引擎直接写 `System.currentTimeMillis()`）。`miniflow_creator` 已自动改写：更新节点 `fieldType=date`、新增节点 `date_*` 键上的 nowDate/nowTime → millisecond；写**文本**字段仍是 nowDate。运算节点的 `dateFieldVal` 基准日期不受影响。
 
 ---
 
@@ -1245,12 +1249,15 @@ WARN o.j...a.b:1934 - Id must not be null!
 #         id=<DBid>  customProcessId=<DBid>  lowAppId=<应用id>  startType=subEvent
 #    tenantId 走 X-Tenant-Id 请求头即可；X-Sign/X-MiniFlowExclusionFieldMode 非必需
 # ② PUT /act/process/extActProcess/deployProcess  body {"id": "<DBid>"}（无需签名头）
-# ③ 校验：/act/process/list 出现 key='process<DBid>' 且 version>=1
+# ③a ★首选判据（2026-09-28 起）：extActProcess/queryById?id=<DBid> → result.processXml 是 base64
+#     → 解码后 <process id="..."> 即引擎定义 key（主流程=记录 processKey；subEvent=process+DBid）。
+#     毫秒级，**不受 /act/process/list 的 read timeout 影响**，是 build_flows 屏障与 postbuild_subpub 的共同口径。
 # ③b 存量记录（customProcessId 已写入、三层 subEvent 已就位）的常规修改：save_flow→deploy_flow 一次生效，
 #     无需每次执行 ③；③ 仅保留给「新建 subEvent 子流程」与「运行异常怀疑发布未生效」时的排查。
-# ③c 个别环境实测 /act/process/list 返回空结果或 read timeout（接口不可用）时，可改验 queryById 的 processXml：
-#     取 extActProcess/queryById?id=<DBid> → result.processXml 是 base64 → 解码后 <process id="..."> 即引擎定义 key
-#     （主流程=记录 processKey；subEvent=process+DBid），毫秒级，与 ③ 验证同一层证据。
+# ③c ⛔ **别再把 ③ 的 `/act/process/list` 当判据**：实测它 read timeout / 返回空，
+#     会把**已注册的整批报成未注册**（2026-09-28 进销存 47 表：postbuild_subpub 报 30/30 已就绪，
+#     同一次运行的闸门按 list 报 30/30 未注册，补发后重跑仍全红，白烧一轮）。
+#     要用它也只能当**并集兜底**（救误报、不一票否决），权威判据是 ③a。
 ```
 
 **历史条目衔接：** #33（manual 两段式）、#33a（带头 PUT 即注册）与 create-flow.md 早期"必须用户 UI 保存并发布"都是当时平台版本 + 未抓 UI 请求条件下的**局部表象结论**；本条目是接口层完整机理。遇"发布成功但查无 process<DBid>"：先按本条补 `customProcessId` 再 PUT，**不要**先走 manual 两段式、**不要**急着让用户 UI 发布。注意与 #31/#45 的 XML 层问题（三层 subEvent、MiniSubProcessStartListener 注入）相互独立，两者需同时满足；另外勿混淆两个 customProcessId：主流程 callActivity 节点 `attr.customProcessId`（caller 侧指向子流程 DBid）与子流程**记录**的 customProcessId 字段（deploy 时决定 def key）是两回事。
@@ -1307,6 +1314,9 @@ entry = "var." + json.dumps({
 - `range` 只用于数字/日期字段（每个 rule 有控件类型白名单，不匹配时 UI 不展示该选项）。
 - 两条 ge+le AND 语义等价但非 UI 原生形态——用户点名「在范围内」就直接用 range，不要发明替代结构。
 - 教训：改触发条件前先查 rule 全枚举（SKILL.md「startCondition 规则码」段已内嵌），**禁止凭记忆声称某规则不存在**。
+- **查询条件（`searchFieldGroup.queryItems`）里的 `range` 落库形态**（2026-09-23 用户 UI 手工保存样本，与触发条件同款）：
+  `{"rule":"range","ruleName":"在范围内","valueType":2,"val":null,"valType":"","name":"<列名>","field":"<字段model>","columnName":"<列名>","type":"date","beginVal":{…},"endVal":{…}}`
+  —— **`val` 写 null，上下界放 `beginVal`/`endVal`**（值对象同其它条件行的取值对象）。全租户原生样本极少（303 条流程里只此一处），别凭直觉写成 `val: [a, b]`。
 - 关联：`empty`/`not_empty` 的 `val` 与 `valType` 都写 **null**、禁止空字符串（日期/时间字段写 `""` → 设计器 Invalid date，2026-09-08 实测；见同文件「不为空」条件写法段）；组内多条件 `matchType` 用小写 `"and"`/`"or"`。
 
 ## 51. 字典选项字段（checkbox 多选框）触发条件值必须写 itemValue，写中文 label UI 显示"未选中"（2026-09-07 实测）
@@ -3222,3 +3232,298 @@ applyUserId  = <雪花 id>        flow_has_data = 0             bpm_status = 3
 
 `Resolver.field_value()` 对 select/字典字段无条件校验 val 是否合法选项，于是 `("客户类型","为空")` 报
 「值 '' 不是这个字段的合法选项」，这一支根本写不出来。现在这两个规则跳过取值翻译与校验。
+
+## 127. 运算节点 `funContext` 的 `formNodeType` 写成 `table` → 运算结果恒空、下游全写空值（2026-09-22 库存先进先出实测）
+
+`build_flows` 生成的运算节点，引用 `get_one` 结果的**每个** `funContext` 条目都落成 `"formNodeType":"table"`。
+后果链：运算结果**恒为空** → 引用它的 `data_add.formModel` / `data_update.updateFields` **全部写空值** →
+现象是「流程跑了，什么都没写」。而 `save` / `deploy` / `check_node_contract.py` **全绿**
+（闸门对 `function` 节点零覆盖，见 #90）。
+
+**判据**：`formNodeType` = **产出该值的那个节点的类型** —— `data_get_one`→`search`、
+`data_get_more`→`getMore`、`data_add`→`plus`、流程上下文行→`table`
+（口径同 `batch-flows.md`「引擎侧的对应叫法」表）。**属于 node-contract §9.1 同族的第七个偏移，尚未修进生成器。**
+
+**修法（外科）**：解码 `funContext` 值 → 改 `formNodeType` → 重编码 →
+新 key = `md5(compact JSON, ensure_ascii=False)` → 替换 `funText` 里 `{{旧key.` 前缀。
+**动手前先自证**：`md5(解码后的 value) == 现有 key`（hash 规则见 #54），不等就中止。
+完整代码见 `node-contract.md` §9.4；改完 `save_flow` + `deploy_flow` 重发并回读核对。
+
+## 128. 流程取不到「当前触发记录自身」→「子流程取本行」拓扑做不出来，必须内联（2026-09-22 库存先进先出实测）
+
+`build_flows.Resolver` 的字段表**不含系统字段**：`ref("_id")` / `ref("id")` / `cond(表,"_id",…)`
+一律 `KeyError: 表 里没有字段 _id`（`_id`/`id`/`记录id`/`recordId`/`pk`/`主键` 逐个试过，全不认）；
+`record_id()` 只能指向上游 `add()` 建的节点，指 `get_one` 报「只能指向前面 add() 建的节点」。
+
+**推论（这是改设计，不是改写法）**：`call_sub(multi=True)` 要求父流程有一条 `get_more` 提供数据源，
+而「触发记录自身」那条查询写不出来 → **「子流程逐行取本行」这种拓扑在这个平台上做不出来**。
+逐行处理**当前单据明细**的逻辑（先进先出逐批扣减、预留库存占用…）**只能内联进父流程**：
+一个批次一个 `get_one(empty="分支")` + `data_branch` 块，串在一条主链上。
+按钮流里「按当前单据 id 反查下游」同理，改用**两侧同名同值的业务字段**当桥（`engine-contract.md` §一 第 5 条）。
+
+⚠️ **两条路要分开看，受限的只是「按字段**中文名**解析」那条路（`flow_dsl`）：**
+写**值**可以用 `lit()` 原生形态（`variableValue:"_id"`，见 `node-contract.md` §3）—— 它跳过解析直接落库。
+**建后套件 `pb_flows.cond()` 收的是字段 model 而不是中文名**，所以 `_id` 当**条件键**也写得出来
+（前提是值有来源，如本行的关联字段 `start('线索','线索池id')`）。
+
+⚠️ **别和「按关联记录反查目标表」混为一谈** —— 拿**本行某个 link-record 字段的值**去比**目标表**的 `_id`
+（`create-flow.md` 组合 D、`postbuild-kit.md` §3.3 例子、gotchas #45）是**常规写法，一直是好的**。
+本条说的是另一件事：**「当前触发记录**自身**的 `_id`」在 `flow_dsl` 里没有字段可写**（上面那个 `KeyError`）。
+
+## 129. `data_update` 的来源节点类型要跟**真实来源节点**走；写死 `search` 时 `getMore` 来源整批静默不写（2026-09-22 库存先进先出「确认入库」实测）
+
+`formTableSourceNodeType` 写成 `"search"` **只在来源是 `data_get_one` 时正确**。
+来源是 `data_get_more` 时引擎要的是 **`"getMore"` + `formTableSourceGetDataType: 1`**。
+类型不匹配的症状：**批量写整批静默跳过**（按钮点了，明细一行没变），
+而 `save` / `deploy` / 契约检查全绿。
+
+**判据 = `node-contract.md` §8.4 那张类型表**：`table` / `search` / `getMore` / `plus` / `function`，
+按产出该值的节点选。**建完回读 `attr.formTableSourceNodeType` 断言**，别靠「应该是 search」。
+
+> **这两条键不是新发现 —— 权威页在 `miniflow-node-types.md` §三 3.1「数据来源」与 §十三（get_more）末尾，
+> `create-flow.md` 组合 E2 也写了同一句。** 本条只补一个**症状锚**，便于从「按钮点了没反应」反查过去。
+> ⚠️ 同族的第二个坑：**这几个键必须在 `attr` 里**，写到节点顶层会被 builder 丢掉
+> （`create-flow.md` 组合 E 要点，2026-09-20 实测：回读 `attr.formTableSourceGetDataType` 是 `None`）。
+> ⚠️ 断言一律读 `attr.*`：查节点顶层得 `None`，会误判「更新源丢失」再多跑一轮（gotchas #81）。
+
+---
+
+## 130. `get_one(empty=)` 落库 `noDataType` 错位一格 → 「查不到」变成「**新增一条空记录**」
+
+**现象（2026-09-23 进销存-标准版实测）：** 销售/采购的「数量回写」子流程每跑一次，就往
+`销售产品明细` / `采购订单产品明细` 各扔一条**只有系统字段的空行**。8 轮冒烟攒了 16 条。
+`save` / `deploy` / `check_node_contract` / `app_audit` **全绿**；冒烟自己也报「带标记残留 0 条」——
+因为空行没有任何文本列，标记兜底扫不到。
+
+**根因：** `build_flows.py` 的 `get_one` 分支把 DSL 的 `empty=` 映射成了
+`{继续:0, 新增:1, 中止:2, 分支:3}`，而**设计器**的口径是（`miniflow_creator.build_get_one_node`
+文首，2026-09-15 设计器源码实证）：
+
+| `noDataType` | 语义 |
+|---|---|
+| `1` | 继续执行 |
+| `2` | **在工作表中新增记录后继续执行**（仅 `selectType=1`） |
+| `3` | 中止，或继续执行查找结果分支（配 `data_branch`） |
+| `0` | 未显式选择 |
+
+→ `empty="中止"` 落成 `2` =「未查到就**新增一条空记录**后继续」。**已修**
+（改成 `继续=1 / 新增=2 / 中止=3 / 分支=3`）。`empty="分支"` 恰好与「中止」同为 `3`，
+所以 `get_one(empty="分支") + data_branch` 那条链一直是对的 —— 这也正是它藏这么久的原因。
+
+**自查**：建完回读 `attr.noDataType` 与上表对一遍；**造数/冒烟之后数一遍全表行数** ——
+「带标记残留 0 条」不等于「没留垃圾」，空行不带标记。
+
+---
+
+## 131. 「业务单 → 建凭证单 → 凭证单自己再确认」三重坑：`trigger_other` / 监听事件 / **建单顺序竞态**
+
+**现象（2026-09-23 进销存-标准版，端到端冒烟抓出）：** 盘亏流程把「其他出库单」建出来了、
+带着 `出库确认=是`、明细行也建了，**库存就是不动** —— `其他出库单-确认` 那条流程永远不起。
+`check_node_contract` 违例 0、`app_audit` 违例 0、save/deploy 全绿。
+
+这条链上有**三个独立的坑**，缺一个都不行，且每一个都是静默的：
+
+**① 发起方主流程必须 `flow(..., trigger_other=True)`。**
+简流内 `data_add`/`data_update` 建/改的记录，引擎默认 `setTriggerProcess(false)`
+（落库 `triggerOtherProcess="0"`）→ **不触发目标表的 tableEvent 流程**。
+另见 #44（**API 写入会触发**）与 #128 / 派生字段铁律第 4 条（**流程 `data_add` 不会**）。
+
+**② 凭证单的确认流程若只监听「修改」，而记录是被「新增」出来的 → 永远不命中。**
+要么写 `on="新增|修改"`，要么走下面的 ③ 让它在末尾真的发生一次「修改」。
+
+**③ ⛔ 顺序竞态（最容易漏、也最隐蔽）：**
+把凭证单**带着「确认=是」一次 `add` 出来**时，确认流程在 **add 那一刻**就触发了，
+而它里面的记账子流程靠 `get_more(本单关联明细)` 取行 —— **那一刻明细行还没建**
+（明细是紧随其后的 `call_sub` 才建的）→ 取到 **0 行** → 什么都不做。
+之后 `确认` 已经是「是」、`库存已记账` 也已被置成「是」，**再也不会重跑**。
+
+**正解：先建单、后置确认。**
+
+```python
+add("其他出库单", {..., "出库确认": "否", "库存已记账": "否", ...}, name="建其他出库单"),
+get_more("盘点产品明细", from_="start", name="取盘点明细"),
+call_sub("盘亏-其他出库-子流程", via="取盘点明细",
+         pass_={"其他出库单id": record_id("建其他出库单")}),      # ← 明细行到这一步才建好
+update("其他出库单", {"出库确认": "是"}, source="建其他出库单", name="置出库确认"),   # ← 此时才翻
+```
+
+`update(..., source=<add 节点的 name>)` 落库 `attr.formTableSourceNodeType="plus"`
+（`NODE_FORM_TYPE["data_add"] = "plus"`），即设计器里「更新对象＝新增记录的结果」。
+
+> ⚠️ 顺带：`add` 的载荷里**要显式写 `"库存已记账": "否"`**。不写时该字段落库是 `null`，
+> 而下游确认流程的触发条件是「`库存已记账 等于 否`」—— 对 `null` 恒不匹配，流程一样不起。
+
+**自查**：这类「单 → 凭证单 → 凭证单确认」的链建完，**造一单跑一遍**，
+回读下游单据的记账位**和台账数量**。这三条结构闸门一条都看不见。
+
+## 127. 「定时触发 + 逐行调子流程」没有任何助手覆盖 —— 但 `build_process_json` 支持，手拼即可（2026-09-23 销售管理）
+
+> ⚠️ **编号重号**：`#127`/`#128`/`#129` 在本文各出现两次（另一组是 2026-09-22 库存那批）。
+> **交叉引用请写「#127（2026-09-23）」，按标题认、别按编号认。**
+
+**现象：** 需求「定时触发（每天 08:00）→ 取多条（某字段为空）→ 逐行调用**已有**子流程」。
+两条现成路径各缺一半，看起来「做不到」：
+
+| 路径 | 有 | 缺 |
+|---|---|---|
+| `build_flows` + `flow_dsl` | `get_more` / `call_sub` / `compute` 全都有 | `flow()` **只出 `tableEvent`**，没有定时触发 |
+| `timer_job_runner` | `startType:'timerEvent'` + `get_more` | 逐行动作只有「批量改**静态值** / 批量新增 / 逐行消息（+自建通知子流程）」—— **给不了函数计算值，也没有指向已有子流程的参数** |
+
+**修法（三点，缺一不可）：** ⚠️ 手拼的父流程还要写 `pj['subFlowList'] = [{subProcessId, subNodeName, status: 1}]`，
+存完跑 `lowapp/scripts/postbuild_subfix.py` 补齐子流程的数据源登记与「被以下工作流触发」（销售-速测18/19）。
+
+> **逐行可抄的配方在 `batch-flows.md`**：「定时 + 取多条 + 逐行调**已有**子流程」节（2026-09-28 销售管理二次实测走通）——
+> 那节给 `cfg` / `build_process_json` / `save_flow` / `deploy_flow` 的完整 payload 口径与四项验收；
+> 本节只列判据与踩坑。**两条独立实测互证**：本节（2026-09-23）走的是「手拼 processJson 根节点」，
+> 那节走的是「`build_process_json` 出根节点 + 嫁接 callActivity」，都不用 `timer_job_runner`。
+
+1. **`build_process_json` 本身两样都支持**，别被助手的覆盖范围误导：
+   - `config['startType'] = 'timerEvent'` + `timeCycleName`（8 个 UI 实名之一）+ `beginDateStr`（**必须字符串** `"2026-09-18 08:00"`，时间戳会丢分钟位）；
+   - `config['nodes']` 里放 `{'type':'callActivity','id':…,'name':…,'customProcessId':'<雪花id>'}`。
+     `customProcessId` 非纯数字时**会直接报错**并给出修法（`register_subprocess_id`），这是它接得住该档位的证据。
+   - `get_more` 的 attr 照 `timer_job_runner.cmd_scan` 的已实测形态后处理：`selectType=1` / `getDataType=1` / `noDataType=1` / `formTableId=form_<节点id>_<表code>` / `searchFieldGroup[0].queryItems`。
+2. **`timer_job_runner` 的重名检查（`no_dup`）已改为「本应用内全名相同」**（2026-09-25）：后端 `processName` 是模糊查且不分应用，旧版会被「生成机会编号报销」或已删应用残留的同名流程误判中止。现在子串、别的应用都不再拦，直接用 runner 即可。
+3. **子流程侧的登记要手工回填**（引擎不会做）：`formTableList` 里**按 `formTableCode` 找** context 表那条（⚠️ **不是 `formTableList[0]`** —— 子流程的 `[0]` 常常是「流程参数」条目）→ 该条 `isSubStart:true`，并让 `pj['attr']['subFormTableObject']` 指向**同一个对象字典**，再写 `subFlowSourceInfo=[{mainProcessId, mainProcessName, nodeName}]`，然后 save **并 deploy**。漏了 `check_node_contract` 会报「`formTableList[0]` 无 isSubStart → 孤儿子流程」。
+   另：`save_flow` 二次保存**必须带最新 `updateCount`**，否则报「不是最新版本」——拿旧的 count 做「改完再改回」的还原操作会**静默只成功一半**。
+   > **这一步现在有脚本兜底**：`lowapp/scripts/postbuild_subfix.py` 幂等完成（从父流程 `callActivity` 反推调用方
+   > + 按 `formTableCode` 定位 context 表那条）。手工回填仍适用于「只改一条、不想跑整轮」的场合。
+   > ⚠️ 所以父流程**不写 `subFlowList` 也能跑通** —— 但 `subFlowList` 才是设计器面板的权威来源，**写上是零成本的**，别只靠兜底。
+
+## 128. 分支条件判「另一张表的字段」：把 `branchForm` 指向前置取单条节点（2026-09-23 销售管理）
+
+**现象：** 需求「工作表 A 删除触发 → 取单条 B → 分支判断 **B 的某字段** > 0」。
+`flow_dsl.gateway` 的分支条件**只在触发的那张表上解析**：写 B 的字段名直接报
+`销售合同 里没有字段 销售合同数` —— 于是「这条分支写不出来」看起来像引擎级限制。
+
+**根因：** 每个分支的 attr 里有 `branchForm`，它决定**这条条件在谁的记录上求值**：
+`{"formTableCode":"<触发表>","formNodeId":"start","formNodeType":"table"}` —— 默认写死 `start`（触发行快照）。
+
+**修法：** 改成指向前置 `data_get_one` 节点 —— 条件就在**取回的那条 B 记录**上求值：
+
+```jsonc
+"branchForm": {"formNodeId": "<data_get_one 节点 id>", "formNodeType": "search", "formTableCode": "<B 表 code>"}
+```
+（`data_get_one` 对应的 `formNodeType` 是 **`search`**，见 batch-flows「引擎侧的对应叫法」表；条件项本身照常建在 B 表的字段 model 上。）
+
+⚠️ 改 `branchForm` 要在 **save 前**改（部署后改要走重建）。
+
+---
+
+## 129. 并行分支里放网关 → `聚合` 永不触发（实例卡死）；每条分支必须单出口「收口」（2026-09-23 财务报表 V1.0 实测 + 反编译定论）
+
+**现象：** 并行分支的每条分里带排他/数据分支（即「分了又合」）。流程跑不完：实例 `END_TIME_` 为空，
+`ACT_RU_EXECUTION` 里该实例的 execution 全停在**聚合网关**（`IS_ACTIVE_=0`）；而 save / deploy / 回读 / 契约检查**全绿**。
+
+**根因：** `聚合`（`polymerize`）在 BPMN 里是 `parallelGateway`；Flowable 7 的 `ParallelGatewayActivityBehavior` 判据是
+「**停在网关上的 execution 数 == 该网关的入边数**」（`javap -c` 反编译 `flowable-engine` jar 读到的正是
+`getInactiveExecutions…size() == parallelGateway.getIncomingFlows().size()`）。设计器把**空分支**和**支链尾**
+（`childNode` 为 null 的末端节点）**各连一条边**到作用域终点（= 聚合），所以：
+
+    聚合入边数 = 每条分支的出口路径数之和   而  令牌数 = 分支数
+    → 只要有一路是多出口，入边数就 > 令牌数 → 永远等不齐
+
+实测：8 条分支 × 3 条出口 = 24 入边 / 8 令牌，实例一直停在 `Gateway…193`（BPMN 里 `聚合` 24 in / 1 out，`parallel` fork 8 out）；改成每路单出口后 8 in / 8 令牌，实例 67 秒正常结束。
+
+**修法（收口）：**
+- 分支内**最后一个网关的 `childNode` 指向一个本路收口节点**（普通任务即可，如 `data_update_variable`）——
+  该网关的空分支与所有支链尾都会落到它，全路只剩这一个出口；收口节点 `childNode=null` → 一条边进 `聚合`。
+- ⚠️ **不要把同一个节点挂到两处**（如同时写网关 `childNode` 和支链尾 `childNode`）：save 报
+  `Duplicate key <nodeId> (attempted merging values ChildNode(... outerNodeId=…))`。`outerNodeId` = 该节点的**最近网关**，
+  要收口就得让这些路径在**同一个作用域**里，否则节点 id 只能出现一次。
+- 分支内不要套网关：需要判断就**并成单节点**（「查询不到就新增」= `data_get_one` + `noDataType=2`，见 `example/获取单条数据.md`）。
+
+**验收：** 部署后看 BPMN——`<parallelGateway id="<聚合 id>">` 的**入边数 == 分支数**。
+
+## 130. 子流程分支条件退化成裸字段：`branchForm` 写 `start`/`table` 时 save/deploy 全绿但条件恒不成立（2026-09-24 财务报表全链实测）
+
+**现象：** 子流程（`callActivity` 调起）里带条件的分支，`attr.branchForm` 是
+`{'formNodeId':'start','formNodeType':'table'}`。`save` / `deploy` / 回读计数全绿，
+设计器里条件也显示正常，但**运行时条件一条都不成立**：
+无默认支的网关报 `No outgoing sequence flow of the exclusive gateway '<id>' could be selected`（整单回滚），
+有默认支的**静默走默认支**（四条闸门全绿、实际一条业务支都没执行）。
+更隐蔽的是它和别的错叠在一起时会互相掩护——本轮的守卫节点（见 #131）数的是**另一个**节点的行数，
+守卫放行了、MI 才炸，第一眼看上去像「数据不够」。
+
+**判据（两条，都很快）：**
+- 运行日志：正常分支必打 `【条件评估】字段:<带前缀> | 操作符:<…> | 实际值:<…> | 结果:<✓通过>`；
+  退化分支只打 `-等于:<裸字段>,<值>`，**没有随后的【条件评估】行**。
+- 部署的 BPMN：正确是 `${ branchExpressUtils.eq2('tbb95413.search.task….input_x', …) }`，
+  退化是 `${ branchExpressUtils.eq2('input_x', …) }`。
+
+**修法：** 每条带条件的分支改成 `{'formTableCode':<明细表code>, 'formNodeId':<该子流程 isSubStart 那条的 nodeId>, 'formNodeType':'search'}`，
+并同步 `attr.formTableCode`；`start.attr.subFormTableObject` 要与**同一条**登记一致。
+结构契约见 `node-contract.md` §6.0(c)。
+
+**取证方法（可复用，比猜快）：** 每个版本的 BPMN 都在 `ACT_GE_BYTEARRAY`
+（`DEPLOYMENT_ID_` + `NAME_ like '%.bpmn'`），与 `ACT_RE_PROCDEF.VERSION_` 对齐后逐版本 diff，
+能精确定位「哪次部署改坏了什么」。本轮据此证明主流程结构从未变过、坏的只是分支条件前缀
+（v33 → v34 → v35 三版从 6/6 带前缀掉到 0/6），顺带排掉「之前能跑是靠别的结构」这个假设。
+
+## 131. 多实例子流程的「统计条数 > 0」守卫：守卫节点必须与被守卫的 MI **同源**（2026-09-24 财务报表实测）
+
+**背景：** `get_more` 只在 `records 非空` 时发布 `<节点id>_assigneeDataIdList`，
+0 行时 MI 抛 `Unknown property used in expression: ${flowUtil.stringToList(<节点id>_assigneeDataIdList)}`、整单回滚（#112）。
+所以要在 MI 前加「统计条数(funType=record) + 结果>0 排他网关」当守卫。
+
+**坑：** 守卫的 `funContext.nodeId` 必须等于**它要守的那个取数节点的 id**。
+本轮 `统计条数-期初余额` 的 `nodeId` 写成上游另一个节点（`…001`）→
+它数的是 001 的 6 行、**恒 >0 放行**，而真正喂 MI 的节点（`…005`）取到 0 行 → MI 照样炸。
+`save` / `deploy` / 回读全绿，设计器里「统计条数」也正常显示，**只有真机跑才暴露**。
+
+**判据：** 逐个守卫节点比对 `attr.funContext.nodeId` 与它所守卫的取数节点 id
+（连同 `formTableId = form_<该 id>_<表 code>`、`funText` 一起改）。
+「守卫数出来 >0」**不等于**「MI 的数据源非空」，两者必须逐一对上。
+
+## 132. 子流程首节点「从关联字段获取单条」取不到行：四处必须对齐同一条 `isSubStart` 登记（2026-09-24 财务报表实测）
+
+**现象：** 子流程（被**多个** `callActivity` 调用）首节点是 `selectType=3`「从关联字段获取单条」，
+运行时 `未获取到数据，dataId = null` + `WARN Id must not be null!`，子流程空跑直接结束；
+`save` / `deploy` / 回读计数全绿，设计器里节点显示正常。
+
+**根因：** 取数要靠 `isSubStart` 那条登记把子流程接到父流程的数据对象上。
+登记是**多处**：`formTableList` 里 `isSubStart=true` 那条的 `nodeId`、
+`attr.selectType=3` 节点的 `formTableSourceTaskId`（以及 `formTableId` 的节点 id 段、`formTableSourceNodeType:'search'`）、
+`start.attr.subFormTableObject`、`start.attr.formTableId` —— **必须全部等于同一个 nodeId**。
+任何一处指向别的节点（典型是「父流程里真实存在但没登记」的那个，例如把 005 的登记配 007 的取数）
+→ 首节点拿不到行。多处调用时会表现为「从某个节点调进来就失败、从另一个调进来就成功」。
+
+**注意与 #45 区分：** #45 是同款症状，但根因是**发布的 XML 缺 `MiniSubProcessStartListener`**、
+父行变量解析为空（`criteriaList:[{"_id":""}]`）；本条是登记对不上。先看 `criteriaList`：
+里面是**真实 id 但查不到行** → 本条；是**空串** → #45。
+
+**修法：** 以 `formTableList` 里 `isSubStart` 那条为**唯一事实源**，把另外三处（首个 `selectType=3` 节点的
+`formTableSourceTaskId` / `formTableId` / `start.attr.subFormTableObject` / `start.attr.formTableId`）
+批量对齐过去；`isSubStart` 只留 1 条，重复登记会让首节点取到 `dataId=null`。
+**不要**为此把节点改成「入参查表」——`selectType=3` 从关联字段取单条就是 UI 原生正解
+（线上参考流 `测试01-子流程1` 同形），错的是登记不是取数方式。
+
+---
+
+## 133. `build_flows --update --only <子流程>` 重建子流程会**静默丢三样**（2026-09-24 项目管理实测）
+
+**现象**：子流程重建后 save / deploy / 契约检查全绿，但**子流程空转**——主流程调得动它、
+它却什么都不写（或新建出来的记录只剩字面量：状态=未开始，名称/编号全空）。
+
+**丢的三样**（主流程 build 失败时 `_fix_sub_ownrow_refs` 不跑；只 `--only <子流程>` 单跑也不会跑）：
+
+| 丢什么 | 后果 |
+|---|---|
+| `startType` 由 `subEvent` 变 **`manual`** | 主流程 `callActivity` 根本调不起它 |
+| `formTableList` 里的**输入行登记**（`isSubStart:true`；`nodeId` 必须等于主流程 call 节点的 `formTableSourceTaskId`，如 `taskGMTASK` / `taskWBSTOP`） | 子流程里对「本行字段」的引用全空 |
+| 条件取值由「输入行字段引用」(`formNodeType:"search"` ＋ 输入行 nodeId) 变 **「流程参数引用」**(`formNodeType:"variable"`) | 而 call 节点的 `variableList` 常常是空的 → 条件恒不成立 |
+
+**修法**：改流程前先存一份 `processJson` 备份；`--update` 之后**回读这四样**
+（`startType` / 输入行登记 / 条件取值形态 / `pj.id`）。
+
+**另**：`processJson` 顶层 `id` 必须是 `'start'`（BPMN id）。整份抄别的应用时若顺手把它写成流程 DB id，
+发布直接失败：`'2103…' 不是 'NCName' 的有效值`。
+
+## 134. 「照着抄」同类应用：按**字段中文名**建 model 映射整份抄，比手改接线可靠（2026-09-24 项目管理）
+
+同一套表的另一个应用里已有能跑的流程时，整份 `processJson` 抄过来、把表编码与字段 model 按
+**字段中文名**映射（本次两个应用 24 表 69 字段全中，0 条对不上），比逐节点手改接线稳得多；
+流程 id / processKey 保留本应用的（菜单、按钮、子流程登记都指着它们）。
+
+⚠️ **抄完必须逐控件比对「命名约定」**：平台/前端认的**字面量 model**（典型 `__HAS_CHILD`）
+不要被"同名字段映射"顺手改掉——改了会出现「流程写了、前端读不到」的静默故障
+（详见 lowapp `desform-self-tree.md` 2026-09-24 节）。

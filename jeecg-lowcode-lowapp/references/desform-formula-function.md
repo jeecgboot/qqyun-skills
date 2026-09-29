@@ -69,6 +69,29 @@ $money_1234567_123456$     → 引用某个 money 字段的值
 
 ### CUSTOM 自定义公式
 
+> ⛔ **先看这条（2026-09-23 进销存真机逐项标定）：
+> 表达式里写全角 `×` / `÷` 或 `IIF(...)`，整条公式**静默求值为空**（落 `null`），
+> 不报错、`save`/`deploy`/四道闸门全绿，下游汇总 0、看板 0、流程条件恒假。**
+> 一个 47 表应用里 **79 条公式有 30 条是这么废掉的**。
+>
+> | ✅ 实测可用 | 结果 | ❌ 实测求值为空 | 结果 |
+> |---|---|---|---|
+> | `$a$ - 1` / `$a$ + 1` | 2.0 / 4.0 | `$a$ × 2`（**全角乘号**） | `null` |
+> | `$a$ * 2` / `$a$ * $b$` | 6.0 / 60.0 | `$a$ ÷ 2`（**全角除号**） | `null` |
+> | `$a$ + $lf$`（他表字段） | 23.0 | `IIF($a$ < 5, 1, 0)` | `null` |
+> | `MAX/MIN/ABS` | 3.0 | `($a$ > 5) * 1`（比较结果当数字） | `null` |
+> | `ROUND($a$ / 2, 2)` | 1.5 | | |
+> | **`IF($a$ < 5, 1, 0)`**、`IF($a$<5,"超量","正常")` | 1.0 / `"超量"` | | |
+>
+> **⇒ 一律用半角 `*` `/` 和 `IF(...)`。** 他表字段做操作数是 OK 的。
+> ⚠️ **下面那段「不提供 IF…即使手工敲入…实际不可用」是旧结论，已被上表推翻** ——
+> 本机实测 `IF` 在 CUSTOM 模式下**可用**，数值与文本结果都正确落库
+> （进销存 `盘点产品明细.盘亏数量 = IF(本次盘点数量 < 账面当前库存数量, 账面 − 本次, 0)`
+> 端到端冒烟已验证）。以实测为准，但**别用 `IIF`**，那不是同一个函数名。
+>
+> 另一条独立的：**公式不要引用同表另一个公式字段**（嵌套/链式）。
+> 明细见 `engine-contract.md` #24 / #24-a。
+
 支持英文输入 `+`、`-`、`*`、`/`、`()` 进行运算，以及调用以下 9 个内置函数：
 
 | 函数 | 说明 |
@@ -201,13 +224,14 @@ FORMULA('请假天数', mode='DATEIF',
 **运行逻辑：**
 1. 取 dateBegin 引用的字段值
 2. 结束日期固定使用 `DATENOW()`（当前时间）
-3. 计算 `moment(now).diff(begin, unit)` — 注意方向是 now - begin
+3. 计算 `DATEIF(now, 目标日期)` — **方向：当前 → 目标日期，未来为正、过去为负**
+   （设计器源码 `JFormula.vue` calcDate；「至今已过时长」`PAST_NOW_DATEIF` 才是 目标日期 → 当前，过去为正）
 4. 拼接单位文本返回
 
 **JSON 配置示例：**
 
 ```json
-{"name": "工龄", "type": "formula", "mode": "NOW_DATEIF",
+{"name": "工龄", "type": "formula", "mode": "PAST_NOW_DATEIF",
  "dateBegin": "$entry_date_model$",
  "dateFormatMethod": 1, "datePrintUnit": "Y"}
 ```
@@ -215,13 +239,14 @@ FORMULA('请假天数', mode='DATEIF',
 **Python 示例：**
 
 ```python
-FORMULA('工龄', mode='NOW_DATEIF',
+FORMULA('工龄', mode='PAST_NOW_DATEIF',
         date_begin='$entry_date$', date_print_unit='Y')
 ```
 
 - 入职日期 2022-01-01，当前 2026-03-25 → 结果: `4年`
 
-> **注意：** NOW_DATEIF 的方向是 `now - begin`，如果 begin 在未来则结果为负数。
+> **注意：** 算「已经过了多久」（工龄、账龄）用 `PAST_NOW_DATEIF`；算「还剩多久」（距到期天数）用 `NOW_DATEIF`。
+> 此前本页把 NOW_DATEIF 方向写反了（项目管理-速测18/19 实测 +5 天得 5，与源码一致）。
 
 ---
 
@@ -529,10 +554,10 @@ expression: "$money_xxx$*$integer_xxx$*1.13"
  "dateFormatMethod": 2, "datePrintUnit": "d"}
 ```
 
-**NOW_DATEIF — 距今时长：**
+**NOW_DATEIF — 距此刻时长（还剩多久，未来为正）：**
 ```json
-{"name": "工龄", "type": "formula", "mode": "NOW_DATEIF",
- "dateBegin": "$entry_date_model$", "dateFormatMethod": 1, "datePrintUnit": "Y"}
+{"name": "距到期天数", "type": "formula", "mode": "NOW_DATEIF",
+ "dateBegin": "$due_date_model$", "dateFormatMethod": 1, "datePrintUnit": "Y"}
 ```
 
 **PAST_NOW_DATEIF — 至今已过时长：**

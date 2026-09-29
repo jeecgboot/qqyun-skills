@@ -55,7 +55,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from spec_infer import infer, explicit, normalize_containers    # noqa: E402
+from spec_infer import infer, explicit, normalize_containers, default_precision    # noqa: E402
 
 if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -65,7 +65,7 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
 # 只有等字段全齐了才能按业务分节重排（divider + card）。顺序错了 = 白排。
 STAGES = ['字典', '建壳', '补丁', '布局', '灌数', '流程', '看板']
 SHELL_CHUNK = 12            # 建壳每批表数（并发 = 表数，别超连接池）
-WORK = os.path.join(tempfile.gettempdir(), 'jeecg-buildapp')
+from skill_temp_path import app_workdir, bind_workspace, find_workspace, workspace_of   # noqa: E402  中间产物落 <工作目录>/build/
 DATA_BUDGET = 300           # 灌数总预算（秒）。超了就当尽力而为收工，不拦交付（--data-budget 可改）
 
 
@@ -176,6 +176,10 @@ def split_fields(form, spec):
         if f in must:
             d['required'] = True
         d.update(extras.get(f) or {})       # 控件级选项（precheck 按白名单校验过）
+        # 费率/比例/百分比的 number 默认 2 位小数（工厂默认 0 → 1.5% 填不进，见 spec_infer.default_precision）
+        prec = default_precision(f, d.get('type'), d)
+        if prec is not None:
+            d['precision'] = prec
         shell.append(d)
     return shell, patch
 
@@ -421,13 +425,31 @@ def stage_layout(spec, a, work):
     两者是独立的规格键，只写 `容器` 不写 `layouts` 是合法的。
     """
     layouts = spec.get('layouts')
+    rg = os.path.join(_HERE, 'regroup_layout.py')
     if not layouts:
         log('[4/7 布局] 规格里没有 layouts，跳过分节（表单保持默认排布）')
-        return stage_containers(spec, a, work)
+        # 标题照样要修：建壳时标题若是关联记录/他表字段/汇总（补丁阶段才建出来），titleField
+        # 先落在第一个普通字段上，以前只有分节脚本顺手改回 —— 没写 layouts 就整批不修
+        # （2026-09-24 进销存-速测18：25 张表标题错，交付检查不报）
+        rc = run_script(rg, ['--api-base', a.api_base, '--token', a.token,
+                             '--tenant-id', a.tenant_id, '--app-id', a.app_id,
+                             '--titles-only', '--spec', a.spec], '标题')
+        return rc | stage_containers(spec, a, work)
+    # 分节名单里可以写**容器名**（夹在字段中间的选项卡，app-spec「layouts」节）：容器在分节之后才建，
+    # 第一遍先把容器名摘掉排好分节，装完容器再按完整名单排一遍，选项卡就落到声明位置
+    # （以前 precheck 拦容器名、容器一律落在末尾，只能建完另跑 regroup_layout 挪，CRM-速测18/19）
+    cnames = {}
+    for f in (spec.get('forms') or []):
+        cs = {c.get('名称') for c in (f.get('容器') or []) if isinstance(c, dict) and c.get('名称')}
+        if cs:
+            cnames[f.get('名称')] = cs
+    first = {t: [dict(s, 字段=[x for x in (s.get('字段') or []) if x not in cnames.get(t, ())])
+                 for s in secs] for t, secs in layouts.items()}
+    need_second = any(x in cnames.get(t, ()) for t, secs in layouts.items()
+                      for s in secs for x in (s.get('字段') or []))
     lp = os.path.join(work, 'layout.json')
     with open(lp, 'w', encoding='utf-8') as fh:
-        json.dump(layouts, fh, ensure_ascii=False)
-    rg = os.path.join(_HERE, 'regroup_layout.py')
+        json.dump(first, fh, ensure_ascii=False)
     # ⚠️ **必须传 `--spec`**：`regroup_layout.fix_title()` 靠它拿「表名 → 规格里的标题」
     # 才能把 `config.titleField` 指回规格点名的那个控件。不传时 `titles = {}`，
     # `fix_title(design, None)` 直接返回，**一句话不说地 52 张表全不修**。
@@ -439,6 +461,15 @@ def stage_layout(spec, a, work):
     log('[4/7 布局] %s' % ('完成' if rc == 0 else '有缺口（见上面逐表输出）'))
     # 容器**必须紧跟分节**：分节重新分卡 → 容器再从中摘走点名的控件（见 stage_containers）
     rc |= stage_containers(spec, a, work)
+    if need_second:
+        lp2 = os.path.join(work, 'layout_with_tabs.json')
+        with open(lp2, 'w', encoding='utf-8') as fh:
+            json.dump({t: secs for t, secs in layouts.items() if t in cnames}, fh, ensure_ascii=False)
+        rc2 = run_script(rg, ['--api-base', a.api_base, '--token', a.token,
+                              '--tenant-id', a.tenant_id, '--app-id', a.app_id,
+                              '--config', lp2, '--spec', a.spec], '布局(选项卡归位)')
+        log('[4/7 布局] 选项卡按分节名单归位：%s' % ('完成' if rc2 == 0 else '有缺口'))
+        rc |= rc2
     return rc
 
 
@@ -608,12 +639,13 @@ def main():
     ap.add_argument('--token', required=True)
     ap.add_argument('--tenant-name', required=True)
     ap.add_argument('--app-name', required=True)
-    ap.add_argument('--tenant-id', help='已知就直接给，省一次解析')
+    ap.add_argument('--tenant-id', help='已知就直接给，省一次解析（--tenant-name 仍必填）')
     ap.add_argument('--app-id', help='已知就直接给')
     ap.add_argument('--spec', required=True)
     ap.add_argument('--flows', default='',
                     help='flows.py（flow_dsl 写的 63 条流程）。不给则看 spec 里的 flows 数组')
-    ap.add_argument('--create-app', action='store_true', help='应用不存在则自动创建')
+    ap.add_argument('--create-app', action='store_true',
+                    help='新建应用；租户里已有同名应用则报错退出（续跑已有应用改传 --app-id）')
     # ⚠️ 默认 0 = **不灌数**。只有用户提示词明确要求灌数才传 N。
     # 别为了「让看板有东西看」擅自灌 —— 那是用户没要求的数据污染。
     ap.add_argument('--rows', type=int, default=0,
@@ -636,7 +668,6 @@ def main():
 
     with open(a.spec, encoding='utf-8') as fh:
         spec = json.load(fh)
-    os.makedirs(WORK, exist_ok=True)
 
     # 解析租户 / 应用（应用不存在且 --create-app 时自动建）
     sys.path.insert(0, _HERE)
@@ -648,9 +679,40 @@ def main():
         cfg['appId'] = a.app_id
     if a.create_app:
         cfg['createApp'] = True
-    a.tenant_id, a.app_id = resolve_tenant_app(cfg, a.api_base.rstrip('/'), a.token)
+        # --create-app = 必须是新应用。早先遇同名应用会静默复用，2026-09-23 首跑因此把补丁
+        # 打进了租户里已存在的另一个同名测试应用（41 张表被改）。续跑已有应用请传 --app-id。
+        cfg['newApp'] = not a.app_id
+    if a.dry_run and cfg.pop('createApp', None):
+        # --dry-run 不许建应用（2026-09-23 实测：先 resolve 再判 dry-run，预演时就真把应用建出来了）
+        try:
+            a.tenant_id, a.app_id = resolve_tenant_app(cfg, a.api_base.rstrip('/'), a.token)
+        except SystemExit as e:
+            if '不存在' not in str(e):
+                raise
+            a.tenant_id, a.app_id = a.tenant_id or '?', 'dryrun'
+            log('DRY: 应用「%s」不存在，正式运行时 --create-app 才会创建（预演不建）' % a.app_name)
+    else:
+        a.tenant_id, a.app_id = resolve_tenant_app(cfg, a.api_base.rstrip('/'), a.token)
     a.api_base = a.api_base.rstrip('/')
     log('租户=%s 应用=%s' % (a.tenant_id, a.app_id))
+    if not a.dry_run:
+        # spec 放在工作目录（skill_temp_path.py --new）里时，把 app_id 绑进它的 app.json，
+        # 之后任何脚本拿 app_id 都能找回同一个目录
+        ws = bind_workspace(a.spec, a.app_id, a.app_name, a.tenant_id)
+        if ws:
+            log('工作目录=%s' % ws)
+        else:
+            # spec 不在工作目录里（如续跑时拿了一份外面的 spec）：产物仍按 app_id 找回原工作目录
+            ws = find_workspace(a.app_id)
+            log('工作目录=%s' % (ws + '（spec 不在其中，按 app_id 找回）' if ws
+                                else '（没有工作目录，产物落 jeecg-lowcode/%s/）' % a.app_id))
+    if a.app_id == 'dryrun':
+        # 预演且应用还没建：'dryrun' 只是占位，别当 app_id 在根目录下开 dryrun/（2026-09-24 实测）
+        ws = workspace_of(a.spec)
+        work = os.path.join(ws, 'build') if ws else app_workdir(None, 'build')
+        os.makedirs(work, exist_ok=True)
+    else:
+        work = app_workdir(a.app_id, 'build')   # <工作目录>/build/：并行多个应用的 tabs_/job_ 互不覆盖
 
     # 给每张表定 code。**必须是纯 ASCII**：code 会出现在 /desform/api/fields/<code>
     # 这类**路径**（不是 query）里，而 `bi_utils._request` 只 urlencode params、不编码路径，
@@ -703,7 +765,7 @@ def main():
     for s in stages:
         log('── %s ──' % s)
         t_s = time.time()
-        rc = fn[s](spec, a, WORK) or rc
+        rc = fn[s](spec, a, work) or rc
         dt = time.time() - t_s
         spent.append((s, dt))
         log('[%s] %.1fs' % (s, dt))

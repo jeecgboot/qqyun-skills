@@ -136,6 +136,37 @@ def prewarm(api_base, token, tenant_id, app_id):
     return code_of
 
 
+def hide_empty_sections_on_add(top):
+    """段内数据控件全是「新增时隐藏」（hiddenOnAdd）→ 段标题 divider 也新增时隐藏。
+
+    否则新建记录时只剩一条光秃秃的段标题（2026-09-24 用户截图：担保「客户档案」新建时
+    「担保申请」标题下面空着 —— 下游单据列表已按 `新增时隐藏` 藏起，标题没跟着藏）。
+    返回改动的 divider 数。"""
+    n, i = 0, 0
+    while i < len(top):
+        if top[i].get('type') != 'divider':
+            i += 1
+            continue
+        j = i + 1
+        while j < len(top) and top[j].get('type') != 'divider':
+            j += 1
+        members = [w for w in iter_widgets(top[i + 1:j])
+                   if w.get('model') and w.get('type') not in ('card', 'divider', 'grid', 'tabs')]
+        opts = top[i].setdefault('options', {})
+        if members and all((w.get('options') or {}).get('hiddenOnAdd') for w in members):
+            if not opts.get('hiddenOnAdd'):
+                opts['hiddenOnAdd'] = True
+                opts['_autoHideOnAdd'] = True      # 标记「是本函数藏的」，条件不再成立时才能撤销
+                n += 1
+        elif opts.get('_autoHideOnAdd'):
+            # 段里有了新建时可见的字段：撤销当初自动加的隐藏（用户手工设的 hiddenOnAdd 没有标记，不碰）（review #6）
+            opts['hiddenOnAdd'] = False
+            opts.pop('_autoHideOnAdd', None)
+            n += 1
+        i = j
+    return n
+
+
 def transform(design, sections, per_card):
     """就地重排 layout；返回 (divider 数, card 数, 顶层项数)。"""
     widgets = widgets_of(design)
@@ -145,6 +176,7 @@ def transform(design, sections, per_card):
     except KeyError as e:
         raise SystemExit('FAIL: %s' % e)
     design['list'] = top
+    hide_empty_sections_on_add(top)
     return (sum(1 for w in top if w.get('type') == 'divider'),
             sum(1 for w in top if w.get('type') == 'card'), len(top))
 
@@ -164,8 +196,8 @@ def fix_title(design, title):
 
 
 def save_one(code, design, dry_run):
-    p = os.path.join(tempfile.gettempdir(), 'jeecg-desform', 'layout_%s.json' % code)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
+    import desform_utils as DU
+    p = os.path.join(DU.app_tmpdir('layout'), 'layout_%s.json' % code)
     with open(p, 'w', encoding='utf-8') as f:
         json.dump(design, f, ensure_ascii=False)
     if not dry_run:
@@ -178,15 +210,21 @@ def main():
     ap.add_argument('--token', required=True)
     ap.add_argument('--tenant-id', required=True)
     ap.add_argument('--app-id', required=True)
-    ap.add_argument('--config', required=True)
+    ap.add_argument('--config', default='', help='layouts 配置；--titles-only 时可不给')
     ap.add_argument('--spec', default='', help='app_spec.json（给了就顺手修 titleField）')
+    ap.add_argument('--titles-only', action='store_true',
+                    help='只把 config.titleField 指回规格的「标题」，不动布局（规格没写 layouts 时 build_app 用它）')
     ap.add_argument('--form', default=None, help='只处理这一张表（默认全部）')
     ap.add_argument('--per-card', type=int, default=3)
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
 
-    with open(a.config, 'r', encoding='utf-8') as f:
-        layout = json.load(f)
+    layout = {}
+    if a.config:
+        with open(a.config, 'r', encoding='utf-8') as f:
+            layout = json.load(f)
+    elif not a.titles_only:
+        ap.error('--config 必填（只修标题请加 --titles-only）')
 
     titles = {}
     if a.spec:
@@ -198,6 +236,8 @@ def main():
     init_api(a.api_base, a.token)
     code_of = prewarm(a.api_base, a.token, a.tenant_id, a.app_id)
 
+    if a.titles_only:
+        layout = {n: None for n, t in titles.items() if t}
     todo = [a.form] if a.form else list(layout.keys())
     items = []
     bad = []
@@ -228,6 +268,20 @@ def main():
             bad.append('取不到工作表 %s（%s）' % (name, str(exc)[:80]))
             continue
         design = json.loads(fd['desformDesignJson'])
+        if a.titles_only:
+            note = fix_title(design, titles.get(name))
+            if note and note != 'title':
+                bad.append('%s 标题未设置：%s' % (name, note))
+                continue
+            if note == 'title':
+                try:
+                    save_one(code, design, a.dry_run)
+                except Exception as e:                            # noqa: BLE001
+                    bad.append('%s 保存失败: %s' % (name, str(e)[:90]))
+                    continue
+                done += 1
+                log('OK: %s titleField→%s' % (code, titles.get(name)))
+            continue
         have = [inner_of(w).get('name') for (w, _, _) in widgets_of(design)]
         try:
             nd, nc, ntop = transform(design, layout[name], a.per_card)

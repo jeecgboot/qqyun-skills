@@ -1,6 +1,6 @@
 ---
 name: jeecg-lowcode-lowapp
-description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作表。创建/复制/改名/删除/列出应用；在某租户或应用下创建/修改工作表、一对一、关联记录。不处理 Online 表单。禁止同时加载 jeecg-desform / jeecg-onlform / jeecg-system。同一句要应用+工作表+简流+仪表盘（或同时点名 miniflow/dashboard）：只读 references/fast-full-chain.md，禁止并行通读三个 SKILL.md。应用 CRUD：直接跑 scripts/lowapp_creator.py（零预读）。租户+应用下建表或一对一：不要读本 SKILL 全文，只读 references/fast-create.md，立刻跑 scripts/create_linked_worksheets.py。改已有关联记录：只读 references/fast-link-record.md。已有表新增关联记录字段：只读 references/fast-add-link-record.md。
+description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作表。创建/复制/改名/删除/列出应用；在某租户或应用下创建/修改工作表、一对一、关联记录。不处理 Online 表单。禁止同时加载 jeecg-desform / jeecg-onlform / jeecg-system。一句话建应用（只说「建一个 XX 系统」、没逐表列字段）：先读 references/requirement-design.md 补全设计，把需求说明和功能设计发给用户确认，确认后再建。同一句要应用+工作表+简流+仪表盘（或同时点名 miniflow/dashboard）：只读 references/fast-full-chain.md，禁止并行通读三个 SKILL.md。应用 CRUD：直接跑 scripts/lowapp_creator.py（零预读）。租户+应用下建表或一对一：不要读本 SKILL 全文，只读 references/fast-create.md，立刻跑 scripts/create_linked_worksheets.py。改已有关联记录：只读 references/fast-link-record.md。已有表新增关联记录字段：只读 references/fast-add-link-record.md。租户升级会员 / 改成会员：只读 references/tenant-vip.md，跑 scripts/tenant_vip.py（直连数据库）。
 ---
 
 # JeecgBoot 低代码应用（敲敲云）
@@ -85,9 +85,12 @@ description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作
 
 | 用户在说 | 只读 | 禁止读 |
 |---------|------|--------|
+| **一句话建应用**（「建一个 XX 系统」「类似禅道的…」，需求没逐表列字段） | 先读 `references/requirement-design.md` 补全设计、写 `design.md`，**把需求说明+功能设计发给用户确认**，确认后再走下一行 `fast-full-chain.md` 建造 | 零零散散反问一串问题；不等确认直接建（用户说「直接建」除外）；不设计直接照一句话建出几张空表 |
 | 同一句 **应用+工作表+简流+仪表盘**（全链路） | **只读** `references/fast-full-chain.md`，立刻跑脚本 | 本文件全文；miniflow/dashboard 的 SKILL.md；node-types；入库审批示例；widget-options；json-config；`memory_search` |
 | 创建 / 复制 / 改名 / 删除 / 列出**应用** | **第一条 tool call 就是** `lowapp_creator.py`（参数见「创建 / 复制 / 编辑 / 删除应用」）。会话已有 api-base / token / 租户时 **零 Read** | 先读 `lowapp_creator.py` / `desform_lowapp_utils.py` / 本文件全文 / `desform-lowapp.md` |
-| 在某租户 / 应用下**新建**工作表 / 一对一 | **只读** `references/fast-create.md`，立刻跑 `scripts/create_linked_worksheets.py`。只有「全新创建子表」才再读 `desform-new-sub-table.md` | 本文件全文；`lowapp-init.md`；`desform-lowapp.md`；`desform-cross-form-binding.md`；`desform-link-record.md`；应用 CRUD；`jeecg-desform` / `jeecg-onlform` / `jeecg-system` 的 SKILL.md；`widget-options`；`json-config` |
+| 在**已有应用**下加**少量**工作表（一般 ≤3 张）/ **一对一** | **只读** `references/fast-create.md`，立刻跑 `scripts/create_linked_worksheets.py`。只有「全新创建子表」才再读 `desform-new-sub-table.md`。⚠️ **多表应用不是这一档，见下一行** | 本文件全文；`lowapp-init.md`；`desform-lowapp.md`；`desform-cross-form-binding.md`；`desform-link-record.md`；应用 CRUD；`jeecg-desform` / `jeecg-onlform` / `jeecg-system` 的 SKILL.md；`widget-options`；`json-config` |
+| 建一个**多表应用**（多张表 / 数据字典 / 关联记录 / 汇总 / 公式 / 视图；**有没有简流和看板都算这一档**） | **只读** `references/fast-full-chain.md` + `engine-contract.md`，写 `app_spec.json`，跑 `scripts/precheck.py` 后 `scripts/build_app.py --spec app_spec.json`（确无流程时显式 `--no-flows`）。规格写法见 `app-spec.md`；建后套件 `postbuild_*` 已含默认值/类型/结构/子表/验收 | **把 `fast-create.md` 当主路径**；手搓 job.json + 自建补丁脚本（`create_linked_worksheets.py` 只覆盖建壳，字段级 options 键要自己拼，且 `postbuild_*` 里的东西得重写一遍）；`widget-options`；`json-config` |
+| **租户升级会员** / 把租户改成会员 / `sys_vip_membership` | **只读** `references/tenant-vip.md`，跑 `scripts/tenant_vip.py`（没有接口，直连数据库；连接取用户贴的 application yml） | 找升级会员的 API；`lowapp_creator.py`；手写 INSERT |
 | 应用分组 / 工作表分组 / 改工作表名 / 删工作表 | `desform-lowapp.md` 用 grep 定位对应节，`Read` limit=50 | widget-options；json-config；应用 CRUD |
 | 给已有**主表**加字段（点名了表+字段） | 文末「主表加字段只跑 add_widget」。会话已有 code 时 **零 Read**，第一条 tool call 就是 `add_widget` 脚本 | 本文件「更新已有表单」；加前/加后 `get_form_fields`；`save_auth_from_design`；工厂默认 type 的 widget-options |
 | 改已有控件 / 删字段 / 子表加列 | 改/删：`grep -n "^## 更新已有表单"` Read limit=40。子表加列：文末「往已有子表加列」 | 本文件全文；`desform-lowapp.md`；应用 CRUD |
@@ -132,22 +135,64 @@ description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作
 
 ## 临时配置文件规则（强制）
 
-所有传给脚本的 `--config <xxx.json>` 必须放在 **`{系统临时目录}/jeecg-desform/`** 下，由操作系统自动清理；skill 与脚本均不主动删除该目录或文件。
+所有传给脚本的 `--config <xxx.json>` 必须放在**本次的工作目录** **`{系统临时目录}/jeecg-lowcode/<英文简称>_<时间戳>/`** 下（`python scripts/skill_temp_path.py --new <英文简称>` 开出并打印它；一次性小任务用 `-f <文件名>`，见下方「临时目录标准」），由操作系统自动清理；skill 与脚本均不主动删除该目录或文件。
 
-`tempfile.gettempdir()` 自动适配各平台：Windows `%TEMP%`、Linux `/tmp`、macOS `/var/folders/.../T`（注意 macOS 并非 `/tmp`）。文件名建议使用 **`<表名>_<步骤>.json`**（如 `sk_audit_create.json`），路径已含技能名称无需重复前缀。
+`tempfile.gettempdir()` 自动适配各平台：Windows `%TEMP%`、Linux `/tmp`、macOS `/var/folders/.../T`（注意 macOS 并非 `/tmp`）。文件名建议使用 **`<表code>_<步骤>.json`**（如 `sk_audit_create.json`），路径已含技能名称无需重复前缀。
+
+### 临时目录标准（lowapp / miniflow / dashboard 三个 skill 共用）
+
+```
+{系统临时目录}/jeecg-lowcode/
+├── <英文简称>_<yyyyMMdd-HHmmss>/   ★ 一次建应用 = 一个工作目录（skill_temp_path.py --new <英文简称> 开出）
+│   ├── app.json                    {slug, created, app_id, app_name, tenant_id}；build_app 建出应用后自动回填 app_id
+│   ├── app_spec.json、flows.py、struct_cfg.py、dashboards.json …   手写配置（建应用之前就写在这里）
+│   ├── dashboard_<slug>/           手工建盘（qqy CLI）的 specs
+│   ├── probe.json、dicts.json      postbuild 套件快照（postbuild_*.py 默认工作目录）
+│   ├── struct_<code>.json、defaults_<code>.json、appconfig_call.json   postbuild_struct / defaults / appconfig 的整单保存快照（就在根层，属正常）
+│   ├── build/                      build_app.py（tabs_*、job_*、dict.json）
+│   ├── dash/                       build_dashboards.py 单次运行文件（跑完清空并删目录）
+│   ├── patch/                      patch_fields.py（patch_<code>.json、patch_gaps.json）、sub_to_worksheet.py、手写整单补丁
+│   ├── layout/                     regroup_layout.py（layout_<code>.json）
+│   ├── link/                       batch_add_link_record.py、update_link_record.py
+│   └── export/                     desform_creator --preprocess / export_design_json 导出的设计 JSON
+├── <app_id>/                       没有工作目录时（直接改已有应用、没开过 --new）脚本产物的兜底
+├── _jobs/                          一次性小任务的配置（skill_temp_path.py -f job.json → 文件名自动加时间戳，不会撞名）
+├── _cache/                         跨应用短 TTL 缓存（miniflow_apps.json，内部按 api|tenant 分 key）
+└── _noapp/                         连 app_id 都没有时的兜底
+```
+
+- **建应用第一步：`python scripts/skill_temp_path.py --new <英文简称>`**。英文简称由模型把应用名翻成英文
+  （`CRM管理系统`→`crm`、`进销存管理`→`jxc` 或 `inventory`），只用 ASCII。它打印工作目录路径，
+  **本次所有手写配置都写进它**；`build_app --spec <工作目录>/app_spec.json` 会把建出的 app_id 绑进 `app.json`。
+- **并行多个代理各开各的工作目录**（简称或时间戳不同），手写配置、`__pycache__`、脚本产物全都互不干扰。
+  2026-09-23 四应用并行实测：旧方案按会话 id 分目录，而子代理继承同一个 `CLAUDE_CODE_SESSION_ID`，
+  四个代理挤在一个目录里、固定文件名差 1~2 分钟就互相覆盖——所以隔离单位改成「一次建应用」。
+- **后续脚本靠 app_id 找回工作目录**：扫各目录 `app.json`（毫秒级）。所以 `--from` 续跑、建后套件重跑、
+  换一个会话接着改同一个应用，都落回原处。一个工作目录只对应一个应用，绑了别的 app_id 会报错。
+- **清缓存 = 删那个工作目录**。
+- 取路径**只用一处实现** `scripts/skill_temp_path.py`：手写文件用 `--new` 打印的目录；
+  脚本里用 `desform_utils.app_tmpdir(子目录)` 或 `skill_temp_path.app_workdir(app_id, 子目录)`；
+  dashboard 的 `build_dashboards.py` 内联了同一条规则。**禁止**再往 `jeecg-lowcode/` 根目录写任何东西。
+- **`_` 前缀 = 脚本自用**，人/模型不要往里写。
+- **目录名、文件名只用 ASCII**（`[A-Za-z0-9_-]`）：简称用英文（`crm`、`jxc`、`inventory`），禁中文——中文路径在 Windows 控制台、shell 传参、子进程里都可能乱码（`skill_temp_path.py` 会直接拒绝非 ASCII 名）。
+- 新脚本一律落在这棵树下，**禁止**再在系统临时目录根下另起目录或散放文件。
 
 ### 场景一：Claude 用 `Write` 工具写文件后调脚本（最常见）
 
 `Write` 工具需要绝对路径，所以**必须先**通过公共脚本拿到路径。脚本一次完成「定位系统临时目录 → 创建技能子目录 → 返回路径」：
 
 ```bash
-# 取目录
-python "<skill目录>/scripts/skill_temp_path.py"
-# → C:\Users\xxx\AppData\Local\Temp\jeecg-desform
+# 建应用：开工作目录（打印路径；本次所有手写配置都写进它）
+python "<skill目录>/scripts/skill_temp_path.py" --new crm
+# → C:\Users\xxx\AppData\Local\Temp\jeecg-lowcode\crm_20260923-225326
 
-# 直接拿完整文件路径（推荐）
-python "<skill目录>/scripts/skill_temp_path.py" -f sk_audit_create.json
-# → C:\Users\xxx\AppData\Local\Temp\jeecg-desform\sk_audit_create.json
+# 已有应用：取它的工作目录（没开过 --new 则 jeecg-lowcode\<app_id>），可加子目录
+python "<skill目录>/scripts/skill_temp_path.py" --app-id <app_id> --sub patch -f sk_audit_fix.json
+# → C:\Users\xxx\AppData\Local\Temp\jeecg-lowcode\crm_20260923-225326\patch\sk_audit_fix.json
+
+# 一次性小任务（建一两张表、改一个关联）：文件名自动加时间戳，放 _jobs\
+python "<skill目录>/scripts/skill_temp_path.py" -f job.json
+# → C:\Users\xxx\AppData\Local\Temp\jeecg-lowcode\_jobs\20260923-225326-123456_job.json
 ```
 
 得到路径后：
@@ -161,12 +206,12 @@ python "<skill目录>/scripts/skill_temp_path.py" -f sk_audit_create.json
 skill 自己的脚本（`desform_creator.py` 等）在脚本进程内写文件时，**不要**通过 `Write` 工具，直接用 `tempfile`：
 
 ```python
-import tempfile, os, json
+import os, json
+from desform_utils import app_tmpdir     # init_lowapp(…, app_id=…) 之后调用
 
-skill_dir = os.path.join(tempfile.gettempdir(), "jeecg-desform")
-os.makedirs(skill_dir, exist_ok=True)          # 确保目录存在，不主动检查
-
+skill_dir = app_tmpdir('patch')          # → <该应用的工作目录>/patch/，已自动建目录
 config_path = os.path.join(skill_dir, 'sk_audit_create.json')
+skill_dir = app_tmpdir('patch')          # → <该应用的工作目录>/patch/，已自动建目录
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 ```
@@ -181,7 +226,7 @@ with open(config_path, 'w', encoding='utf-8') as f:
 
 ### 文件丢失补救
 
-**临时文件可能被操作系统异步清理**，但仍遵循 **乐观调用 + 报错补救**：仅当脚本返回 `FileNotFoundError` 或 `配置文件不存在` 时，使用相同内容、**在相同的 `{系统临时目录}/jeecg-desform/` 路径下重写**（重写前重新调一次 `skill_temp_path.py` 或 `os.makedirs(skill_dir, exist_ok=True)` 确保目录存在），切勿更换路径或回退至 skill 目录。
+**临时文件可能被操作系统异步清理**，但仍遵循 **乐观调用 + 报错补救**：仅当脚本返回 `FileNotFoundError` 或 `配置文件不存在` 时，使用相同内容、**在相同的工作目录路径下重写**（重写前重新调一次 `skill_temp_path.py` 或 `os.makedirs(skill_dir, exist_ok=True)` 确保目录存在），切勿更换路径或回退至 skill 目录。
 
 ---
 
@@ -389,7 +434,7 @@ echo '<json_config>' | python "<skill目录>/scripts/desform_creator.py" --api-b
 ```
 
 **仅当字段 >50 时** → 临时文件方式，避免管道传输大量数据时的稳定性问题：
-1. 根据「临时配置文件规则（强制）」章节，将 JSON 配置写到 `{系统临时目录}/jeecg-desform/<表名>_create.json`
+1. 根据「临时配置文件规则（强制）」章节，将 JSON 配置写到 `{工作目录}/<表code>_create.json`
 2. 执行脚本：`python "<skill目录>/scripts/desform_creator.py" --api-base <URL> --token <TOKEN> --config <config.json>`
 3. **不要**主动删除该文件，操作系统会自动清理
 
@@ -707,6 +752,7 @@ python "<skill目录>/scripts/list_view/desform_list_view.py" --api-base <用户
 | `scripts/desform_button_utils.py` | 自定义按钮操作工具库（增删改查、视图绑定、排序） |
 | `scripts/desform_jimureport.py` | 一键创建积木报表并关联表单打印（含删除/清除关联） |
 | `scripts/skill_temp_path.py` | 跨平台获取本技能临时目录/文件路径（写临时配置前必先调用，自动建目录） |
+| `scripts/tenant_vip.py` | 租户升级会员：直连 MySQL 往 `sys_vip_membership` 插 `normalVip` 行（`--tenant-name`/`--tenant-id`/`--all`，见 `references/tenant-vip.md`） |
 | `scripts/lowapp_creator.py` | 创建/复制/编辑/删除/查询低代码应用（`--json` 一条命令，不要改 desform_lowapp_utils.py） |
 | `scripts/list_view/desform_list_view.py` | 列表视图查/改/建入口（表格类 action + 通用 action：list/get/delete/sort/config_table/config_sort/config_quick_filter/config_left_filter/config_data_filter/update 等；`--json` 一条命令。内部还有 columns/filter/quickfilter 模块，禁止当 CLI 跑） |
 | `scripts/list_view/desform_custom_button.py` | 自定义按钮 CLI（list/get/create/update/delete/remove/bind/reorder；**四类视图同一套按钮体系，无需按视图分支**，见「自定义动作」章节） |
@@ -851,7 +897,7 @@ python "<skill目录>/scripts/list_view/desform_list_view.py" --api-base <用户
 
 ```python
 from desform_lowapp_utils import init_lowapp
-from desform_utils import query_form, SUB_USER, save_design_from_file, save_auth_from_design
+from desform_utils import query_form, SUB_USER, save_design_from_file, save_auth_from_design, app_tmpdir
 import json, os, tempfile
 
 init_lowapp(api_base, token, tenant_id=tenant_id, app_id=app_id)
@@ -877,14 +923,13 @@ target.setdefault('list', []).append(widget)
 hw = design.setdefault('config', {}).get('hasWidgets') or []
 if widget['type'] not in hw:
     hw.append(widget['type']); design['config']['hasWidgets'] = hw
-path = os.path.join(tempfile.gettempdir(), 'jeecg-desform', f'{code}_design.json')
-os.makedirs(os.path.dirname(path), exist_ok=True)
+path = os.path.join(app_tmpdir('patch'), f'{code}_design.json')   # <工作目录>/patch/
 json.dump(design, open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 save_design_from_file(code, path)
 save_auth_from_design(code)
 ```
 
-Windows：**禁止** `python -c` 内联中文（编码必坏）。把上面写成 `{tmpdir}/jeecg-desform/*.py` 再执行。
+Windows：**禁止** `python -c` 内联中文（编码必坏）。把上面写成 `{工作目录}/*.py` 再执行。
 
 ### 用户已经点名时不要再确认
 
@@ -964,7 +1009,7 @@ if not r or not r.get('success'):
     raise RuntimeError(r)
 ```
 
-Windows：中文写进 `{tmpdir}/jeecg-desform/*.py` 再执行，禁止 `python -c` 内联中文。
+Windows：中文写进 `{工作目录}/*.py` 再执行，禁止 `python -c` 内联中文。
 
 ---
 
@@ -989,7 +1034,12 @@ Windows：中文写进 `{tmpdir}/jeecg-desform/*.py` 再执行，禁止 `python 
 **正确姿势（两条）：**
 
 1. **保留 key/model**：`update_widget` 改 type 时 key/model 不变（数据库列与对外引用稳定）。反之整体重建（新工厂生成）会换 key/model——若该 model 已被他表关联记录 filters / 数据 API 引用，**静默断链**，禁止。
-2. **必须换控件语义且要清旧键 → 整单替换 options**：`query_form` → 解析 design → 找到目标控件 dict，**整体覆盖 `widget['options']`**（按 `desform-widget-options.md` 目标 type 的默认键集写全）→ `save_design_from_file(code, path)`（不要用 `update_widget`）。
+2. **必须换控件语义且要清旧键 → 整单替换 options**：`query_form` → 解析 design → 找到目标控件 dict，**整体覆盖 `widget['options']`** → `save_design_from_file(code, path)`（不要用 `update_widget`）。
+   ⛔ **`options` 按 `desform-widget-options.md` 目标 type 那张键表逐键写全，一个不多一个不少** ——
+   别按普通字段的习惯加 `required`/`readonly`/`disabled`/`width`。2026-09-24 实测：改 3 个 `text-compose`
+   时多塞了这 4 键（该页列的 5 键与 UI 手工建的**完全一致**，是我没照它写），被判「设置不对」返工。
+   同时**删掉旧 type 残留的顶层 `advancedSetting`**，`className`/`icon` 换成目标 type 的
+   （`barcode` → `form-barcode`/`icon-tiaoma`，`text-compose` → `form-text-compose`/`icon-zuhe`）。
 3. 互换**两字段语义**（如「流程名称/流程类型搞反了」）：直接交换两个 widget dict 里除 name 外的 options，或各自整体替换 options + 交换 `name`；type/options 按目标形态重建，key/model 不动。
 
 示例（清洗 2026-09-03 审批流程模板 ws_a2cf2f8180）已在会话验证：整体覆盖 input/select 两控件 options 后保存，残留归零、`required` 复位、关联筛选引用（目标表 model）不受影响。

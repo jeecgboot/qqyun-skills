@@ -176,6 +176,15 @@ def build_page(page, workdir, dry_run=False):
     # 键名直通 add-ui 的同名参数（w/h/x/y/place/bg/fg-color/font-size/form-name/url/html…），
     # 只有 comp/text/style 需要改名/兜底。页头横幅 = {"comp":"JText","text":"销售订单",
     # "place":"top","bg":"#4A90E2","fg-color":"#FFFFFF","font-size":30,"bold":True,"h":10}
+    if not (page.get("ui") or []):
+        # ⚠️ 2026-09-22 降级：这里曾经 errs.append → 整页判 FAIL。
+        # 「每张盘第 1 行放盘标题」是**某些应用的需求**（进销存就是），
+        # **不是平台或本脚本的规则** —— 引擎没这条约束，`app_audit` 的
+        # 「盘标题不在数组下标 0」只在盘上**已经有 JText** 时才判。
+        # 拿它当 FAIL 的代价（实测）：进销存 11 张本来就不需要标题的盘全 FAIL，
+        # 逼作者回头给 16 张盘补 ui 段再重建 11 张。现在只出声、不判失败。
+        if page.get("charts"):
+            log("NOTE:%s 没有 ui 段 → 本页不生成盘标题（要的话在规格里加 ui）" % name)
     for ui in (page.get("ui") or []):
         argv = ["--page-id", page_id,
                 "--comp", ui.get("comp", "JText"),
@@ -246,6 +255,8 @@ def add_page_buttons(page, page_id, workdir):
         if not grp:
             continue
         grp = _resolve_button_pages(grp)
+        # 每组一个不重复的组件名（add-buttons 落成 componentName），finalize_page 按名配对规格坐标
+        grp = dict(grp, groupTitle=_btn_group_key(grp, i))
         if ("x" in grp or "y" in grp) and not grp.get("place"):
             # 规格给了坐标：add-buttons 默认 place=top 会把同列图表整体下移按钮高度，finalize_page 只搬按钮不搬图
             # → 重叠（2026-09-22 销售管理 R2）。先追加到底部，第 ③ 趟 finalize_page 按坐标落位
@@ -350,13 +361,20 @@ FILTER_H = 8
 TITLE_H = 6
 
 
+def _btn_group_key(g, i):
+    """按钮组的组件名：规格写了 title 用 title，否则「按钮组N」（N 为规格里的序号，从 1 起）。
+    add-buttons 把新组**插到模板最前面**，按出现顺序 zip 配坐标会整组对调
+    （2026-09-24 人事OA-速测18：5 个按钮的组跑到 y=72、3 个按钮的组跑到 y=0）。"""
+    return (g.get("title") or g.get("groupTitle") or "按钮组%d" % (i + 1)) if isinstance(g, dict) else ""
+
+
 def _tile_class(comp):
     if comp in WIDE_COMPS:
         return "wide"
     return "kpi" if comp in KPI_COMPS else "chart"
 
 
-def _spec_layout_bad(specs):
+def _spec_layout_bad(specs, extra=()):
     """规格自带的 x/y/w/h 是否**不合格**（不合格就别尊重它，改用自动铺版）。
 
     四条判据，都来自真机渲染出来的难看效果（2026-09-22 项目管理 R5）：
@@ -370,26 +388,33 @@ def _spec_layout_bad(specs):
     别再单独设一个更松的数。
     """
     if not specs:
-        return False
+        return None
     cov, top, bottom = {}, None, 0
-    for g in specs:
+    # extra：规格给了坐标的按钮组也占行。以前只算图表，按钮组占的那几行被当成「开天窗」，
+    # 整页坐标被丢掉、透视表被排到盘底（人事OA-速测19：规格 y=20 落到 y=110）
+    for g in list(specs) + [dict(e, comp="JCustomButton") for e in extra]:
         try:
             x, y = int(g.get("x") or 0), int(g.get("y") or 0)
             w, h = int(g.get("w") or 0), int(g.get("h") or 0)
         except (TypeError, ValueError):
-            return True
+            return "坐标不是整数（%s）" % (g.get("title") or g.get("comp"))
         cls = _tile_class(g.get("comp"))
-        if cls == "chart" and h < 20:
-            return True
-        if cls == "kpi" and h > KPI_H:
-            return True
+        if g.get("comp") != "JCustomButton":
+            if cls == "chart" and h < 20:
+                return "图「%s」高 %d < 20（图例会压在图上）" % (g.get("title") or g.get("comp"), h)
+            if cls == "kpi" and h > KPI_H:
+                return "数字卡「%s」高 %d > %d（大空框）" % (g.get("title") or g.get("comp"), h, KPI_H)
         for yy in range(y, y + max(h, 1)):
             cov[yy] = cov.get(yy, 0) + w
         top = y if top is None else min(top, y)
         bottom = max(bottom, y + h)
-    if any(v > GRID for v in cov.values()):
-        return True
-    return any(yy not in cov for yy in range(top or 0, bottom))
+    over = sorted(yy for yy, v in cov.items() if v > GRID)
+    if over:
+        return "第 %d 行起组件宽度合计超过 24（会重叠）" % over[0]
+    hole = next((yy for yy in range(top or 0, bottom) if yy not in cov), None)
+    if hole is not None:
+        return "第 %d 行整行没有组件（页面开天窗）" % hole
+    return None
 
 
 def _auto_tile(items, y0):
@@ -467,6 +492,7 @@ def finalize_page(page, page_id):
 
     texts = [c for c in comps if c.get("component") == "JText"]
     others = [c for c in comps if c.get("component") != "JText"]
+    charts = [c for c in others if c.get("component") not in ("JFilterQuery", "JCustomButton")]
     changed = False
 
     # ① 文本标题：置顶并占位，后面所有组件的 y 以 top_h 为原点
@@ -495,7 +521,22 @@ def finalize_page(page, page_id):
     btn_comps = [c for c in others if c.get("component") == "JCustomButton"]
     btn_fixed, btn_bottom = set(), top_h
     spec_bottom = top_h                 # 规格**原本**以为按钮排到哪一行
-    for g, c in zip(_grps, btn_comps):
+    by_name = {}
+    for c in btn_comps:
+        by_name.setdefault(c.get("componentName"), []).append(c)
+    pairs, left = [], list(btn_comps)
+    for i, g in enumerate(_grps):
+        cand = by_name.get(_btn_group_key(g, i)) or []
+        c = next((x for x in cand if x in left), None)
+        if c is not None:
+            left.remove(c)
+        pairs.append((g, c))
+    # 名字对不上的（老页面组件名都叫「自定义按钮」）按剩余组件兜底：模板是倒序插入的，所以倒着配
+    left.reverse()
+    pairs = [(g, c if c is not None else (left.pop(0) if left else None)) for g, c in pairs]
+    for g, c in pairs:
+        if c is None:
+            continue
         if isinstance(g, dict) and ("x" in g or "y" in g):
             h_raw = int(g.get("h", c.get("h") or BTN_MIN_H))
             h = max(h_raw, BTN_MIN_H)
@@ -513,7 +554,11 @@ def finalize_page(page, page_id):
     spec_charts = [g for grp in (page.get("charts") or {}).values() for g in (grp or [])]
     want = [(g.get("comp"), (g.get("title") or ""), g) for g in spec_charts if "x" in g or "y" in g]
     chart_comps = [c for c in others if c.get("component") not in ("JFilterQuery", "JCustomButton")]
-    if want and _spec_layout_bad([g for _c, _t, g in want]):
+    btn_specs = [g for g in _grps if isinstance(g, dict) and ("x" in g or "y" in g)]
+    why = _spec_layout_bad([g for _c, _t, g in want], extra=btn_specs) if want else None
+    if why:
+        # 以前静默丢，日志照打 OK（考勤/销售-速测19）
+        print("WARN:%s 规格坐标不合格，整页改自动铺版：%s" % (page.get("name"), why), flush=True)
         want = []                                   # 规格排版不合格 → 丢掉坐标，走自动铺版
 
     if want:                                        # —— 规格排过版：尊重它
@@ -580,10 +625,29 @@ def finalize_page(page, page_id):
     r = json.load(urllib.request.urlopen(req, timeout=60))
     if not r.get("success"):
         return "保存失败 %s" % str(r)[:120]
-    return "标题@0 + %d 组件已规整" % len(out)
+    # 没有文本标题时别说「标题@0」（人事OA-速测18：日志说有标题，盘上其实没有）
+    return ("标题@0 + %d 组件已规整" % len(out)) if texts else ("%d 组件已规整（无标题）" % len(out))
 
 
 # ---------------- 主流程 ----------------
+
+def _lowcode_workdir(app_id, sub):
+    """与 lowapp/scripts/skill_temp_path.app_workdir 同一规则：按 app.json 找该应用的工作目录。"""
+    import json
+    root = os.path.join(tempfile.gettempdir(), 'jeecg-lowcode')
+    base = (os.environ.get('JEECG_LOWCODE_WORKDIR') or '').strip()
+    if not (base and os.path.isdir(base)):
+        hits = []
+        for name in (os.listdir(root) if os.path.isdir(root) else []):
+            try:
+                j = json.load(open(os.path.join(root, name, 'app.json'), encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if str(j.get('app_id')) == str(app_id):
+                hits.append((j.get('created') or '', name))
+        base = os.path.join(root, max(hits)[1] if hits else str(app_id))
+    return os.path.join(base, sub)
+
 
 def main():
     ap = argparse.ArgumentParser(description="批量建仪表盘：单进程、非破坏、可断点续跑")
@@ -596,6 +660,9 @@ def main():
     ap.add_argument("--spec", required=True, help="dashboards.json")
     ap.add_argument("--only", default="", help="只建这些盘（逗号分隔）")
     ap.add_argument("--recreate", default="", help="这些盘先删后建（逗号分隔）；默认已存在则跳过")
+    ap.add_argument("--finalize", action="store_true",
+                    help="对**已存在的盘**也补跑一遍第 ③ 趟整页规整（标题置顶/按钮落位）。"
+                         "默认只规整本次新建的盘 —— 跳过的不动。老盘排版乱、又不想删盘重建时用它。")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -653,17 +720,20 @@ def main():
                 log("OK:recreate 删除旧盘 %s %s" % (nm, pid))
         existing, groups, _ = index_menus(a.app_id)
 
-    workdir = tempfile.mkdtemp(prefix="qqy-dash-")
+    workdir = _lowcode_workdir(a.app_id, "dash")   # 该应用的工作目录 /dash/
+    os.makedirs(workdir, exist_ok=True)
     t0 = time.time()
     ok = skip = fail = 0
     want_buttons = []          # [(page, pid)]：第 ② 趟统一加按钮
-    done_pages = []            # 本次建成的盘：第 ③ 趟整页规整（标题置顶 / 按钮落位）
+    done_pages = []            # 第 ③ 趟整页规整（标题置顶 / 按钮落位）
     for page in pages:
         name = page["name"]
         # 非破坏：已存在就跳过（可断点续跑）。要重建请用 --recreate
         if existing.get(name):
             log("OK:skip %s（已存在 %s）" % (name, existing[name][0]))
             skip += 1
+            if a.finalize:
+                done_pages.append((page, existing[name][0]))
             # 已存在的盘也可能是「图建好了、按钮还没加」的半成品（老版本一趟建成时，
             # 跳转按钮会因为目标盘还没建而解析不到 pageId）。查一下真有没有按钮组件，
             # 没有就补第 ② 趟——**不无条件补**，否则每次重跑都会再叠一组按钮。
@@ -673,9 +743,10 @@ def main():
                 want_buttons.append((page, existing[name][0]))
             continue
         if a.dry_run:
-            log("OK:plan %s → 分组「%s」 图 %d 表 / 查询 %d"
+            log("OK:plan %s → 分组「%s」 图 %d 表 / 查询 %d%s"
                 % (name, page.get("group", ""), len(page.get("charts") or {}),
-                   len(page.get("filters") or [])))
+                   len(page.get("filters") or []),
+                   "" if (page.get("ui") or []) else "  · 无 ui 段（本页不加盘标题）"))
             continue
         try:
             pid, errs = build_page(page, workdir, dry_run=False)

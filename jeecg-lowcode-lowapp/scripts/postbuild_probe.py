@@ -4,7 +4,7 @@
 
   python postbuild_probe.py --api-base URL --token T --tenant-id N --app-id A [--work DIR]
 
-产物（默认 {tmp}/jeecg-desform/<app-id>/）：
+产物（默认该应用的工作目录 {tmp}/jeecg-lowcode/<英文简称>_<时间戳>/）：
   probe.json  {表名: {code, menuId, hideFlag, titleField, widgets:[{name,key,model,type,...}]}}
   dicts.json  {字典名: {选项文案: 落库值}}
 """
@@ -22,7 +22,8 @@ ap.add_argument('--tenant-id', required=True)
 ap.add_argument('--app-id', required=True)
 ap.add_argument('--work', default=None)
 A = ap.parse_args()
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', A.app_id)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(A.app_id)   # 该应用的工作目录
 os.makedirs(WORK, exist_ok=True)
 TID = int(A.tenant_id) if str(A.tenant_id).isdigit() else A.tenant_id
 
@@ -79,7 +80,12 @@ for f in forms:
                    'linkTable': o.get('linkTable'), 'field': o.get('field'),
                    'dictCode': o.get('dictCode'), 'remote': o.get('remote'),
                    'hidden': o.get('hidden'), 'hiddenOnAdd': o.get('hiddenOnAdd'),
-                   'autoWidth': o.get('autoWidth'), 'dtype': o.get('type')})
+                   'autoWidth': o.get('autoWidth'), 'dtype': o.get('type'),
+                   'timestamp': o.get('timestamp'),
+                   # 静态下拉/单选/多选的 {显示名: 存储值}：按钮流 upd() 写值时翻译用
+                   'opts': ({str(x.get('label')): x.get('value') for x in o['options']
+                             if isinstance(x, dict) and x.get('value') is not None}
+                            if isinstance(o.get('options'), list) else None)})
     data[f['name']] = {'code': f['code'], 'menuId': f['menuId'], 'hideFlag': f['hideFlag'],
                        'titleField': (design.get('config') or {}).get('titleField'),
                        'widgets': ws}

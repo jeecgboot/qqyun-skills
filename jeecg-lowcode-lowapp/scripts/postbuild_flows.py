@@ -24,7 +24,7 @@ import sys, os, json, re, time, argparse, tempfile, hashlib, base64, urllib.requ
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.normpath(os.path.join(HERE, '..', '..', 'jeecg-lowcode-miniflow', 'scripts')))
-from miniflow_creator import build_process_json, save_flow, deploy_flow
+from miniflow_creator import build_process_json, save_flow, deploy_flow, _now_for_date_field
 from desform_lowapp_utils import init_lowapp
 
 ap = argparse.ArgumentParser()
@@ -38,7 +38,8 @@ ap.add_argument('--dry-run', action='store_true')
 ap.add_argument('--replace', default='', help='逗号分隔的流程名：先删后建（之后重跑 postbuild_appconfig 重绑按钮）')
 A = ap.parse_args()
 API, TOKEN, TID, AID = A.api_base, A.token, str(A.tenant_id), A.app_id
-WORK = A.work or os.path.join(tempfile.gettempdir(), 'jeecg-desform', AID)
+from skill_temp_path import app_workdir  # noqa: E402
+WORK = A.work or app_workdir(AID, create=False)   # 该应用的工作目录（probe 建的；读不到就报缺 probe.json）
 for _f in ('probe.json', 'dicts.json'):
     if not os.path.exists(os.path.join(WORK, _f)):
         sys.exit('缺少 %s —— 先跑 postbuild_probe.py' % os.path.join(WORK, _f))
@@ -58,10 +59,16 @@ for _t, _v in PROBE.items():
     _FLD[_t] = _m
 
 
+# 系统字段：不在 probe 的控件快照里，但流程能引用（消息收件人 = 记录创建人，gotchas #49 实测 create_by）。
+# 以前 start('Bug','创建人') 直接 KeyError，「Bug 解决 → 通知提交人」做不了（2026-09-24 任务管理-一句话10）。
+_SYS_FIELDS = {'创建人': {'name': '创建人', 'model': 'create_by', 'type': 'select-user'}}
+_SYS_FIELDS['记录创建人'] = _SYS_FIELDS['创建人']
+
+
 def w(t, n):
     if t not in _FLD:
         raise KeyError('应用里没有工作表「%s」' % t)
-    x = _FLD[t].get(n)
+    x = _FLD[t].get(n) or _SYS_FIELDS.get(n)
     if x is None:
         raise KeyError('%s.%s 不存在（改过名/转过子表就重跑 postbuild_probe.py）' % (t, n))
     return x
@@ -182,29 +189,74 @@ def systime():
 
 
 # ── 节点 ──
+# 更新对象的「取值来源节点类型」——引擎按这个键决定去哪份结果里取行。
+# ⚠️ 写错**不报错、不卡流程**，只是批量写整批静默跳过（gotchas #129，2026-09-22 实测），
+# 所以必须按**真实来源节点**取，不能一律写 search。
+_SRC_KIND = {'get_one': 'search', 'get_more': 'getMore', 'data_add': 'plus'}
+
+
+def inc(value):
+    """更新时**累加**（optType=2），与 flow_dsl.inc 同名同义：('激活次数', inc(1))。"""
+    return {'$inc': value}
+
+
+def dec(value):
+    """更新时**扣减**（optType=3）。"""
+    return {'$dec': value}
+
+
 def upd(name, t, fields, src=None):
-    """更新记录。src=None 更新触发记录；src=get_one 节点 则更新查到的那条。fields: [(字段名, 值)]"""
+    """更新记录。src=None 更新触发记录；src=get_one/get_more 节点 则更新它取到的那（几）条。
+
+    ⚠️ `src` 传 `get_more_link()` 的返回值时，落库必须是
+    `formTableSourceNodeType='getMore'` + `formTableSourceGetDataType=1`；
+    写死 `'search'` 的症状是「按钮点了，明细一行没变」，而 save/deploy/契约闸门全绿。
+    fields: [(字段名, 值)]
+    """
     nid_ = nid()
     ufs = []
     for i, (fn, val) in enumerate(fields):
-        e = {'id': '%s_%d' % (nid_, i), 'optType': '1', 'fieldValue': '', 'field': M(t, fn),
+        # 静态下拉写的是显示名（「已作废」）而库里存的是值（'6'）时，翻成存储值 —— 以前原样写入，
+        # 按钮流条件/看板全对不上，只有 app_audit 抓得到（2026-09-24 销售-速测17 I）。字典字段仍用 dv()。
+        _opts = w(t, fn).get('opts') or {}
+        if isinstance(val, str) and val in _opts and val not in [str(v) for v in _opts.values()]:
+            val = _opts[val]
+        opt = '1'
+        # 按钮流以前只能设值，「激活次数+1」要手改 optType（2026-09-24 萌萌科技 Bug 版 patch_inc.py 绕过）
+        if isinstance(val, dict) and ('$inc' in val or '$dec' in val):
+            opt, val = ('2', val['$inc']) if '$inc' in val else ('3', val['$dec'])
+        e = {'id': '%s_%d' % (nid_, i), 'optType': opt, 'fieldValue': '', 'field': M(t, fn),
              'val': val, 'fieldType': T(t, fn), 'type': T(t, fn)}
         if isinstance(val, dict):
             e['valueType'], e['valType'] = 3, 'variable'
             if w(t, fn)['type'] == 'date':
+                # 按钮流不走 miniflow_creator.build_data_update_node，毫秒改写要在这里做
+                # （2026-09-24 担保-一句话6：sysdate() 写日期控件落成 'yyyy-MM-dd HH:mm:ss' 字符串）
+                if w(t, fn).get('timestamp') is not False:   # 手工关了时间戳的控件存字符串，不改（旧快照无此键按毫秒）
+                    e['val'] = _now_for_date_field(e['val'])
+                else:
+                    e['keepNowText'] = True     # 告诉 miniflow_creator 也别改写（它对日期控件默认一律改毫秒）
                 e['options'] = {'format': 'yyyy-MM-dd HH:mm:ss' if T(t, fn).startswith('datetime') else 'yyyy-MM-dd'}
         ufs.append(e)
-    s = (src['id'], 'search') if src else ('start', 'table')
+    s = ((src['id'], _SRC_KIND.get(src.get('type'), 'search')) if src
+         else ('start', 'table'))
+    a = {'formTableSourceNodeType': s[1]}
+    if s[1] == 'getMore':
+        a['formTableSourceGetDataType'] = 1
     return {'type': 'data_update', 'id': nid_, 'name': name, 'formTableCode': CODE[t], 'formTableName': t,
-            'formTableSourceTaskId': s[0], 'attr': {'formTableSourceNodeType': s[1]},
+            'formTableSourceTaskId': s[0], 'attr': a,
             'updateFields': ufs, '_uf': ufs, '_src': s, '_tbl': t}
 
 
 def add(name, t, mapping, batch_from=None):
     """新增记录。mapping: {目标字段名: 值}；batch_from=get_more_link 节点 则按行批量新增"""
-    fm = {M(t, fn): val for fn, val in mapping.items()}
+    fm = {M(t, fn): (_now_for_date_field(val) if w(t, fn)['type'] == 'date'
+                     and w(t, fn).get('timestamp') is not False else val)   # 日期控件写毫秒
+          for fn, val in mapping.items()}
     n = {'type': 'data_add', 'id': nid(), 'name': name, 'formTableCode': CODE[t], 'formTableName': t,
-         'formModel': fm, '_fm': fm, '_tbl': t}
+         'formModel': fm, '_fm': fm, '_tbl': t,
+         'keepNowTextKeys': [M(t, fn) for fn in mapping
+                             if w(t, fn)['type'] == 'date' and w(t, fn).get('timestamp') is False]}
     if batch_from:
         n['_batch'] = batch_from['id']
     return n
@@ -248,11 +300,29 @@ def branch(name, found, missing):
         {'id': g + 'a', 'name': '有数据', 'nodes': found}, {'id': g + 'b', 'name': '无数据', 'nodes': missing}]}
 
 
-def when(t, field, val, name, nodes):
-    """排他分支的一支：触发记录字段 等于 固定值"""
+_RULE = {'等于': 'eq', '不等于': 'ne', '大于': 'gt', '大于等于': 'ge', '小于': 'lt', '小于等于': 'le'}
+
+
+def when(t, field, val, name, nodes, rule='等于'):
+    """排他分支的一支：触发记录字段 <rule> 固定值。rule：等于/不等于/大于/大于等于/小于/小于等于
+    （以前只能写「等于」，「请假天数 ≥ 5 走两级审批」只能建完手改，2026-09-24 考勤-速测18）"""
+    if rule not in _RULE:
+        raise KeyError('when(%r)：rule 只能是 %s，收到 %r' % (name, '/'.join(_RULE), rule))
     return {'name': name, 'isDefault': False, 'branchType': 1, 'nodes': nodes, 'conditions': [{
-        'rule': 'eq', 'ruleName': '等于', 'field': M(t, field), 'columnName': field, 'val': val,
+        'rule': _RULE[rule], 'ruleName': rule, 'field': M(t, field), 'columnName': field, 'val': val,
         'type': T(t, field), 'valueType': '1', 'valType': T(t, field)}]}
+
+
+def result_branch(ok=None, reject=None, name='审批结果分支'):
+    """审批结果分支：紧跟 appr() 之后，审批人点「同意」走 ok、「不同意」走 reject。
+    构建器会给前面的审批节点补 hasResultBranch=true / addable=false（缺前者一发起就报
+    Unknown property approve_result_xxx）。2026-09-24 真机实测通过/否决两支都按预期回写、实例正常结束；
+    此前套件没有它，「不同意 → 作废」只能不建（人事OA/CRM/项目管理-速测18 共 10 条流程降级）。
+    冒烟验否决支：approval 里写 'reject': ['审批节点名']。"""
+    g = gid()
+    return {'type': 'approve_result', 'id': g, 'name': name, 'conditionNodes': [
+        {'name': '通过', 'resultVal': 'Y', 'nodes': ok or []},
+        {'name': '否决', 'resultVal': 'N', 'nodes': reject or []}]}
 
 
 def otherwise(name, nodes=None):
@@ -266,7 +336,45 @@ def exclusive(name, branches):
     return {'type': 'exclusive', 'id': gid(), 'name': name, 'conditionNodes': branches}
 
 
-def _grp(t=None, field=None):
+_RN = {}
+
+
+def _realname(username):
+    """账号 → 姓名（查不到就原样返回账号）。"""
+    if username not in _RN:
+        try:
+            q = urllib.parse.urlencode({'username': username, 'pageSize': 5})
+            r = urllib.request.Request('%s/sys/user/list?%s' % (API, q),
+                                       headers={'X-Access-Token': TOKEN, 'X-Tenant-Id': TID})
+            with urllib.request.urlopen(r, timeout=60) as f:
+                recs = ((json.loads(f.read().decode('utf-8')).get('result') or {}).get('records') or [])
+            hit = next((x for x in recs if x.get('username') == username), None)
+            _RN[username] = (hit or {}).get('realname') or username
+        except Exception:                        # noqa: BLE001
+            _RN[username] = username
+    return _RN[username]
+
+
+_ROLES = None
+
+
+def _role(name_or_code):
+    """角色名或 roleCode → (roleCode, roleName)；与 build_flows.Resolver.role 同口径（引擎按 roleCode 归集待办，
+    gotchas #36）。租户里没有就报错并列出可用角色。"""
+    global _ROLES
+    if _ROLES is None:
+        r = urllib.request.Request('%s/sys/role/list?pageNo=1&pageSize=500' % API,
+                                   headers={'X-Access-Token': TOKEN, 'X-Tenant-Id': TID})
+        with urllib.request.urlopen(r, timeout=60) as f:
+            recs = ((json.loads(f.read().decode('utf-8')).get('result') or {}).get('records') or [])
+        _ROLES = [(x.get('roleCode'), x.get('roleName')) for x in recs if x.get('roleCode')]
+    hit = next(((c, n) for c, n in _ROLES if name_or_code in (c, n)), None)
+    if not hit:
+        raise KeyError('角色「%s」在本租户不存在；可用：%s' % (name_or_code, '、'.join(n for _, n in _ROLES)))
+    return hit
+
+
+def _grp(t=None, field=None, users=None, roles=None):
     g = {'approverIds': [], 'approverNames': [], 'deptIds': [], 'deptNames': [], 'roleIds': [],
          'roleNames': [], 'postIds': [], 'postNames': [], 'levelMode': 1, 'approverId': '', 'approverName': ''}
     if field:                                   # 办理人 = 表单成员/部门字段
@@ -279,6 +387,19 @@ def _grp(t=None, field=None):
         g.update({'approverType': 'candidateUsers', 'assigneeType': 'assigneeByVariable',
                   'expressionsIds': [], 'expressionsNames': [], 'variableTitle': [field],
                   'variableContent': vc, 'formTableType': 'table'})
+    elif roles:                                 # 办理人 = 角色（按钮流「重新提交」要和表事件审批同一套取人，一句话12 申报/担保）
+        rs = [_role(r) for r in roles]
+        g.update({'approverType': 'candidateGroups', 'assigneeType': 'assigneeByName',
+                  'roleIds': [c for c, _ in rs], 'roleNames': [n for _, n in rs],
+                  'expressionsIds': [], 'expressionsNames': [],
+                  'variableTitle': [], 'variableContent': '', 'formTableType': ''})
+    elif users:                                 # 办理人 = 指定成员（**裸账号**，gotchas #90：带 user. 前缀谁都收不到）
+        ids = [u[5:] if u.startswith('user.') else u for u in users]
+        names = [_realname(u) for u in ids]     # 画布/面板显示姓名，不是账号（人事OA/项目管理-速测19）
+        g.update({'approverType': 'candidateUser', 'assigneeType': 'assigneeByName',
+                  'approverIds': ids, 'approverNames': names, 'approverId': ids[0], 'approverName': names[0],
+                  'expressionsIds': [], 'expressionsNames': [],
+                  'variableTitle': [], 'variableContent': '', 'formTableType': ''})
     else:                                       # 办理人 = 获取发起人
         g.update({'approverType': 'candidateUser', 'assigneeType': 'assigneeByExp',
                   'expressionsIds': ['${applyUserId}'], 'expressionsNames': ['获取发起人'],
@@ -286,19 +407,22 @@ def _grp(t=None, field=None):
     return g
 
 
-def appr(name, t=None, field=None):
-    """审批节点（或签）。默认审批人=获取发起人；给 t+field 则取表单成员字段"""
-    g = [_grp(t, field)]
-    c = field or '获取发起人'
+def appr(name, t=None, field=None, users=None, roles=None):
+    """审批节点（或签）。默认审批人=获取发起人；给 t+field 则取表单成员字段；users=['admin'] 指定成员（裸账号）；
+    roles=['部门经理'] 按角色（名或 roleCode）"""
+    g = [_grp(t, field, users, roles)]
+    c = field or ('、'.join(_role(r)[1] for r in roles) if roles else
+                  '、'.join(_realname(u[5:] if u.startswith('user.') else u) for u in users) if users else '获取发起人')
     return {'type': 'approver', 'id': 'Activity' + _next(), 'name': name, 'approvalMode': 1,
             'approverGroups': g, 'content': c,
             'attr': {'approvalMethod': 1, 'approverGroups': g, 'level': '1'}, '_content': c}
 
 
-def fill(name, t=None, field=None):
-    """填写节点（办理人能看/改表单）。字段可编辑/必填/隐藏在 PERMS 里配"""
-    g = [_grp(t, field)]
-    c = field or '获取发起人'
+def fill(name, t=None, field=None, users=None, roles=None):
+    """填写节点（办理人能看/改表单）。字段可编辑/必填/隐藏在 PERMS 里配；users / roles 同 appr()"""
+    g = [_grp(t, field, users, roles)]
+    c = field or ('、'.join(_role(r)[1] for r in roles) if roles else
+                  '、'.join(_realname(u[5:] if u.startswith('user.') else u) for u in users) if users else '获取发起人')
     return {'type': 'edit', 'id': 'Activity' + _next(), 'name': name, 'approverGroups': g, 'content': c,
             'attr': {'approverGroups': g, 'level': '1', 'formEditStatus': True}, '_content': c}
 
@@ -362,7 +486,18 @@ def msg(name, content, to=(), to_names=(), body=()):
 
 
 def trig(t, field, val):
-    """工作表事件的触发条件：字段 等于 固定值（字典字段传 dv() 的结果）"""
+    """工作表事件的触发条件：字段 等于 固定值（字典字段传 dv() 的结果）。
+
+    ⚠️ 「为空 / 不为空」**不是把中文当值比**，必须换成平台专门的 rule ——
+    引擎按 `rule` 判定，写成 `eq` + `val='不为空'` 会去比「该字段 == 字符串『不为空』」，
+    恒不成立，流程一次都不启动（连 ACT_HI_PROCINST 实例都没有），且 save/deploy 全绿。
+    正确形态实测于平台自带流程：`{'rule': 'not_empty', 'ruleName': '不为空', 'val': []}`。
+    """
+    if val in ('为空', '不为空'):
+        return [{'rule': 'not_empty' if val == '不为空' else 'empty', 'ruleName': val,
+                 'valueType': '1', 'val': [], 'name': [],
+                 'field': M(t, field), 'columnName': field,
+                 'type': T(t, field), 'valType': T(t, field)}]
     return [{'rule': 'eq', 'ruleName': '等于', 'valueType': '1', 'val': val, 'name': None,
              'field': M(t, field), 'columnName': field, 'type': T(t, field), 'valType': T(t, field)}]
 
@@ -370,19 +505,27 @@ def trig(t, field, val):
 FLOWS, PERMS = [], []
 
 
-def button_flow(name, table, nodes):
-    FLOWS.append({'name': name, 'start': 'buttonEvent', 'table': table, 'nodes': nodes})
+def button_flow(name, table, nodes, trigger_other=False):
+    """trigger_other=True：本流程新增/更新的记录**也触发目标表自己的流程**（落库 triggerOtherProcess='1'；
+    默认引擎内部写入绕过工作表事件，engine-contract「按钮流更新不触发表事件」）"""
+    FLOWS.append({'name': name, 'start': 'buttonEvent', 'table': table, 'nodes': nodes,
+                  'trigger_other': trigger_other})
 
 
-def table_flow(name, table, nodes, event='add', cond=None, watch=None):
-    """event: add / update / add|update / delete；watch: 监控字段名列表（update 时防重复触发）"""
+def table_flow(name, table, nodes, event='add', cond=None, watch=None, trigger_other=False):
+    """event: add / update / add|update / delete；watch: 监控字段名列表（update 时防重复触发）；
+    trigger_other=True：本流程写出的记录也触发目标表的流程（「离职申请通过 → 新增交接单 → 交接单自己的流程」，
+    以前套件没有这个开关，下游流程不跑，2026-09-24 人事OA-速测18）"""
     FLOWS.append({'name': name, 'start': 'tableEvent', 'table': table, 'event': event, 'nodes': nodes,
-                  'cond': cond, 'watch': [M(table, f) for f in (watch or [])]})
+                  'cond': cond, 'watch': [M(table, f) for f in (watch or [])],
+                  'trigger_other': trigger_other})
 
 
-def perm(flow, node, table, editable=(), required=(), hidden=()):
-    """节点字段权限：没点名的字段一律只读可见"""
-    PERMS.append((flow, node, table, list(editable), list(required), list(hidden)))
+def perm(flow, node, table, editable=(), required=(), hidden=(), nth=None):
+    """节点字段权限：没点名的字段一律只读可见。
+    同一流程里有**同名节点**（两个分支各有一个「上级审批」）时必须给 nth（第几个，从 1 数，
+    按流程图从上到下、分支从左到右）；以前静默落到最后一个（2026-09-24 考勤-速测18）。"""
+    PERMS.append((flow, node, table, list(editable), list(required), list(hidden), nth))
 
 
 exec(compile(open(A.config, encoding='utf-8').read(), A.config, 'exec'), globals())
@@ -416,7 +559,8 @@ def build(flow):
     cfg = {'processName': flow['name'], 'processKey': 'process%d' % ts, 'processType': 'oa',
            'lowAppId': AID, 'tenantId': TID, 'startType': flow['start'], 'formTableCode': CODE[t],
            'formTableName': t, 'titleField': TITLE[t], 'startEventType': flow.get('event', 'add'),
-           'startTaskId': 'task%d000' % ts, 'nodes': flow['nodes']}
+           'startTaskId': 'task%d000' % ts, 'nodes': flow['nodes'],
+           'triggerOtherProcess': '1' if flow.get('trigger_other') else '0'}
     if flow['start'] == 'tableEvent':
         cfg['formTableId'] = 'form_start_%s' % CODE[t]
     if flow.get('cond'):
@@ -437,6 +581,9 @@ def build(flow):
             a['updateFields'] = orig['_uf']
             a.setdefault('level', '1')
             a['formTableSourceNodeType'], a['formTableSourceTaskId'] = s[1], s[0]
+            if s[1] == 'getMore':
+                # 批量来源缺这一键 = 整批静默不写（见 upd() 的说明 / gotchas #129）
+                a['formTableSourceGetDataType'] = 1
             n['formTableSourceTaskId'] = s[0]
             a['formTableId'] = ('form_start_%s' % CODE[orig['_tbl']] if s[0] == 'start'
                                 else 'form_%s_%s' % (s[0], CODE[orig['_tbl']]))
@@ -574,22 +721,38 @@ for f in FLOWS:
 if PERMS and not A.dry_run:
     from desform_utils import get_form_fields
     cache, fcache = {}, {}
-    for fname, nname, tbl, ed, rq, hd in PERMS:
+    for fname, nname, tbl, ed, rq, hd, nth in PERMS:
         fid = ex.get(fname)
         if not fid:
             res.append('FAIL 权限 %s/%s：流程不存在' % (fname, nname)); fail += 1; continue
         if fid not in cache:
             pj = json.loads(((_req('GET', '/act/process/extActProcess/queryById?id=%s' % fid) or {})
                              .get('result') or {}).get('processJson') or '{}')
-            cache[fid] = {n.get('name'): n.get('id') for n in walk_nodes(pj)}
-        node_id = cache[fid].get(nname)
-        if not node_id:
+            cache[fid] = {}
+            for n in walk_nodes(pj):
+                cache[fid].setdefault(n.get('name'), []).append(n.get('id'))
+        ids = cache[fid].get(nname) or []
+        if not ids:
             res.append('FAIL 权限 %s/%s：节点不存在' % (fname, nname)); fail += 1; continue
+        if len(ids) > 1 and not nth:
+            res.append('FAIL 权限 %s/%s：流程里有 %d 个同名节点，perm(..., nth=第几个) 指定（按流程图从上到下、分支从左到右）'
+                       % (fname, nname, len(ids))); fail += 1; continue
+        if nth and not 1 <= nth <= len(ids):
+            res.append('FAIL 权限 %s/%s：nth=%s 超出范围（共 %d 个）' % (fname, nname, nth, len(ids))); fail += 1; continue
+        node_id = ids[(nth or 1) - 1]
         if tbl not in fcache:
             fcache[tbl] = get_form_fields(CODE[tbl])[1]      # 要 key：必须用 desform_utils 的，不能用 miniflow 的同名函数
         unknown_f = [x for x in list(ed) + list(rq) + list(hd) if x not in fcache[tbl]]
         if unknown_f:
-            res.append('FAIL 权限 %s/%s：字段不存在 %s' % (fname, nname, unknown_f)); fail += 1; continue
+            sub = {x: k.split('.')[0] for x in unknown_f for k in fcache[tbl] if '.' in k and k.endswith('.' + x)}
+            hint = ('；其中 %s 是子表列 —— 节点权限只能按**整张子表**给（写子表名 %s）'
+                    % (sorted(sub), sorted(set(sub.values())))) if sub else ''
+            res.append('FAIL 权限 %s/%s：字段不存在 %s%s' % (fname, nname, unknown_f, hint)); fail += 1; continue
+        # 重跑幂等：已有的规则行带上 id 走「更新」，否则后端报「规则编码已存在，不允许重复添加」（人事OA-速测18）
+        old = _req('GET', '/act/process/extActProcessNodePermission/list?processNodeCode=%s&processId=%s&pageSize=1000'
+                   % (node_id, fid))
+        old_id = {(x.get('ruleCode'), str(x.get('ruleType'))): x.get('id')
+                  for x in ((old.get('result') or {}).get('records') or [])}
         rows = []
         for name, meta in fcache[tbl].items():
             if '.' in name:
@@ -599,6 +762,9 @@ if PERMS and not A.dry_run:
                                      'processNodeCode': node_id}
             rows.append(dict(base, ruleType='1', status='0' if name in hd else '1', required=req))
             rows.append(dict(base, ruleType='2', status='0' if (name in ed or req) else '1', required=req))
+            for r_ in rows[-2:]:
+                if old_id.get((r_['ruleCode'], r_['ruleType'])):
+                    r_['id'] = old_id[(r_['ruleCode'], r_['ruleType'])]
         r = _req('POST', '/act/process/extActProcessNodePermission/saveOrUpdateBatch', rows)
         if r.get('success'):
             res.append('OK 权限 %s/%s %d 行' % (fname, nname, len(rows)))

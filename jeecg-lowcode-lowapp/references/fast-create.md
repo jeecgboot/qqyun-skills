@@ -1,5 +1,18 @@
 # 租户 + 应用下建工作表 / 一对一关联（快路径）
 
+> ⛔ **适用范围：已有应用下加少量工作表（一般 ≤3 张）/ 一对一。多表应用不属于本页。**
+> 需求里出现「多张表 + 数据字典 + 关联记录 + 汇总 + 公式 + 视图」这类规模时
+> （**有没有简流和看板都算**），走 `fast-full-chain.md` + `app_spec.json` + `build_app.py`。
+>
+> **2026-09-24 实测代价**：一个 53 表任务照本页走，结果——① 规格里写了 `unique` /
+> `max`(附件上限) / `dec`(小数位) / `unit`(金额单位) / `scan`(扫码) / `owner`(拥有者)
+> 六类字段级标志，本页的 job 格式**没列这些键**，全部静默丢弃，影响 **129 个字段项**；
+> ② 关联/公式/汇总/子表/字典/业务规则/视图的建后补丁得**自己手搓六个脚本**，
+> 而 `postbuild_*` 套件里本来就有；③ 唯一校验 `options.unique` 直到用户追问才发现是空的。
+> `app-spec.md` 里这六类标志全是一等公民，连验收口径都写好了（「逐字段回读
+> `options.unitText`，与需求原文对照」）。**低层通道不是不能建多表应用，是要你自己补完
+> 上层工具已经做掉的事。**
+
 只读这一页。读完立刻执行，不要再打开本技能 SKILL.md、`jeecg-desform`、`jeecg-system`、`desform-widget-options.md`、`desform-json-config.md`、`desform-cross-form-binding.md`。
 
 **上次把「必须快」写在 SKILL 文末无效：** 开场已经读完 800 行 + 并行打开三个 skill，两表一对一墙钟仍约 6 分钟；真正跑接口约 50 秒。本页存在就是为了让第一条 tool call 变成跑脚本。
@@ -7,7 +20,7 @@
 ## 第一条 tool call
 
 1. 用户消息里的 `api-base` / token 直接用。没有则对 `prompt_history.jsonl` **搜一次** `jeecg-boot` + `eyJ`；没有就问一句。禁止翻整个 `.grok/sessions`。
-2. Write UTF-8 JSON 到 `{tmpdir}/jeecg-desform/job.json`（先 `skill_temp_path.py -f job.json`；会话已有该目录则直接拼路径）。
+2. Write UTF-8 JSON 到 `skill_temp_path.py -f job.json` 打印的路径（`_jobs/` 下、文件名带时间戳）；属于一次建应用的一部分时，写进该次的工作目录。
 3. 立刻：
 
 ```bash
@@ -134,7 +147,8 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
 - **双向关联成对写 `twoWayModel`**：两边互指对方 link-record 的 model；只写一侧 = 明细挂不上单据。
 - **选项控件开彩色**：`radio`/`checkbox`/`select` 设 `options.useColor=true`，`itemColor` 取系统 20 色之一。
 - **只有 2 个选项的用 `radio`/`checkbox`，不用 `select`**（`单据确认` 是/否这类）；3 个以上才用下拉。
-- **`divider` 标题居左**：`options.titleAlign='left'`。
+- **`divider` 标题居左**：`options.position='left'`（取值 left/center/right；设计器源码里没有 `titleAlign`，
+  写它不生效——考勤-速测18 实测，此前本条写错）。
 - **关联记录「表格」模式 `showFields` ≥ 4 个业务列**。
 
 ### fields.type 合法码速查（2026-09-15 实测）
@@ -151,9 +165,15 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
 | 图片上传 | `imgupload`（多选自带） | |
 | 选择用户/部门多选 | `select-user`/`select-depart` + `"multiple":true`（实测生效） | |
 | 下拉/单选 | `select`/`radio` + `options:["A","B"]`（**纯文本数组**；绑字典的字段禁止写 options，只给 name+type） | |
+| 条码/二维码 | `barcode` + `"codeType":"barcode"\|"qrcode"` + `"sourceModel":"$字段名$"` | 曾整批被拦，见下 |
+| 汇总 / 汇总日期 | `summary` / `summary-date`（`linkTable` 写子表或关联控件**中文名**，creator 自动解析） | |
 | 子表 | `sub-table-design` | ⚠ 见下 |
 
-其余可用：`input` `textarea` `number` `integer` `money` `phone` `email` `date` `time` `switch` `rate` `slider` `editor` `divider` `text` `capital-money` `text-compose` `select-depart-post` `org-role` `formula` `link-record` `link-field`。纯时间（HH:mm:ss）用 `time`（dateType 无 time 档）。
+其余可用：`input` `textarea` `number` `integer` `money` `phone` `email` `date` `time` `switch` `rate` `slider` `editor` `divider` `text` `capital-money` `text-compose` `select-depart-post` `org-role` `formula` `link-record` `link-field` `color` `hand-sign` `markdown` `ocr` `map`。纯时间（HH:mm:ss）用 `time`（dateType 无 time 档）。
+
+> ⚠️ **2026-09-24 修正：预检白名单曾是 `desform_creator._TYPE_MAP` 的真子集**，`barcode`/`summary`/`summary-date`/`color`/`hand-sign`/`markdown`/`ocr`/`map` 这些 creator 侧**本来就能建**的码被 fail-fast 整批拦下（53 表任务里一个 `barcode` 就让 0 张表建成）。已补齐白名单。
+> **`barcode` 的 `sourceModel` 写 `$字段名$`**（由 `_post_process_widgets` 解析成 model）；⚠️ 落库必须是**裸 model**——曾因复用了公式的解析器而落成 `$input_…$`，条码取不到数据源、渲染为空，而 save/回读全绿（同日已修）。也兼容直接写裸中文名。
+> **仍未收录：`tabs` / `grid` / `card` / `buttons`** —— 它们是容器、需要嵌套子控件，而 `fields[]` 是扁平结构没有嵌套通道，放开只会建出空容器。要容器请走 `--preprocess` 或建后再补。
 
 ⚠ **子表 `columns` 键被静默忽略**：job 里给 `sub-table-design` 写 `columns:[...]` 不报错，但建出来是**空壳子表**（2026-09-15 实测）。建表后必须按 SKILL「往已有子表加列」用 `SUB_*` 工厂补列（工厂返回值取 `[0]`，补完 `save_design_from_file` + `save_auth_from_design` 并回读验证列存在）。
 

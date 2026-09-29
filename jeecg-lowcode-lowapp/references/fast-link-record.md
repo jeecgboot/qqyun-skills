@@ -11,7 +11,7 @@
 ## 第一条 tool call
 
 1. 用户消息里的 `api-base` / token 直接用。会话已有 `tenantId` / `appId` / 表 code / 字段 key 就写进 JSON，禁止再 list。
-2. Write UTF-8 JSON 到 `{tmpdir}/jeecg-desform/link_job.json`（会话已有该目录则直接拼路径）。
+2. Write UTF-8 JSON 到 `skill_temp_path.py -f link_job.json` 打印的路径（`_jobs/` 下、文件名带时间戳）；属于一次建应用的一部分（已用 `--new` 开了工作目录）时，写进该次的工作目录。
 3. 立刻：
 
 ```bash
@@ -101,7 +101,7 @@ Windows：中文只写在 JSON 文件里，禁止 `python -c`、禁止 PowerShel
 import sys, json, os, tempfile
 sys.path.insert(0, r'<skill目录>/scripts')
 from desform_lowapp_utils import init_lowapp
-from desform_utils import query_form, save_design_from_file
+from desform_utils import query_form, save_design_from_file, app_tmpdir
 
 init_lowapp(api_base, token, tenant_id=..., app_id=...)
 design = json.loads(query_form('<表code>')['desformDesignJson'])
@@ -122,8 +122,7 @@ def find(node, key):
 
 w = find(design, '<被改控件key>')   # 如 1788334072485_814628
 w.setdefault('advancedSetting', {}).setdefault('defaultValue', {})['value'] = '$<被引用控件model>$'
-path = os.path.join(tempfile.gettempdir(), 'jeecg-desform', '<表code>_design.json')
-os.makedirs(os.path.dirname(path), exist_ok=True)
+path = os.path.join(app_tmpdir('patch'), '<表code>_design.json')   # <该应用的工作目录>/patch/
 json.dump(design, open(path, 'w', encoding='utf-8'), ensure_ascii=False)
 save_design_from_file('<表code>', path)
 ```

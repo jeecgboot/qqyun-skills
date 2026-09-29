@@ -281,7 +281,7 @@ if result.get('success'):
 > `query_flow` 按名只返回最新一条，于是「改的/回读的是新的那条、校验器查的是全部副本」，
 > 表现为**反复修但违例不消失**（详见 `node-contract.md` 自检段的同名副本陷阱）。
 
-**1. 结构探查一次做完全员共享。** 主会话先跑一个探查脚本：`fetch_app_forms` + 涉及各表 `fetch_form_fields`，把 `{表code: {字段中文名: {model,type,options}}}` dump 成 JSON 放 `{tmpdir}/jeecg-desform/`（如 `probe_<应用名>.json`）。各流程脚本直接读文件取 model，**禁止**每条流程重复 fetch；跨进程（子代理）无法复用会话缓存，共享文件是唯一的复用通道。
+**1. 结构探查一次做完全员共享。** 主会话先跑一个探查脚本：`fetch_app_forms` + 涉及各表 `fetch_form_fields`，把 `{表code: {字段中文名: {model,type,options}}}` dump 成 JSON 放该应用的工作目录（`lowapp/scripts/skill_temp_path.py --app-id <app_id> -f …`，如 `probe_<应用简称>.json`，简称用英文/拼音缩写如 `probe_jxc.json`，禁中文）。各流程脚本直接读文件取 model，**禁止**每条流程重复 fetch；跨进程（子代理）无法复用会话缓存，共享文件是唯一的复用通道。
 
 **2. 代理拆分：一代理 ≤2 条流程；预估 >15 节点的流程独占一个代理。** 简单流程（按钮改当前行、单 get_one+data_update、删除触发记录）模板内嵌 prompt，代理零文档阅读；只有大流代理才允许 grep node-types。
 
@@ -333,7 +333,7 @@ chk = check_app_flows(api_base, token, low_app_id, tenant_id, expected_names=[..
 assert not chk['missing'], chk['missing']
 ```
 
-**5. 收尾必查**：`check_app_flows` 的 missing 为空；子流程 `/act/process/list` 的 `key`（注意引擎列表键名是 `key` 不是 `processKey`）= `process<DBid>`。
+**5. 收尾必查**：`check_app_flows` 的 missing 为空；子流程定义 key = `process<DBid>` 已注册 —— **判据用 `extActProcess/queryById?id=<DBid>` 解 `processXml`**（`/act/process/list` 实测 read timeout / 返回空，拿它当判据会把已注册的整批报成未注册，只可作并集兜底；见 gotchas #47 ③a/③c）。
 
 ---
 
@@ -559,7 +559,7 @@ for k in ('getType', 'sourceTaskId', 'relationField'):
 
 `formTableList` 该条：`formTableCode/Name`=目标表、`formTableMainCode`=源表、`selectType=3`、`isSubStart:true`。漏 delegate → deploy 报 `flowable-servicetask-missing-implementation`。
 
-**④ 子流程发布：** save → `register_subprocess_id` → 再 POST saveFlow（urlencoded）带 `id`+`customProcessId=<DBid>`+`processKey=process<DBid>`+`startType=subEvent` → deploy → `/act/process/list` 出现 key=`process<DBid>`。机理见上文 subEvent #47，不要打开 gotchas 全文。
+**④ 子流程发布：** save → `register_subprocess_id` → 再 POST saveFlow（urlencoded）带 `id`+`customProcessId=<DBid>`+`processKey=process<DBid>`+`startType=subEvent` → deploy → **`queryById` 解 `processXml` 验 key=`process<DBid>`**（⛔ 不用 `/act/process/list`，它 read timeout 会整批误报；见 gotchas #47 ③a/③c）。机理见上文 subEvent #47，不要打开 gotchas 全文。
 
 **⑤ 审批人兜底：** username/realname 精确匹配点名 → 角色按 **roleName** 精确匹配 → 否则 `candidateUser` `admin` + 该用户 `realname`。禁止把 `roleCode=admin`（超管角色）当成「管理员」。
 > ⚠️ **approverIds 写裸账号**（`["admin"]`），**不能带 `user.` 前缀**（前缀是消息节点 `toUserIds` 的写法）；办理人=**表单字段**时 `approverType` 用**复数 `candidateUsers`** + `assigneeByVariable`，且 **select-depart 字段必须加 `isNeedTranslateToUserIds: true`**。四种形态写错都**不报错、只是任务谁都收不到** → 见 gotchas #90（含 `/act/task/myTodo` 正反例验收法）。
@@ -719,7 +719,7 @@ pj.setdefault('formTableList', []).insert(0, {'formTableId': f'form_{op_id}_func
 # ③ 顺序（先子后主）：建 subEvent 子流程（三层 startType，root/attr.formTableList[0] 均为 search 形态；
 #    子流程内唯一节点 message_system：attr receiveType='user'/title/templateContext/toUserIds=var_entry + 节点顶层双写）
 #    → 发布配方 gotchas #47：回查 updateCount → POST saveFlow 补 customProcessId/processKey=process<DBid> → PUT deployProcess
-#    → 校验 /act/process/list 出现 key=process<DBid> → 再 save_flow+deploy 主流程
+#    → 校验 queryById 解 processXml 得 key=process<DBid>（⛔ 不用 /act/process/list）→ 再 save_flow+deploy 主流程
 #    回读断言：主链 == ['function','data_get_more','data_update','callActivity']、callActivity.customProcessId==子DBid 且 isMulti、
 #    ⚠️ du.attr.formTableId == f'form_{gm_id}_<表code>'、子流程三层 subEvent 且消息收件人 var 含 nodeType='search' 条目
 ```

@@ -49,6 +49,19 @@ ROLE_ID = 'f6817f48af4fb3af11b9e8bf182f618b'
 _FORM_CACHE = {}
 
 
+def app_tmpdir(sub=None, app_id=None):
+    """敲敲云 skill 临时目录：该应用的工作目录（jeecg-lowcode/<英文简称>_<时间戳>/）下的 [<sub>/]
+
+    app_id 缺省取 init_lowapp 注入的当前应用；没有应用上下文时落 `_noapp/`，
+    **不往 jeecg-lowcode 根目录散放**（见 SKILL.md「临时目录标准」：一次建应用的全部文件
+    都在它的工作目录里，按 app.json 的 app_id 找回；没有工作目录才落 jeecg-lowcode/<app_id>/）。
+    """
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from skill_temp_path import app_workdir   # 工作目录规则的唯一实现
+    return app_workdir(app_id or _LOW_APP_ID, sub)
+
+
 def clear_cache():
     """清空 Python 内存缓存"""
     global _FORM_CACHE
@@ -93,6 +106,8 @@ def _is_loopback_host(hostname):
 
 def _urlopen(req, timeout=None, context=None):
     """urlopen；loopback 强制直连，避免 http_proxy/Clash 把 127.0.0.1 打成 502。"""
+    if timeout is None:                # 默认 300s：以前不设，后端卡住时无限等（进销存-速测17 挂 3h20m）
+        timeout = 300
     ctx = _SSL_CTX if context is None else context
     host = urllib.parse.urlparse(req.full_url).hostname
     if _is_loopback_host(host):
@@ -202,6 +217,52 @@ def _cache_remove(code):
     _FORM_CACHE.pop(code, None)
 
 
+# ── 「表单编码 → ID」缓存的**跨进程**共享 ────────────────────────────────
+# 起因（2026-09-24 实测）：预热接口
+#   GET /online/lowApp/miniflow/tenantAppFormList?tenantId=…
+# 的耗时**随租户表数线性增长** —— 本租户 154 张表时稳定 11~14.5 秒
+# （只返回 19KB，疑似服务端 N+1）。而不少兄弟脚本是「**一个操作 spawn 一个子进程**」
+# 的结构，每个子进程都要重新 init → 重新预热，于是这一次 12 秒被乘以 N：
+#   · build_app 字典段  = 32 个子进程 → 白等 ~800 秒（已改 prewarm=False 消除）
+#   · build_app 建壳段  = 47 个子进程 → 白等 ~583 秒（占该段 668 秒的 87%）
+# 修法：父进程预热**一次** → 落盘 → 子进程读环境变量直接灌缓存，跳过预热。
+FORM_CACHE_ENV = 'JEECG_FORM_ID_CACHE'
+
+
+def dump_form_cache(path):
+    """把当前「表单编码 → ID」缓存落盘，供子进程用 load_form_cache 直接灌入。
+
+    子进程只要 `init_lowapp(...)` 时环境变量 `JEECG_FORM_ID_CACHE` 指向这个文件，
+    就会跳过那次 11~14 秒的预热。返回写出的条数；失败返回 0（不影响正确性）。
+    """
+    try:
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(_FORM_CACHE, fh, ensure_ascii=False)
+        return len(_FORM_CACHE)
+    except Exception:                                              # noqa: BLE001
+        return 0
+
+
+def load_form_cache(path):
+    """从 dump_form_cache 写出的文件灌缓存。返回缓存总条数；失败返回 0。
+
+    **只增不减**：文件里没有的表就是没命中，get_form_id 会走自己的慢路径兜底，
+    所以「父进程落盘之后又新建了表」导致的缓存偏旧是安全的 —— 新表本来就查不到，
+    正好触发正常的新建/查询流程。
+    """
+    try:
+        with open(path, encoding='utf-8') as fh:
+            d = json.load(fh)
+    except Exception:                                              # noqa: BLE001
+        return 0
+    if not isinstance(d, dict):
+        return 0
+    for code, v in d.items():
+        if isinstance(v, dict) and v.get('id'):
+            _FORM_CACHE[code] = {'id': v['id'], 'uc': v.get('uc') or 0}
+    return len(_FORM_CACHE)
+
+
 def _find_by_list(code):
     """通过 list API 全量搜索 + 精确匹配 desformCode 查找表单（按创建时间倒序，取最新的）"""
     page = 1
@@ -245,10 +306,60 @@ def _verify_form_exists(form_id):
         return False
 
 
+def prewarm_form_ids(tenant_id=None):
+    """★ 一次调用把「表单编码 → 表单 ID」灌满 `get_form_id` 的缓存。
+
+    **建后套件 / 审计类脚本必须在 `init_lowapp()` 之后调一次**（已由
+    `desform_lowapp_utils.init_lowapp()` 默认调用，一般不用手写）。
+
+    为什么必须预热：`get_form_id()` 缓存未命中时的路径是
+        `queryByCode`(0.10s) → `_verify_form_exists()` → `/desform/list` 翻页
+    而 `/desform/list` 返回的是**全租户**的表 —— 本机实测 1790 条 / 18 页 /
+    单页 2.4 MB / **单页 11~21 秒**。于是每一张没缓存的表都要白等十几秒，
+    47 张表的 probe / verify / audit 就是 5~6 分钟起步，而真正要的数据 0.1 秒就有。
+
+    本函数改用 `/online/lowApp/miniflow/tenantAppFormList`（**一次**返回本租户
+    全部应用的 `{code, id, name}`），直接灌缓存，之后 `get_form_id()`
+    全程命中、不再翻 `/desform/list`。
+
+    ⚠️ **它的耗时随租户表数线性增长 —— 2026-09-24 更正：不是「0.10s」。**
+    本租户 154 张表时实测**稳定 11~14.5 秒**（只返回 19KB，疑似服务端 N+1）。
+    早先写的「实测 0.10s」差了 100 倍以上，由此推出「一次十几毫秒、多调几次无所谓」
+    的错误结论，踩了两个坑：
+      · `build_app` 字典段「一个字典一个子进程」→ 32 次预热 ≈ 800 秒
+        （该段 860s 的 93%，已改 `prewarm=False` 消除）
+      · `create_linked_worksheets` 「一张表一个子进程」→ 47 次预热 ≈ 583 秒
+        （建壳段 668s 的 87%，已用 dump_form_cache/环境变量共享消除）
+    **结论：只要一次运行里会 spawn N 个子进程，就不要让每个子进程各自预热** ——
+    父进程预热一次 + `dump_form_cache` + 设 `FORM_CACHE_ENV`。
+
+    失败不影响正确性（只是退回慢路径），故整体吞异常、返回 0。
+    """
+    tid = str(tenant_id or _TENANT_ID or '')
+    path = '/online/lowApp/miniflow/tenantAppFormList'
+    if tid:
+        path += '?tenantId=%s' % tid
+    try:
+        r = api_request(path, method='GET')
+    except Exception:                                             # noqa: BLE001
+        return 0
+    n = 0
+    for ap in (((r or {}).get('result') or {}).get('apps') or []):
+        for f in (ap.get('desforms') or []):
+            code, fid = f.get('code'), f.get('id')
+            if code and fid:
+                _cache_put(code, fid, f.get('updateCount') or 0)
+                n += 1
+    return n
+
+
 def get_form_id(code):
     """通过表单编码获取表单 ID（带缓存），返回 (form_id, update_count) 或 (None, None)
 
     查找顺序: 缓存 → queryByCode(带验证) → list 全量搜索
+
+    ⚠️ 缓存未命中时很贵：`_verify_form_exists()` 会翻 `/desform/list`，单页 11~21 秒。
+    批量读写多张表之前先调 `prewarm_form_ids()` 把缓存灌满。
     """
     # 1. 缓存（已验证过的）
     fid, uc = _cache_get(code)
@@ -343,7 +454,14 @@ def get_form_fields(form_code):
         if not key:
             key = model
         if key in fields:
-            key = f'{key}#{model}'
+            old = fields[key]
+            if old.get('type') == 'divider' and info.get('type') != 'divider':
+                # 段标题 divider 排在字段前面，以前「先到先得」占住中文名 → 按名解析的按钮条件/新建关联
+                # 全取到 divider（2026-09-24 CRM-速测16：开票申请按钮条件绑到分隔符，按钮永不显示，四道闸门+冒烟全没报）。
+                # 名字让给数据控件，divider 改挂 `名#model`。
+                fields[f'{key}#{old.get("model") or ""}'] = old
+            else:
+                key = f'{key}#{model}'
         if parent_name:
             info = dict(info)
             info['parent'] = parent_name
@@ -2175,6 +2293,9 @@ def _collect_types(items):
         if t == 'sub-table-design' and 'columns' in item:
             for col in item['columns']:
                 types.update(_collect_types(col.get('list', [])))
+        if t == 'tabs' and 'panes' in item:          # 页签里的控件也要算（否则页签内的 markdown 同样加载不到脚本）
+            for pane in item['panes'] or []:
+                types.update(_collect_types(pane.get('list', [])))
     return types
 
 
@@ -2912,7 +3033,8 @@ def export_design_json(code, output_path=None):
     if not output_path:
         tmp = tempfile.NamedTemporaryFile(
             mode='w', suffix='.json', delete=False,
-            encoding='utf-8', prefix=f'desform_{code}_'
+            encoding='utf-8', prefix=f'desform_{code}_',
+            dir=app_tmpdir('export')
         )
         output_path = tmp.name
         json.dump(design_json, tmp, ensure_ascii=False, indent=2)
@@ -3045,6 +3167,23 @@ def save_design_from_file(code, file_path):
 
     # 自动填充 linkData 的 sqParam
     design_json = _auto_fill_linkdata_sqparam(design_json)
+
+    # 补齐 config.hasWidgets：后端按它**按需加载**大控件脚本（markdown→ToastUI、editor→tinymce、map…，
+    # 见 DesignFormServiceImpl.updateHasWidgets）。设计器保存时会重算，脚本整单保存不会 ——
+    # 补丁新加/改成 markdown 的控件因此只剩标签、编辑器渲染不出来（2026-09-24 萌萌科技任务管理实测）。
+    # 只并不删：多列一个类型最多多加载一个脚本；为空时后端自己递归算，不动。
+    _cfg = design_json.get('config')
+    if isinstance(_cfg, dict) and isinstance(_cfg.get('hasWidgets'), list):
+        _cfg['hasWidgets'] = sorted(set(_cfg['hasWidgets']) | _collect_types(design_json.get('list') or []))
+
+    # 段内控件全是「新增时隐藏」→ 段标题也新增时隐藏。布局阶段算过一次，但字段的 hiddenOnAdd 常在
+    # 布局**之后**才加（建后套件 struct），那时段标题没人重算 → 新建时剩一条空标题
+    # （2026-09-24 申报-一句话6「审查评审与立项」）。放在保存通道里，任何整单保存都会重算。
+    try:
+        from regroup_layout import hide_empty_sections_on_add
+        hide_empty_sections_on_add(design_json.get('list') or [])
+    except ImportError:
+        pass
 
     # 获取最新 updateCount（避免版本冲突）
     form_data = query_form(code)

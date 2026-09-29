@@ -105,7 +105,7 @@ for _path in [os.getcwd(), _SCRIPT_DIR]:
 
 from desform_utils import *
 from desform_utils import (_apply_half_layout, _apply_word_layout, _is_half_suitable,
-                           apply_group_layout)
+                           apply_group_layout, app_tmpdir)
 from desform_utils import LOWAPP_DISABLED_WIDGET_TYPES
 
 
@@ -850,11 +850,23 @@ def _post_process_widgets(fields, widgets):
                         print(f'  [自动解析] 公式 "{fd.get("name")}" {expr_field}: {val} → {resolved}')
 
         # 4. barcode: sourceModel 仅 main_registry
+        #
+        # 2026-09-24 修：sourceModel 的契约是**裸 model**（见 desform-widget-options.md
+        # 「barcode — 条码」节 `sourceModel: 数据源字段 model`；UI 建的同款控件落库也是裸 model），
+        # 与 formula.expression 的 `$model$` 形态相反。原先直接复用 _resolve_model_ref，
+        # 它恒返回 `$model$`，落库成 `$input_1789...$` —— 条码取不到数据源、渲染为空，
+        # 而 save 与回读全绿，只有人打开表单才看得出。现解析后剥掉 `$` 包裹。
+        # 同时兼容直接写中文名（不带 $），与 moneyField 的写法一致。
         if wtype == 'barcode':
             opts = inner.get('options', {})
             src = opts.get('sourceModel', '')
-            if src and '$' in src:
-                resolved = _resolve_model_ref(src, main_registry)
+            if src:
+                if '$' in src:
+                    resolved = _resolve_model_ref(src, main_registry).strip('$')
+                elif src in main_registry:
+                    resolved = main_registry[src][1]
+                else:
+                    resolved = src
                 if resolved != src:
                     opts['sourceModel'] = resolved
 
@@ -1017,7 +1029,8 @@ def main():
         # 写入临时文件（格式化 JSON）
         tmp = tempfile.NamedTemporaryFile(
             mode='w', suffix='.json', delete=False,
-            encoding='utf-8', prefix=f'desform_{form_code}_'
+            encoding='utf-8', prefix=f'desform_{form_code}_',
+            dir=app_tmpdir('export')
         )
         json.dump(design_json, tmp, ensure_ascii=False, indent=2)
         tmp.close()

@@ -73,6 +73,7 @@
 | **删盘删不掉 / 盘越建越多**（25 个目标建成 58 个） | 从 `menus` 文本里正则抓 pageId 抓错了列：列序是 `id/type/menuName/parentId/menuUrl`，**名称后那一列是 parentId（分组 id）**。对 drag 菜单 **`menuUrl` 才是 pageId**。判定：`delete-page` 传了分组 id → 静默不生效 → 每次重跑净增一批。正解用 `build_dashboards.py`，它在 `index_menus()` 里取 `menuUrl` 列 |
 | **建一批盘（≥5）** | 跑 `scripts/build_dashboards.py`（声明式 `dashboards.json`、单进程、非破坏、可断点续跑）。**禁止手搓编排器 + 禁止 `subprocess` 逐操作起进程 + 禁止 delete-then-create**——2026-09-15 实测手搓方案 25 张盘跑 42 分钟且攒出 58 个重复盘 |
 | 图形按钮第二行字被裁 | graphical h≈20×行数（`create.md`） |
+| **重跑 `add-buttons` 后盘上两组按钮、图整体错位**（同 specs 跑第二遍就叠一组，落 (0,0)、y 下移 +20） | 对已有盘**不幂等**，且 `finalize_page` 只在 `build_dashboards.py` 整链生效。正解＝`comp_ops delete --name 自定义按钮` → `add-buttons` → `comp_ops list` 核坐标（`create.md` 按钮段） |
 | 私自加字段被批 | 铁律：点名 dim/val 不存在先问 |
 | `--specs 必须是非空 JSON 数组` | `--specs-file` + `py -c json.dump` |
 | Token 401 | 重登后重跑 |

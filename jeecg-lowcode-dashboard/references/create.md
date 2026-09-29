@@ -162,8 +162,8 @@ $QQY edit-filter API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
    "ui": [{"comp": "文本", "text": "该盘的用途描述（一句业务话术，非盘名）",
            "style": "大字号,居中,整行"}],
    "charts": {                                   // ⚠️ 对象，不是数组
-     "<表单编码>": [ {"comp":"JNumber","title":"…","x":0,"y":0,"w":6,"h":17,"val":"…"},
-                     {"comp":"JLine","title":"…","x":0,"y":17,"w":24,"h":32,
+     "<表单编码>": [ {"comp":"JNumber","title":"…","x":0,"y":0,"w":6,"h":12,"val":"…"},
+                     {"comp":"JLine","title":"…","x":0,"y":12,"w":24,"h":28,
                       "dim":"订单签订日期","val":"销售订单金额(含税)/元","dateGroup":"3","queryRange":"all"} ]
    },
    "filters": [ {"title":"查询条件","place":"above",
@@ -194,7 +194,7 @@ python "$SKILL_REFS/scripts/build_dashboards.py" --api-base URL --token TOKEN \
 
 | 约束 | 症状 / 后果 |
 |---|---|
-| **`charts` 必须是以「表单编码」为键的对象**。写成数组、或拿表单**名**当键 → 整批失败，报 `'list' object has no attribute 'items'` | 16 张盘全挂 |
+| **`charts` 必须是对象、不能是数组** —— 写成数组 → `'list' object has no attribute 'items'`，整批失败。键写**表单编码或表单名都收**（引擎按「是否含中文」自动切 `--form-code`/`--form-name`），**但优先写编码**：`--form-name` 走应用内表单解析，`desform.lowAppId` 与应用 ID 不一致的环境会解析失败（2026-09-15 实测：52 表应用里 `--form-name 客户` 失败、`--form-code app_customer` 秒过），该表的图整批 FAIL，改 code 重跑 | 16 张盘全挂 |
 | ⛔ **`--dry-run` 不校验这一条，是假绿** —— 数组写法它照样打印 `OK:plan 盘名 → 图 N 表 / 查询 M`（它走的是只做计数的另一条路径）。**schema 不确定时先跑「一页一图」的最小 spec**，别一次铺满 | 代价从 1 张放大到 16 张 |
 | `ui` 项的键只有 `comp` / `text` / `style`。多写 `color` → 被当 `--color` 转发给 `add-ui` → `unrecognized arguments` → **整个 `ui` 段失败、该盘 FAIL**（其余盘不受影响） | 整批 FAIL |
 | `ui` 组件**追加在 `template` 数组末尾**，会渲染到盘底；`add-buttons` 忽略 `x/y`、固定落 (12,0)。**2026-09-22 起 `build_dashboards.py` 第 ③ 趟 `finalize_page` 自动收尾**：JText 搬到下标 0、其余组件整体下移、按钮组按规格 `x/y/w/h` 落位（日志 `OK:finalize 盘名 …`）。不要再手写搬运脚本；只对**已有盘**补标题时才需要手搬 | 盘标题跑到盘底（`app_audit` 报「盘标题不在数组下标 0」）、按钮组叠在图上 |
@@ -203,8 +203,86 @@ python "$SKILL_REFS/scripts/build_dashboards.py" --api-base URL --token TOKEN \
 `filters[].charts` 按**图标题**点名。同一页两张图标题互为子串（「对账数量」vs「对账数量2」）会判
 **同名多张**、整盘 FAIL → 标题取**互不为子串**的名字。
 
+> ⚠️ **`place:"top"` 不保证按钮排在上方 —— 必须给按钮组显式 `x/y/w/h`**（2026-09-23 实测）。
+> 需求写「第 1 行大标题、第 2 行 4 个按钮、第 3 行起才是图」时，只写
+> `{"rowNum":4,"btnType":"button","btnWidth":"divide","place":"top", …}` 建出来的是
+> **标题 → 4 张图 → 按钮组**：`finalize_page` 只把 JText 搬到下标 0，**按钮组仍排在盘底**
+> （实测 y = 最后一张图的底边）。`place` 这个键不参与落位。
+>
+> 正确做法二选一：
+> 1. **规格里给按钮组写 `x/y/w/h`**（`finalize_page` 会按它落位）——
+>    注意图表的 y 是**相对顶部**的，JText 收尾时会整体下移 10，所以按钮组 `y:0`≈落 10、
+>    图表首张写 `y:20`≈落 30；
+> 2. 建后整页搬数组：`queryById` 取 `template` → 把「自定义按钮」组件 `pop` 出来
+>    `insert(1, …)`，并按下表重排各组件的 `x/y/w/h/orderNum` → `POST /drag/page/edit`
+>    （`template` 是**字符串**，带 `X-Tenant-Id` + `X-Low-App-ID`）→ 回读核对顺序与坐标。
+>
+> **顺序以数组下标为准**（不是 y 坐标）——只改 y 不改下标，视觉对了但层叠顺序仍可能不对。
+> 2026-09-23 库存先进先出1942 首页实测：走第 2 条，回读为
+> `文本(0,0,24,10) → 按钮(0,10,24,20) → 图(0,30/62/94/130)`。
+
+> ⚠️ **`add-buttons` 对已有盘重跑不幂等（2026-09-29 实测，库存先进先出1942 首页）**：同一份 `--specs-file`
+> 跑第二遍会**追加一个全新的「自定义按钮」组件**（落 `(0,0)`），并把整页其它组件的 `y` **整体下移**（实测 +20），
+> 结果是盘上出现两组按钮、图表全部错位。
+> 上表那条 `finalize_page` 自动收尾（2026-09-22 起）**只在 `build_dashboards.py` 整链里生效** ——
+> 单独调 `add-buttons` 不受它保护，也没有「已有按钮就跳过」的判定。
+> **改已有盘的按钮 = 先删后加**：`comp_ops delete --name 自定义按钮` → `add-buttons` →
+> `comp_ops list` **重新核对全页坐标**（并确认没有第二个按钮组）。不要指望重跑覆盖。
+
+### 另外三条 schema 层硬约束（2026-09-22 进销存 16 盘实测，都是「预校验拦下、整盘不建」）
+
+| 约束 | 报错原文 | 怎么改 |
+|---|---|---|
+| ⛔ **一张盘只允许一个查询面板** | `盘「X」声明了 2 个查询面板（…、…）—— 一张盘只允许一个` | 多面板来自图跨了多张表。**按主表保留一个**，其余表那个条件**删掉或换到主表同名字段上**（如「客户名称」在明细表和对账单上都有 → 挂主表即可）。**不要为它拆盘** |
+| ⛔ **`comp` 必须是 QQY 清单里的 J 码** | `specs[0] 组件不在 QQY 清单: JMap` | 气泡地图是 **`JBubbleMap`**（不是 `JMap`）；地图族统一 `J*Map`：`JAreaMap`/`JBubbleMap`/`JHeatMap`/`JBarMap` |
+| ⛔ **`dateGroup` 只收 `1..7` 或按日/按月/按年** | `specs[1] dateGroup 非法: all` | **位置参数错位**：图没点名日期粒度时**别传 `dateGroup`**（省略即默认）。`"all"` 只属于 `queryRange` |
+
+> ⚠️ **`queryRange` 与 `dateGroup` 是两件事、两个合法值集**：`queryRange` = `all`/`year`/`month`/`week`；
+> `dateGroup` = `1..7` 或 `按日/按月/按年`。用「按位置传参」的助手函数时最容易把 `"all"` 灌进 `dateGroup`
+> （本轮就是这么挂掉一整盘的）。**建议一律写关键字参数**。
+
+> ⚠️ **宽度：`dashboards.json` 只接受「每排和 = 24」的整数**；需求若点名 7/9/8、10/8/6、15/9 这类
+> 非 6/8/12/24 档位，建得出来但垂直边对不齐（见上文「排版三条硬规则」）。
+> **需求里出现非标准宽度时，按同排等比例归一到 6/8/12/24**（7/9/8 → 8/8/8；10/8/6 → 8/8/8 或 12/6/6；
+> 15/9 → 12/12），别照抄。
+
+### 图表键全集 + 坐标被丢弃的四条规则（2026-09-23 进销存 16 盘实测）
+
+**`add-charts` 接受的键就这些**，多写的一律**不报错、静默忽略**（写成 `rows`/`vals`/`cols`
+这类别处见过的名字，等于该图没有 `val` → `specs[i] 缺少 val` → `sys.exit(1)` → **该盘 FAIL**）：
+
+```
+comp  title  x y w h  dim  val  grp  assistY  assistType
+calc  calcTitle  queryRange  queryField  customTime  dateGroup
+```
+
+- **`dim` / `val` 都收数组**（`"dim":["仓库名称","产品名称"]`）——**透视表的多行维、多指标全靠这个**，
+  没有 `rows`/`vals`/`cols`/`pivotType` 这类键（那是别的 BI 工具的词）。
+- **page 级只有 `name`/`group`/`ui`/`charts`/`filters`/`buttons`**；写 `tables` 之类会被**整个忽略**，
+  那些图一张都不会建、也**不会有任何提示**。
+- **单图没有 `filters` 键**——「这张卡只统计分类=潜在客户」表达不出来。要按分类拆计数就改用一张
+  `JBar`（`dim`=分类字段、`val=record_count`），别指望给 JNumber 挂条件。
+
+**规格给了 `x`/`y` 时会走 `_spec_layout_bad` 校验，不合格 → 坐标整份丢弃、静默改自动铺版**
+（日志仍打 `OK:`，只有盘长得跟你写的完全不一样）。四条判据：
+
+| 判据 | 阈值 | 后果 |
+|---|---|---|
+| **KPI（`JNumber`/`JIndicator`/`JCircle`/`JProgress`）高度超上限** | `h > 12`（`KPI_H=12`） | 卡被拉成大空框、数字贴底。**这一条最容易中**——图文档里 `JNumber h≈17` 是**手工 CLI 路径**的值，声明式路径会被拒，两种路径别混用 |
+| **图类高度不足** | `h < 20`（`CHART_H=20`） | 图例压在图上。半行图写 `h:28`（脚本自动铺版用的就是 28）、整行 `h:28~32` |
+| **某一行宽度和 > 24** | — | 组件重叠 |
+| **`y` 区间中间有空行** | — | 页面开天窗。**给了坐标就要把 y 区间铺满**：写字要连续（0-12-40…），中间不能留没人的整行 |
+
+> 稳妥写法：**KPI 一律 `h:12`，图一律 `h:28`，透视/宽表 `h:32`**，
+> y 按 `0 → 12 → 40 → 72` 这样累加（每行高度必须接上），每排 x 之和**正好** 24。
+> 拿不准就先写「一页一图」跑一遍，看日志有没有 `OK:finalize`，再铺满 16 页。
+
+> ⚠️ **`dashboards.json` 没有「多系列 / 按 X 分色」档位。** 需求写「多系列柱状图…按【分类】分色」时，
+> 规格里**表达不出来** → 要么退化单系列，要么回落 `comp_ops`/`set-chart-*` 建后补（成本高）。
+> **需求阶段就该问清楚**：分色维是不是必须。
+
 > ⚠️ **同一份看板规格往往有两份、键还不同，改一处必须同步改另一处**（2026-09-21 实测）：
-> - `dashboards.json`（喂本脚本）：`charts` 按**表单编码**分组
+> - `dashboards.json`（喂本脚本）：`charts` 按**表单编码**分组（**推荐**；中文表名也收，但 `lowAppId` 不一致的环境会解析失败，见「四条实测硬约束」）
 > - `app_spec.json`（喂 lowapp 的 `precheck` / `app_audit`）：`pages[].charts` 按**中文表名**分组
 >
 > 键写错，`precheck` 会报「看板「X」引用了不存在的表 `t5b96408`」。

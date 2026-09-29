@@ -139,9 +139,8 @@ def patch_parent_to_link_record(parent_code, sub_name, body, column_fields):
     if 'link-record' not in hw:
         hw.append('link-record')
     design.setdefault('config', {})['hasWidgets'] = hw
-    path = os.path.join(os.path.join(__import__('tempfile').gettempdir(), 'jeecg-desform'),
-                        f'{parent_code}_after_convert.json')
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import desform_utils as DU
+    path = os.path.join(DU.app_tmpdir('patch'), f'{parent_code}_after_convert.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(design, f, ensure_ascii=False, indent=2)
     save_design_from_file(parent_code, path)
