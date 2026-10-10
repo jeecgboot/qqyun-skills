@@ -25,6 +25,19 @@ _RULE_ALIAS = {
     '在范围内': 'range', '是其中一个': 'in', '不是其中一个': 'not_in',
     '包含任意': 'like_with_and', '为空': 'empty', '不为空': 'not_empty',
 }
+
+#: 数据过滤可用的**系统字段**（中文名 → model → 控件类型）。类型只影响「允许哪些 rule」，
+#: 时间落 `datetime` 走 `_RULES_NUM`；认不出的类型会退到 `_RULES_TEXT`（最宽），所以宁少勿错。
+_SYS_FILTER_FIELDS = (
+    ('创建人', 'create_by', 'select-user'),
+    ('更新人', 'update_by', 'select-user'),
+    ('修改人', 'update_by', 'select-user'),
+    ('创建时间', 'create_time', 'datetime'),
+    ('更新时间', 'update_time', 'datetime'),
+    ('修改时间', 'update_time', 'datetime'),
+    ('流程状态', 'bpm_status', 'select'),
+    ('所属部门', 'sys_org_code', 'select-depart'),
+)
 # 对齐 references/desform-filter-rules.md：类型 → (可用 rule, 默认 rule)
 _TEXT_TYPES = {'input', 'textarea', 'phone', 'email', 'auto-number'}
 _NUM_DATE_TYPES = {
@@ -147,6 +160,19 @@ def collect_filter_meta(code: str):
             'timestamp': False, 'activeValue': None, 'inactiveValue': None,
             'label_map': {},
         }
+    # ⚠️ **系统字段也能做数据过滤**（前端的「过滤」字段选择器里有这些，原应用就用它）。
+    # 以前这里只收设计树里的业务字段，需求写「创建时间 不为空」直接抛
+    # 「数据过滤未找到字段: 创建时间」（2026-09-30 生产管理「产成品异常处理单」视图实测）。
+    # 类型的口径对齐 `maybe_model` 的 `_SYS_FIELD_NAMES`；时间用 datetime（落在
+    # `_RULES_NUM`，eq/ne/gt/ge/lt/le/range/empty/not_empty 都能用）。
+    for nm, model, ftype in _SYS_FILTER_FIELDS:
+        meta = {'model': model, 'key': None, 'type': ftype, 'name': nm,
+                'timestamp': False, 'activeValue': None, 'inactiveValue': None,
+                'label_map': {}}
+        by_name.setdefault(nm, meta)
+        by_model.setdefault(model, meta)
+        by_name.setdefault(model, meta)      # 直接写 create_time 也认
+
     return by_name, by_model, by_key
 
 
@@ -216,18 +242,23 @@ def coerce_option_val(val, meta: dict, orig_text_holder: list):
             return mapping[val]
         return val
     if t in ('radio', 'select', 'checkbox', 'table-dict', 'select-tree'):
+        # ⚠️ 多值（`in`/`not_in`）的形态是**逗号串、禁数组**（见 `desform-filter-rules.md`
+        # 「条件值形态实测」：数组形态编辑器不回显）。以前这里只整串去查 label 表 ——
+        # 「质检状态 是其中一个 部分合格、全部合格」这种多值查不到 → **原样把中文文案落了库**，
+        # 条件恒不成立、还看不出来（2026-09-30 生产管理 2 条视图实测）。现在按分隔符拆开逐个翻。
         if isinstance(val, list):
+            parts = [str(x) for x in val]
+        elif isinstance(val, str) and re.search(r'[,、]', val):
+            parts = [x.strip() for x in re.split(r'[,、]', val) if x.strip()]
+        else:
+            parts = None
+        if parts is not None:
             mapped, texts = [], []
-            for x in val:
-                sx = str(x)
-                if sx in label_map:
-                    mapped.append(label_map[sx])
-                    texts.append(sx)
-                else:
-                    mapped.append(x)
-                    texts.append(sx)
+            for sx in parts:
+                mapped.append(label_map.get(sx, sx))
+                texts.append(sx)
             orig_text_holder.append(','.join(texts))
-            return mapped
+            return ','.join(str(m) for m in mapped)
         sx = str(val)
         if sx in label_map:
             orig_text_holder.append(sx)

@@ -40,6 +40,9 @@ init_lowapp(A.api_base, A.token, tenant_id=TID, app_id=AID)
 NOT_FIELD = ('divider', 'tabs', 'card', 'grid', 'text')
 
 
+# 关联记录展示列可以是系统字段（需求「展示…创建时间、修改时间」；线上同形态，2026-09-28 生产管理）
+SYS_SHOW = {'create_time', 'update_time', 'create_by', 'update_by'}
+
 def walk(n, out=None):
     out = [] if out is None else out
     if isinstance(n, dict):
@@ -205,9 +208,9 @@ for t, ws in W.items():
                 for sf in (o.get('showFields') or []):
                     if not isinstance(sf, str):
                         bad(t, w, 'showFields 元素必须是裸 model 字符串，现为 %s' % type(sf).__name__)
-                    elif sf not in MODELS[tt]:
+                    elif sf not in MODELS[tt] and sf not in SYS_SHOW:
                         bad(t, w, 'showFields 含 %s，目标表「%s」无此字段' % (sf, tt))
-                    elif BYMODEL[tt][sf]['type'] in NOT_FIELD:
+                    elif sf in BYMODEL[tt] and BYMODEL[tt][sf]['type'] in NOT_FIELD:
                         bad(t, w, 'showFields 混进了非数据控件「%s」' % BYMODEL[tt][sf].get('name'))
                 twm = o.get('twoWayModel')
                 if twm:

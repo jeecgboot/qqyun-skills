@@ -166,6 +166,7 @@ for t, jobs in TO_LINKFIELD.items():
 
 # ── 3. 子表转换：只动 isSubTable / model / 两侧 twoWayModel；不碰汇总 linkTable ──
 OLD_MODELS = {}
+NEW_OF = {}          # 旧 model -> 新 sub_table_design_ model
 for master, mf, det_t, det_f in SUBTABLES:
     mw, dw = find(master, mf, 'link-record'), find(det_t, det_f, 'link-record')
     if mw is None or dw is None:
@@ -179,6 +180,7 @@ for master, mf, det_t, det_f in SUBTABLES:
     do['showMode'], do['showType'], do['twoWayModel'] = 'single', 'card', new_model
     if old_model != new_model:
         OLD_MODELS[old_model] = (master, mf)
+        NEW_OF[old_model] = new_model
         note(master, '子表转换「%s」→ %s' % (mf, new_model))
 
 # ── 4. 记录范围 ──
@@ -305,6 +307,18 @@ for t, m in RENAME.items():
             continue
         w['name'] = new
 
+# ── 子表换名的引用面：跨表 showFields / filters / 条件等所有「"旧model"」一并改成新 model ──
+# 2026-09-28 生产管理：产成品异常处理单.产成品质检申请单 的 showFields 引用了「需质检的产成品」旧 model，
+# 本脚本只报「旧子表model残留 1」却不给位置也不修；汇总 linkTable 存的是 key，不受影响。
+for _t in list(DESIGNS):
+    _s = json.dumps(DESIGNS[_t], ensure_ascii=False)
+    _s2 = _s
+    for _o, _n in NEW_OF.items():
+        _s2 = _s2.replace('"%s"' % _o, '"%s"' % _n)
+    if _s2 != _s:
+        DESIGNS[_t] = json.loads(_s2)
+        NOTES.append('引用改名：%s 里指向旧子表 model 的引用已改成新 model' % _t)
+
 # ── 保存：只存真正变了的表 ──
 def _dump(x):
     return json.dumps(x, sort_keys=True, ensure_ascii=False)
@@ -336,6 +350,8 @@ for t in sorted(CHANGED):
 # 旧子表 model 不得在已加载的设计里残留（跨表 showFields / filters 引用）
 blob = _dump({t: DESIGNS[t] for t in DESIGNS})
 dangling = [m for m in OLD_MODELS if m in blob]
+for _m in dangling:
+    NOTES.append('! 旧子表 model 残留：%s（%s.%s）' % ((_m,) + tuple(OLD_MODELS[_m])))
 
 # 已建流程若引用了旧子表 model，转换后条件/取数悬空且 save/deploy/契约/app_audit 全绿，只有冒烟抓得到
 # （2026-09-22 销售管理 R2 实测：build_app --flows 先建了流程、SUBTABLES 后转子表）。这里扫全部 processJson。

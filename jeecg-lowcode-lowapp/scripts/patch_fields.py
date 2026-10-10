@@ -359,6 +359,28 @@ class Engine(object):
             show_missing = [s for s, i in show_hits if not i]
             hide_on_add = bool(lk.get('新增时隐藏'))
 
+            # 「批量选择添加」：需求写「手动添加、批量选择添加 X」→
+            #   createMode = {add:true, select:true, params:{selectLinkModel: 目标表上 X 字段的 model}}
+            # X 是**目标表（明细表）自己的**一个关联字段，批量选择时按它去挑记录。
+            # 规格两种写法：`"批量添加": "成品库"`（手动添加恒开，默认）或
+            # `"批量添加": {"字段": "成品库", "手动添加": false}`（需求只写了批量那一档时）。
+            # 2026-10-09 生产管理实测：这一档**12 条全丢** —— 能力在 postbuild_struct §5，
+            # 但它吃的是 struct_cfg.py 里手写的 CREATE_MODE 清单，本工程的生成器从没喂过；
+            # 而 postbuild_verify 只在 select==true 时才查绑定 → 一路绿灯（用户点到才发现）。
+            _b = lk.get('批量添加')
+            if isinstance(_b, dict):
+                batch_field, batch_manual = _b.get('字段'), bool(_b.get('手动添加', True))
+            else:
+                batch_field, batch_manual = (_b or None), True
+            batch_model = None
+            if batch_field:
+                bi = self.src_info(tgt, batch_field)
+                if bi:
+                    batch_model = bi['model']
+                else:
+                    self._gap(fname, fld, '批量添加 绑定字段 %s 在目标表「%s」上没就位'
+                              % (batch_field, tgt))
+
             # ① 关联记录本身
             w = find_widget(design, fld)
             if w is not None:
@@ -375,6 +397,14 @@ class Engine(object):
                     if hide_on_add and not opts.get('hiddenOnAdd'):
                         opts['hiddenOnAdd'] = True
                         fixed = True
+                    if batch_model:
+                        want_cm = {'add': batch_manual, 'select': True,
+                                   'params': {'selectLinkModel': batch_model}}
+                        cur_cm = opts.get('createMode') or {}
+                        if (not cur_cm.get('select')
+                                or (cur_cm.get('params') or {}).get('selectLinkModel') != batch_model):
+                            opts['createMode'] = want_cm
+                            fixed = True
                     if fixed:
                         done += 1
                 if show_missing:
@@ -415,6 +445,12 @@ class Engine(object):
                     for _w in iter_widgets([res[0]]):
                         if _w.get('type') == 'link-record':
                             _w.setdefault('options', {})['hiddenOnAdd'] = True
+                if batch_model:     # 规格 `批量添加`：批量选择添加 + 绑定明细表上的那个关联字段
+                    for _w in iter_widgets([res[0]]):
+                        if _w.get('type') == 'link-record':
+                            _w.setdefault('options', {})['createMode'] = {
+                                'add': batch_manual, 'select': True,
+                                'params': {'selectLinkModel': batch_model}}
                 append_widget(design, res[0], seq); seq += 1
                 self._register(fname, res[0])
                 key = res[1]
@@ -428,6 +464,13 @@ class Engine(object):
             #   `'view'`（仅显示）既不落库、也不能作流程条件 —— 引擎侧会静默取到空值。
             #   需求**明写「仅显示」**的，在这条关联上列进 `仅显示`（名字也要在 带出/带出映射 里），
             #   落成 view（以前只能建后 OPT_FLAGS 改，app_audit 再报违例，销售-速测18 4 条）。
+            #   ⚠️ 这里的「默认 'save'」是**本函数的实现默认值**（你没声明 `仅显示` 它就 save），
+            #   **不是规格该怎么写**。规格口径见 `references/app-spec.md`「需求原文的默认读法」第 1 条 /
+            #   `app-prompt-skeleton.md` 第 11 条：**需求没写「存储数据（模式）」的一律列进 `仅显示`**，
+            #   只有流程要拿来定位/判断/计算、或被公式/汇总引用的才落 save。2026-09-30 生产管理：
+            #   我照这句「默认 save」把 41 条未标注的带出字段全落成了 save，整批错（真机 41 条要刷回 view）。
+            #   改口径后**必须单独刷真机** —— 下面 `if find_widget(design, local_name): continue`
+            #   见控件已存在就跳过，**不会更新 saveType**。
             if not key:
                 continue
             wanted = [(sf, sf) for sf in (lk.get('带出') or [])]
@@ -768,15 +811,18 @@ class Engine(object):
             if not w:
                 self.gaps.append({'table': fname, 'field': fld, 'reason': '自动编号：控件不存在'})
                 continue
-            prefix, digits, with_date = (list(rule) + [None, None, None])[:3]
+            prefix, digits, with_date, reset = (list(rule) + [None, None, None, None])[:4]
+            # 第 4 项 = 是否「每期重置」。以前写死 reset=1 + continue=True，需求写「不重置」的
+            # 流水号全被建成每期重置（2026-09-28 生产管理与线上对比：12 个编号全错，线上 reset=0）。
+            reset = 1 if reset in (True, 1, '每期重置', '重置') else 0
             rules = []
             if prefix:
                 rules.append({'type': 'text', 'text': prefix, 'value': prefix})
             if with_date:
                 rules.append({'type': 'create_date', 'dateFormat': 'yyyyMMdd',
                               'formatCustom': 'yyyyMMdd', 'format': 'yyyyMMdd'})
-            rules.append({'type': 'number', 'mode': 2, 'start': 1, 'reset': 1,
-                          'length': digits or 4, 'continue': True})
+            rules.append({'type': 'number', 'mode': 2, 'start': 1, 'reset': reset,
+                          'length': digits or 4, 'continue': False})
             o = w.setdefault('options', {})
             if o.get('numberRules') == rules:                  # 已设好 → 不重复写
                 continue

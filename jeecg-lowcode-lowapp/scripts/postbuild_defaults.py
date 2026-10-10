@@ -162,6 +162,21 @@ def static(t, name, val, dict_name=None):
         if not items or val not in items:
             MISS.append('%s.%s 静态值「%s」不在字典「%s」里' % (t, name, val, dict_name)); return
         v = items[val]                       # 字典字段存落库值（序号串），不是文案
+    else:
+        # 不绑字典的**静态下拉/单选**：也要把文案翻成控件自己的选项 value。
+        # 2026-09-30 生产管理实测：计划生产订单的 订单类型/发货方式/销售合同类型/产品类型/有无订单
+        # 等 40 个字段的默认值全落成了中文文案（选项值是 '0'/'1'）—— 表单上看着是选中的，
+        # 一保存就存成中文：日历/列表视图按值筛、流程按值比，全部对不上。
+        opts = ((w.get('options') or {}).get('options') or [])
+        labels = {str(o.get('label')): o.get('value') for o in opts
+                  if o.get('label') is not None}
+        values = {str(o.get('value')) for o in opts}
+        if opts and str(val) in labels and str(labels[str(val)]) != str(val):
+            v = labels[str(val)]
+        elif opts and str(val) not in values and str(val) not in labels:
+            MISS.append('%s.%s 静态值「%s」不在该字段的选项里（选项：%s）'
+                        % (t, name, val, '、'.join(str(o.get('label')) for o in opts)))
+            return
     w.setdefault('options', {})['defaultValue'] = v
     w.pop('advancedSetting', None)           # 空的高级默认值会盖掉普通默认值
     TOUCHED.append((t, name))

@@ -760,6 +760,35 @@ def approval_tables_live(app, app_id):
     return out
 
 
+def preflight_enabled(app_id):
+    """开跑前的**启用位预检**：`openStatus` / `processStatus` 不全为 1 的流程**一条都不会触发**。
+
+    症状是「单造出来了、目标字段没变」，看着像流程拓扑/引擎不支持 —— 2026-09-30 实测在进销存上
+    照这个假象白查了一轮（当时刚被 `engine-contract.md` 4-b 的旧结论带偏）。先把没启用的摆出来。
+    只读；失败只 WARN，不拦跑用例。返回未启用的流程名列表。"""
+    try:
+        from desform_utils import api_request
+        r = api_request('/act/process/extActProcess/listProcess',
+                        params={'pageNo': 1, 'pageSize': 1000, 'lowAppId': app_id}, method='GET')
+        recs = ((r or {}).get('result') or {}).get('records') or []
+    except Exception as ex:                       # noqa: BLE001
+        log('  WARN: 启用位预检失败（不影响跑用例）：%s' % str(ex)[:80])
+        return []
+    off = [x.get('processName') for x in recs
+           if str(x.get('openStatus')) != '1' or str(x.get('processStatus')) != '1']
+    if off:
+        log('')
+        log('!! 启用位预检：本应用 %d / %d 条流程**未启用**（openStatus/processStatus 不全为 1）'
+            % (len(off), len(recs)))
+        log('   这些流程**一条都不会触发**：用例会表现成「单造出来了、目标字段没变」，')
+        log('   极易误判成流程结构错或「引擎不支持这个拓扑」。先启用再解读失败。')
+        log('   未启用：%s%s' % ('、'.join(str(n) for n in off[:8]), ' 等' if len(off) > 8 else ''))
+        log('   启用：GET /act/process/open/{processKey}（路径参数是 processKey，不是 DB id）')
+        log('   ⛔ 别用 close 停用 —— 它永久拆掉触发注册，open 救不回来，只能删了重建。')
+        log('')
+    return off
+
+
 def approval_tables(flows_path):
     """「新增即进审批/填写」的表：造一条就会留下一个没法用 API 完成的待办。"""
     if not flows_path:
@@ -925,6 +954,7 @@ def main():
     a = ap.parse_args()
 
     init_lowapp(a.api_base.rstrip('/'), a.token, tenant_id=str(a.tenant_id), app_id=str(a.app_id))
+    preflight_enabled(str(a.app_id))               # 没启用的流程一条都不触发，先报出来
     cfg = {}
     with open(a.config, encoding='utf-8') as fh:
         exec(compile(fh.read(), a.config, 'exec'), cfg)

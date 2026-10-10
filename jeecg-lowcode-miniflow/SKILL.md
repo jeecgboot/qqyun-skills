@@ -68,6 +68,7 @@ description: JeecgBoot 简流（MiniFlow）设计器 AI 自动创建器。Use wh
 | 新建**「按日期字段触发」壳**（dateFieldEvent：给工作表+日期字段+时刻如"下午三点"，没说触发后要做什么）；**或带触发条件**（「…等于今天且医生等于管理员」等记录级过滤） | **直接跑 `scripts/timer_job_runner.py datefield --tenant <租户id> --app <id或名称> --table <工作表名> --field <日期字段中文名> --at 15:00 [--conds "医生=eq:管理员,状态=eq:待确认"]`**（argv 化；`--execute` 1当天/2前/3后、`--cycle-type` 1不重复/2每年/3每月/4每周、`--plus/--plus-unit` 分钟/小时/天；防呆+双回读内嵌，2026-09-09 建流实证）。**--conds 为全规则 DSL**（2026-09-10 扩展，序列化铁律内嵌：行独立雪花 id、组 matchType 大写）：eq/ne/gt/ge/lt/le/like(全模糊)/left_like/right_like/range(在范围内)/in/not_in/empty/not_empty；字段族=文本/数值/金额/日期/时间/下拉/单选/多选/人员/部门/岗位/组织角色/省市区/开关/他表字段/关联记录/系统字段(创建人·创建时间·修改人·修改时间)；**日期字段条件行 runner 直接支持**——`预约日期=eq:今天` 自动落 variable 形态(valueType:3+三键系统变量对象，2026-09-09 UI 手工补行实证)，字面量日期(如 2026-09-09)自动转毫秒 int；到期调度 triggerField+executeType 与日期行并存；属于/在范围 多值用竖线分隔——均**禁止探查轮**（2026-09-09 用户手工修复实证，细节见 trigger-types.md dateFieldEvent 节末）。⚠️ **--conds 白名单外 6 类控件**（`rate` 评分 / `color` 颜色 / `slider` 滑块 / `phone` 手机号 / `email` 邮箱 / **`select-depart-post` 部门+岗位联动**）仅支持 为空/不为空，且 runner **逐字段报错、一次只报一个**——**命中即两段式**（① runner 建支持行 ② 一条脚本回读 startCondition 追加 + 重排 + save/deploy + 回读），**禁止喂给 runner 反复试跑**；**颜色控件不支持筛选**，勿为其建条件行（2026-09-10 用户定论）。⛔ 时刻默认 15:00、存量同名壳默认「新建保留旧壳」——**均禁止提问/禁止为此探查**（用户实证选择） | create-flow.md 全文；trigger-types；gotchas；example/；node-types |
 | 报错 / 前端空白 / 保存 500 | `gotchas.md` 用 grep 搜报错原文或现象，只读命中项 | 从头读 gotchas |
 | 子流程 / callActivity / subEvent | `gotchas.md` 搜 subEvent/callActivity，只读命中项（**新建/发布 subEvent 先看 #47 API 自动发布配方**，三层 subEvent 见 #31；**手工拼子流程节点必须带渲染键**——start 根与每个手拼节点都要 `addable/deletable/content/error/errorContent`，否则设计器无＋（#39 2026-09-04 修正段 + create-flow.md subEvent 段））；`example/主子流程配置示例.md` **精简示例**第一节 | 入库审批全文、node-types 全文 |
+| **手拼档流程**（关联取值取单条 selectType=3 / 数据分支 / 调子流程 callActivity / 定时·按日期触发 shell / 记录函数消息 / 自动新增·删除记录）——两个批量构建器（`build_flows` / lowapp `postbuild_flows`）都不覆盖 | **直接读 `references/extra-flow-lib.md` + `scripts/extra_flow_lib.py`**（构建器库：节点构造 + 七配方 + 契约红线，2026-10-08 实测、25 条流，关键节点与真机 `processJson` 逐键保真比对通过） | create-flow 全文；node-types；example/；把契约重推一遍 |
 | 同款业务改造：**主流程审批节点后插 get_more + 并行子流程、subEvent 子流程按明细行改台账**（资产领用/归还/调拨/报废/维修等 主表+明细+台账 三表结构） | **直接复用 `example/资产领用发放改造示例.md`**（完整跑通脚本：探查+建子流程+发布校验+主流程修改+回读校验 **1 次 py 跑完**，只改 ①–⑤ 常量；2026-09-07 实测）。⚠️ 需求点名「从关联字段获取单条」时模板 get_one 是 selectType=1 查询写法、不满足——先读 gotchas #53 把点名节点外科改成 selectType=3 再跑 | 其他 example 全文、node-types、gotchas 全文（异常再 grep） |
 | 同款业务：**定时扫描 → 批量更新/新增/通知**（订单超时、预约就诊提醒、库存补货等 timerEvent 场景，全新建） | **零文档零探查直接跑 `scripts/timer_job_runner.py`（4 子命令全实测 3-5s：shell 壳 / announce 一次性全员公告 / scan 扫描+批改(update)+批量逐条新增(add)+逐行站内(to-field)+邮件(mail-to) / check 有/无记录分支动作）**——用法见下方「定时触发统一运行器」。改已有主流程才读 `example/定时批量处理逐行通知示例.md` 改 ①–⑤ 常量。铁律：多记录发消息必须 callActivity 子流程逐行（gotchas #57）；data_update 批量挂 getMore 契约且 formTableId 指向源 getMore（组合 E2）；同表两字段比较=gotchas #63 形态；定时/按日期触发**不得**含 start 空表条目（否则 UI 变量选择器出现「定时触发 工作表:""」——builder 已修 2026-09-14，存量清理见 gotchas #85）。**周期 ∉ 7 预置（每周一/每周四/每月15号…）→ runner 覆盖不了，抄 `references/custom-cycle.md`（模板+四轴语义+验算）** | 其他 example 全文、node-types、gotchas 全文（异常再 grep） |
 
@@ -178,6 +179,8 @@ if result.get('success'):
 ```
 
 `lowAppId` 必须从 `rec['lowAppId']` 取。每次必须 `query_flow()` 拉最新，禁止用本地缓存的 processJson。
+
+> ⚠️ **`flow_id=`（+`update_count=`）是独立参数，漏传 ≠ 更新失败：会静默新建一条同名流程**（把 `id` 放进 config 键里没用，被忽略）。症状：旧流程纹丝不动、应用里多一条重复，save/deploy/回读全绿 —— 2026-10-08 实测两轮误建 4 条，靠 `GET /act/process/extActProcess/list?lowAppId=` 数条数才发现；误建的只能 `DELETE /act/process/extActProcess/delete?id=` 清掉。
 
 **插在某节点之前：**
 
@@ -306,7 +309,7 @@ ftl = pj.setdefault('formTableList', [])
 
 **⚠️ get_one / get_more 节点的 save 前自愈三条（2026-09-11 实证：`build_process_json` 产物与 UI 原生不一致——`save`/`deploy`/回读全绿，只有人打开设计器才看得出来）**
 
-1. **`attr.formTableId` builder 会落成 `null`**（键在、值是 None，`setdefault` 补不进去，回读才暴露）→ 用**直接赋值**：`a['formTableId'] = f'form_{节点id}_{表code}'`，同时补齐 `formTableCode/formTableName/getDataType/selectType`。get_more 的 `getDataType` 要与下游统计节点（`funType=record`）一致（都写 1）。
+1. **`attr.formTableId` builder 会落成 `null`**（键在、值是 None，`setdefault` 补不进去，回读才暴露）→ 用**直接赋值**：`a['formTableId'] = f'form_{节点id}_{表code}'`（仅 selectType≠3；selectType=3 写 `form_{来源节点id}_{来源表code}`，源=start 即 `form_start_{表code}`），同时补齐 `formTableCode/formTableName/getDataType/selectType`。get_more 的 `getDataType` 要与下游统计节点（`funType=record`）一致（都写 1）。
 2. **删掉 `limitNum` = 真「不限制」**：builder 按 `limitCount` 默认写 `attr.limitNum = 0`，但设计器「限制数量」输入框把 `0` **显示成 `1`**（用户会以为被限成一条）；UI 原生节点**根本不写这个键**。自愈 `a.pop('limitNum', None)`（连带 builder 多写的空 `sortField` 一起删）；**确实要限条数才写 `a['limitNum'] = <n>`**。回读断言写「无 limitNum 键」，别断言 `== 0`。
 3. **`formTableList` 别乱兜底**：builder 已替查询节点登记条目（nodeType 是 `search`，**不是** `getOne`）。确需兜底时判重只能按 **`nodeId` 单键**——按 `(nodeId, nodeType)` 判重会把已有条目误判成缺失，再追加一条 `nodeType:"getOne"` 的**重复条目**（save/deploy 依旧全绿，靠回读逐条打印才看得出来）。
 

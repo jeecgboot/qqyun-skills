@@ -291,8 +291,13 @@ if result.get('success'):
      "type": "select-user", "valType": "select-user"}]}]
 ```
 ⚠️ 实测铁律（2026-09-09 用户纠正，非推测）：
+0. **整组必须是「组化」形态**（外层数组元素含 `id`/`matchType`/`queryItems`）——写成裸行**扁平数组**（`[{rule, val, field, …}, …]`）能 save、回读也不报错，但**设计器触发条件面板解析不了**（2026-10-08 实测：两条，补组化后才正常）。
 1. **每行 queryItem 必须带独立 `id`**（数字串）——缺 id 的行设计器无法编辑/删除，且**整组失去「添加条件」「且/或」能力**（用户实测症状）。
 2. 组级 `matchType` 大写 `AND`/`OR`（≥2 行时是行间连接符；单行写 `''` 即可，勿写小写）。
+   ⚠️ **用 lowapp 的 `postbuild_flows.table_flow()` 建流程时拿不到 OR**：该函数没有 matchType 参数，
+   `cond=` 直通后在 `build()` 里被硬编码成 `''`（`scripts/postbuild_flows.py`：
+   `cfg['startCondition'] = [{'id':…, 'matchType': '', 'queryItems': flow['cond']}]`）——**用它建的流程一律 AND**。
+   需要 OR 触发时只能**建完单独 patch** `startCondition[0].matchType = "OR"`，再用 `queryById` / `query_flow` 回读核对。
 3. ⚠️ **日期字段条件行可写，但必须是系统变量「今天」形态**（2026-09-09 用户 UI 手工补行实证；旧版「日期字段禁止写条件行」结论作废——到期调度由 `triggerField`+`executeType=1` 承载，**与日期条件行并存**才是 UI 全貌）：`valueType:3`、`val`=三键系统变量对象、`type`=date、`valType:'variable'`、行带 UI 式雪花 id（无 `name` 键）。UI 补行实测样本（流程「预约表按日期触发-多条件」row12；其余 11 行 API 产物被 UI 保存**原样保留**，id 不重写）：
 
    ```json

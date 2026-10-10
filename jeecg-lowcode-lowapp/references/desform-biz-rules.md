@@ -239,6 +239,7 @@
 >
 > **⚠️ 反向逻辑的本质是"回到字段原始状态"，而非"主动切换到相反状态"**。因此配置业务规则前，必须确认目标字段的原始属性与预期默认状态一致，否则规则不生效：
 > - 用 `SHOW` 控制显示 → 字段 `options.hidden` 必须为 `true`（默认隐藏），否则条件不满足时字段依然可见
+>   - ⚠️ **按需求文档建敲敲云应用时例外**：需求没写「默认隐藏」就**不要**替它补 `hidden=true`，字段保持可见（与线上一致；见 `app-spec.md`「需求原文的默认读法」第 4 条）。上面这条只适用于用户明确要「满足条件才显示」的场景
 > - 用 `HIDE` 控制隐藏 → 字段 `options.hidden` 必须为 `false`（默认可见），否则条件不满足时字段依然隐藏
 > - 用 `EDIT` 控制可编辑 → 字段原始应为 `readonly: true` 或 `disabled: true`
 > - 用 `READONLY` 控制只读 → 字段原始应为 `readonly: false`
@@ -345,7 +346,9 @@ update_design_config('my_form_code', {"bizRuleConfig": rules})
 > - **`update_widget` / `add_widget` 走单独接口，不影响业务规则**（同次实测：改完 hidden 回读规则仍在），
 >   所以「改控件属性 → 再写规则」是安全顺序；反过来用整单保存就必须**在最后重写一遍规则**。
 > - **每次整单保存后，都回读 `config.bizRuleConfig` 确认条数没归零**，别信 save 的返回值。
-> - 排障口诀：规则疑似不生效，**先 `query_form` 数一下 `bizRuleConfig` 的长度**，
+> - 排障口诀：规则疑似不生效，**先 `query_form` 数一下长度**——落点在
+>   `json.loads(desformDesignJson)['config']['bizRuleConfig']`（`config` 层里同时还放
+>   `titleField`，**存 model**）；`query_form` 返回行的顶层**没有**这两个键，别在顶层找。
 >   长度 0 = 被整单保存抹了，与规则本身写没写对无关。
 
 ```python
@@ -365,3 +368,8 @@ existing_rules.append(new_rule)
 
 update_design_config('my_form_code', {"bizRuleConfig": existing_rules})
 ```
+
+> ⚠️ **第一个参数是表 code —— 写错表不报错**。手写补丁凭注释/记忆标 code 时，能把整条规则写到**别的表**上：
+> 规则里的 `model` 引用的是原表字段，写到错表后原表无规则、错表上引用不存在的 model（静默失效），
+> 而「按同一个错的 code 回读」自洽、三道闸门全绿（2026-10-08 实测：交付核对该表映射才暴露）。**表 code 一律按表名从映射解析**（如 `flows_ctx.json`），
+> 写前断言 `rules[].model` / `actions[].value` 的字段都存在于目标表设计 JSON 里。

@@ -236,7 +236,7 @@ def subflow(name, context, params=None, nodes=None, **kw):
 # ---------------- 节点 ----------------
 
 def get_one(table, cond=None, empty="继续", name=None, fields=None,
-            sort=None, sort_type=None):
+            sort=None, sort_type=None, link=None, from_=None):
     """取[表](条件) —— 取单条数据。
 
     cond 两种写法：
@@ -259,10 +259,19 @@ def get_one(table, cond=None, empty="继续", name=None, fields=None,
         get_one("库存明细", cond=[("产品名称", "等于", ref("产品名称")),
                                   ("库存数量", "大于", 0)],
                 empty="分支", sort="入库日期", sort_type="asc")
+
+    link / from_ —— **「从（触发行的）关联字段取单条」**（平台管这叫 selectType=3）。
+        `get_one("产品", link="产品/物料", name="取物料档案")`
+          = 取**本行**的「产品/物料」字段指向的那条 产品。
+
+        ⚠️ **不要**写成 `get_one("产品", cond=[("记录id", "等于", ref("产品/物料"))])`：
+           本行取值引擎给的是**数组**（`["2108…"]`），`_id = ["2108…"]` 恒不成立，
+           而且静默取空（实测：子流程里下游 5 个字段全空、四道闸门全绿）。
+        `from_` 指定「本行」来自哪张表，默认＝当前上下文表；子流程里就是子流程触发行。
     """
     return {"type": "get_one", "table": table, "cond": cond or [],
             "empty": empty, "name": name or ("获取%s" % table), "fields": fields,
-            "sort": sort, "sort_type": sort_type}
+            "sort": sort, "sort_type": sort_type, "link": link, "from_": from_}
 
 
 def data_branch(name=None, found=None, missing=None):
@@ -372,6 +381,24 @@ def _as_node_name(v, fn, param):
         % (fn, param, type(v).__name__))
 
 
+def _check_order(fn, table, mapping, name):
+    """拦下「表名 / 字段映射 / 节点名」写反的调用 —— `update` / `add` 唯一的常见误用。
+
+    ⚠️ 写反时**不会**当场报错：错误一路带到构建阶段才炸，报 `unhashable type: 'dict'`，
+    **且不指出是哪个函数、哪个参数**（2026-10-08 实测，4 轮最小复现 + 5 组签名试验才定位）。
+    反向姿态只有两种：`mapping` 位收到字符串（表名串了进去）／`name` 位收到 dict（映射串了进去）。
+    合法调用一律不拦：`update(表, 映射, name=…)`、`update(表, 映射)`、`add(表)`（`mapping=None` 合法）。
+    `add` 的 `from_=` 合法收**节点对象**，故不参与本检查。
+    """
+    if isinstance(mapping, str) or isinstance(name, dict):
+        raise TypeError(
+            "%s() 参数顺序写反了：第 1 位是**表名(字符串)**，第 2 位是**字段映射(dict)**，节点名走 name=。"
+            "本次收到 table=%r / mapping=%s / name=%s。"
+            "正确写法：%s('表名', {'字段': 值}, name='节点名')"
+            % (fn, table, type(mapping).__name__,
+               type(name).__name__ if name is not None else 'None', fn))
+
+
 def update(table, mapping, name=None, source=None):
     """更新[表]:字段。mapping = {字段名: 值}；值是字符串/数字=固定值，`ref(...)`=引用。
 
@@ -388,6 +415,7 @@ def update(table, mapping, name=None, source=None):
     ⚠️ 早先本函数默认 `source=START`，于是上面那个最典型的 `get_one → update` 写法
     被落成「更新触发行」：设计器面板「更新对象」显示错、运行时更新不到刚查到的那行。
     """
+    _check_order("update", table, mapping, name)
     return {"type": "data_update", "table": table, "mapping": mapping,
             "source": _as_node_name(source, "update", "source"),
             "name": name or ("更新%s" % table)}
@@ -395,6 +423,7 @@ def update(table, mapping, name=None, source=None):
 
 def add(table, mapping=None, from_=None, name=None, source=START):
     """新增[表]。mapping 不给则用流程上下文行整行。"""
+    _check_order("add", table, mapping, name)
     return {"type": "data_add", "table": table, "mapping": mapping or {},
             "from": from_, "source": _as_node_name(source, "add", "source"),
             "name": name or ("新增%s" % table)}

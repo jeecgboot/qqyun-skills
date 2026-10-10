@@ -161,7 +161,15 @@ def run(action: str, cfg: dict, app_id: str) -> None:
                                                   if isinstance(condition, (list, tuple)) else condition)
             if title_field is not None:
                 if title_field != '':
-                    check_type(title_field, _TITLE_FIELD_TYPES, '标题字段')
+                    try:
+                        check_type(title_field, _TITLE_FIELD_TYPES, '标题字段')
+                    except ValueError as e:
+                        # 平台白名单是硬约束（auto-number/text-compose 等一律不收）。
+                        # 需求点名了这类字段时：省略 titleField，看板回退表单标题字段，
+                        # 在交付说明登记偏差（2026-10-08 实测：三处看板标题被拒）。
+                        raise ValueError(
+                            '%s —— 看板标题白名单不含该类型，写了必被平台拒；'
+                            '请省略 titleField（回退表单标题字段，可能与需求不一致，需在交付说明登记）' % e)
                 kwargs['titleField'] = maybe_key(code, title_field) if title_field else ''
             if show_label is not None:
                 kwargs['showLabel'] = bool(show_label)
@@ -187,7 +195,10 @@ def run(action: str, cfg: dict, app_id: str) -> None:
         code = resolve_code(cfg, app_id)
         cols = pick(cfg, 'dateColumns', 'date_columns')
         if not cols:
-            raise ValueError('add_calendar 必须提供 dateColumns')
+            raise ValueError(
+                'add_calendar 必须提供 dateColumns，如 '
+                '[{"begin_field": "值班开始时间", "end_field": "值班结束时间"}]'
+                '（单日事件只传 begin_field）')
         norm = []
         for col in cols:
             item = {

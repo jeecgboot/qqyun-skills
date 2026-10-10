@@ -1249,6 +1249,13 @@ def RADIO(name, options, required=False, width=100, dict_code=None,
     show_label = kw.pop('showLabel', None)
     if show_label is None:
         show_label = any("label" in o for o in options_list)
+    # ⚠️ 存储项补 label（=value），在 show_label 判定**之后**补，不改 showLabel 语义：
+    #    RADIO 渲染取 value（与 SELECT 不同，2026-09-20 已定论），但**下游校验器按 label 读选项**
+    #    （`update_link_record.option_labels`、记录范围的可选值提示），无 label 时报「可选：None」
+    #    （2026-10-08 实测：无 label 时校验器报「可选：None」）。
+    if options and not dict_code:
+        for o in options_list:
+            o.setdefault("label", o.get("value"))
     opts = {
         "inline": kw.pop('inline', True), "matrixWidth": 120, "defaultValue": "",
         "showType": kw.pop('showType', 'default'),
@@ -1283,6 +1290,10 @@ def CHECKBOX(name, options, required=False, width=100, dict_code=None,
     show_label = kw.pop('showLabel', None)
     if show_label is None:
         show_label = any("label" in o for o in options_list)
+    # 同 RADIO：存储项补 label（show_label 语义不动），供下游校验器按 label 读选项
+    if options and not dict_code:
+        for o in options_list:
+            o.setdefault("label", o.get("value"))
     opts = {
         "inline": kw.pop('inline', True), "matrixWidth": 120, "defaultValue": [],
         "showLabel": show_label,
@@ -1314,17 +1325,21 @@ def SELECT(name, options, required=False, width=100, multiple=False, dict_code=N
            placeholder='',
            *, wrap=True, is_sub=False, parent_key=None, col_width='150px', **kw):
     options_list = _make_options_list(options, field_name=name) if options else []
-    # ⚠️ 静态选项必须补 label（2026-09-20 实测定论，用户报障）：`_make_options_list`
-    # 对纯字符串列表只产出 {"value","itemColor"}（无 label），而 select 的下拉文案取自
-    # label —— 结果是**下拉空白**；且 show_label 会被算成 False，进一步关掉标签显示。
-    # save 返回 success、回读 options 也非空，只有人打开新增页才看得出。
-    # 绑字典时下面会把 options 清空重填，不受影响；RADIO/CHECKBOX 不走这里，行为不变。
-    if options and not dict_code:
-        for o in options_list:
-            o.setdefault("label", o.get("value"))
+    # ⚠️ show_label 判定要在「补 label」**之前**（与 RADIO/CHECKBOX 同序，2026-10-09 定案）：
+    #    静态文字选项（value=文案）**不启用**「显示标签」——展示 value 即同一段文字，无视觉
+    #    差异；只有 value≠文案（输入本来就带 label 的 dict）才判 true。
     show_label = kw.pop('showLabel', None)
     if show_label is None:
         show_label = any("label" in o for o in options_list)
+    # ⚠️ 静态选项仍必须补 label（=value，2026-09-20 实测定论，用户报障）：`_make_options_list`
+    # 对纯字符串列表只产出 {"value","itemColor"}（无 label），而 select 的下拉文案取自
+    # label —— 缺 label 时**下拉空白**（save 返回 success、回读 options 也非空，只有人打开
+    # 新增页才看得出）。放在判定**之后**补，不改 showLabel 语义；并供下游校验器按 label 读
+    # 选项（`update_link_record.option_labels`、记录范围可选值提示，2026-10-08）。
+    # 绑字典时下面会把 options 清空重填，不受影响；RADIO/CHECKBOX 已在各自函数里同序处理。
+    if options and not dict_code:
+        for o in options_list:
+            o.setdefault("label", o.get("value"))
     opts = {
         "defaultValue": "" if not multiple else [],
         "multiple": multiple, "disabled": False, "clearable": True,

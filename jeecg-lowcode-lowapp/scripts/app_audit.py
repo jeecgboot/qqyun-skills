@@ -464,6 +464,13 @@ def check_links(spec, forms_by_name, design_of, code_of, only=None):
             elif c not in view_only and not is_saved_field(cw):
                 err('%s.%s 带出「%s」是只显示（saveType=%s），流程取不到值'
                     % (t, fld, c, (cw.get('options') or {}).get('saveType')))
+            elif w.get('key') and (cw.get('options') or {}).get('linkRecordKey') != w.get('key'):
+                # **挂在哪条关联上**：他表字段的 `linkRecordKey` 必须指向本条关联控件的 key。
+                # 指错了（同一张表有两条关联指向同一个目标表时很容易串）就带出的是**另一条关联**
+                # 的列，界面上一眼看不出、四道闸门也都不会报 —— 以前这里只核「存在 + 存储」，
+                # 2026-09-30 生产管理重建 254 个带出字段时这一步还是临时脚本核的。
+                err('%s.%s 带出「%s」的 linkRecordKey=%s，应挂在本条关联「%s」(key=%s) 上'
+                    % (t, fld, c, (cw.get('options') or {}).get('linkRecordKey'), fld, w.get('key')))
         # 显示字段：只展示、不建控件，但名字必须真在目标表上
         for c in (l.get('显示字段') or []):
             if c not in widget_index(design_of(l.get('目标'))):
@@ -503,6 +510,102 @@ def check_summaries(spec, design_of, code_of, only=None):
             err('%s.%s 的汇总列「%s」不在 %s 上' % (t, fld, col, tgt))
         n += 1
     ok('汇总 %d 条已回读' % n)
+
+
+#: 数据过滤里的**系统字段**（它们不是控件，取不到 model —— 口径与
+#: `list_view/desform_list_view_filter.py` 的 `_SYS_FILTER_FIELDS` 一致）
+_SYS_FILTER_FIELDS = {'创建人': 'create_by', '更新人': 'update_by', '修改人': 'update_by',
+                      '创建时间': 'create_time', '更新时间': 'update_time',
+                      '修改时间': 'update_time', '流程状态': 'bpm_status',
+                      '所属部门': 'sys_org_code'}
+
+#: 过滤规则的中英对照（声明里可能写界面文案，也可能写 CLI 的代码）
+_RULE_ALIAS = {'包含': 'like', '等于': 'eq', '不等于': 'ne', '不是': 'ne', '大于': 'gt',
+               '大于等于': 'ge', '小于': 'lt', '小于等于': 'le', '在范围内': 'range',
+               '是其中一个': 'in', '不是其中一个': 'not_in', '包含任意': 'like_with_and',
+               '为空': 'empty', '不为空': 'not_empty'}
+
+
+def load_views_cfg(path):
+    """读建后套件配置里的 `VIEWS`（与 postbuild_appconfig.py 同一份声明）。
+
+    配置里会用到 `postbuild_appconfig` 注入的 `C()` / `fill_fields()` / `new_link()`，
+    这里补一份**等价的小实现**，只求把文件 exec 得动（`C` 必须返回元组，口径与套件一致）。
+    """
+    ns = {'C': lambda name, rule, val='': (name, rule, val),
+          'fill_fields': lambda *a, **k: None,
+          'new_link': lambda *a, **k: None}
+    exec(compile(open(path, encoding='utf-8').read(), path, 'exec'), ns)   # noqa: S102
+    return ns.get('VIEWS') or {}
+
+
+def check_views(views, design_of, code_of, only=None):
+    """列表视图：**声明 vs 真机**。
+
+    ⚠️ 2026-09-30 生产管理 R11：需求里 6 张表 18 个视图**一个都没建**，而四道闸门全绿 ——
+    `precheck` 只看**看板**，本脚本原来也没有列表视图这一档。声明（`VIEWS`）与真机之间
+    没有任何检查，界面上少了几个页签没人知道。这里补两件事：
+
+      ① 声明的视图（含**类型**）在不在真机上；
+      ② 过滤条件的**值**有没有落成存储值 —— 中文文案原样落库时条件**恒不成立**，界面上看不出来
+         （要读 `val`；`valText` 存的就是原始文案，正常就该是中文）。
+    """
+    print('\n[列表视图]')
+    from desform_utils import query_list_views, query_list_view_by_id
+    n_ok = 0
+    for t, p in (views or {}).items():
+        if only and t != only:
+            continue
+        if t not in code_of:
+            err('视图：表「%s」不在应用里' % t)
+            continue
+        code = code_of[t]
+        live = {v.get('name'): v for v in (query_list_views(code) or [])}
+        decls = [{'name': p.get('main', '全部')}] + list(p.get('extra') or [])
+        widx = widget_index(design_of(t))
+        for d in decls:
+            nm = d.get('name')
+            v = live.get(nm)
+            if not v:
+                err('视图：%s「%s」真机上不存在' % (t, nm))
+                continue
+            if d.get('type') and d['type'] != (v.get('type') or 'base'):
+                err('视图：%s「%s」类型是 %s，声明的是 %s' % (t, nm, v.get('type'), d['type']))
+            n_ok += 1
+            conds = d.get('filter') or []
+            if not conds:
+                continue
+            cfg = query_list_view_by_id(v['id']) or {}
+            items = [x for c in (cfg.get('conditions') or [])
+                     for x in (c.get('queryItems') or [c])]
+            for cond in conds:
+                if isinstance(cond, dict):
+                    fld, rule, val = cond.get('name'), cond.get('rule'), cond.get('val')
+                else:
+                    fld, rule = cond[0], cond[1]
+                    val = cond[2] if len(cond) > 2 else ''
+                rule = _RULE_ALIAS.get(rule, rule)
+                w = widx.get(fld) or find_widget(design_of(t), fld)
+                model = (w or {}).get('model') or _SYS_FILTER_FIELDS.get(fld)
+                hit = next((x for x in items
+                            if x.get('field') == model and x.get('rule') == rule), None)
+                if hit is None:
+                    err('视图：%s「%s」的过滤条件「%s %s」没落上' % (t, nm, fld, rule))
+                    continue
+                opts = ((w or {}).get('options') or {}).get('options') or []
+                if rule in ('empty', 'not_empty') or not opts or val in (None, ''):
+                    continue
+                want_text = str(val).replace('、', ',')
+                labels = {str(o.get('label')): o.get('value') for o in opts
+                          if o.get('label') is not None}
+                parts = [x for x in want_text.split(',') if x]
+                # 只有当「文案确实是选项 label、而它的存储值不等于 label」时才可能是没翻
+                translatable = parts and all(x in labels for x in parts) \
+                    and any(str(labels[x]) != x for x in parts)
+                if translatable and str(hit.get('val') or '') == want_text:
+                    err('视图：%s「%s」的过滤值「%s」是中文文案、没翻成存储值（条件恒不成立）'
+                        % (t, nm, want_text))
+    ok('视图 %d 条声明已回读' % n_ok)
 
 
 def check_flow_fields(flows, code_of, design_of, only=None):
@@ -789,6 +892,9 @@ def main():
     ap.add_argument('--expect', default='', help='如 "表单=47,字典=32,看板=16"')
     ap.add_argument('--form', default='', help='只查这一张表（单表小样）')
     ap.add_argument('--struct', default='', help='建后套件的 struct 配置（读其 RENAME，把规格旧名换成真机现名再比对）')
+    ap.add_argument('--views', default='',
+                    help='建后套件的 appconfig.py（读其 VIEWS）：核声明的列表视图在不在、'
+                         '过滤值是不是存储值 —— 以前四道闸门都不看列表视图')
     ap.add_argument('--pages-only', action='store_true')
     a = ap.parse_args()
 
@@ -856,6 +962,8 @@ def main():
         check_relay(spec, design_of, code_of, only=a.form or None)
         check_links(spec, None, design_of, code_of, only=a.form)
         check_summaries(spec, design_of, code_of, only=a.form)
+        if a.views:
+            check_views(load_views_cfg(a.views), design_of, code_of, only=a.form or None)
         if flows:
             check_flow_fields(flows, code_of, design_of, only=a.form)
             check_flow_values(code_of, design_of, a.api_base, a.token, a.app_id,

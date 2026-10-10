@@ -1226,6 +1226,333 @@ def check_numeric_usage(spec, flows, flow_spec=None):
                      '%s（%s）' % (used_by, rule), NUMERIC_OK | NUM_DATE_OK)
 
 
+# ---------------- 带出字段（需求 → 规格的落位） ----------------
+
+def load_derive(path):
+    with io.open(path, encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+def check_carryfields(spec, derive):
+    """需求里「从关联记录带出」的那些字段，规格必须把它们**声明到宿主关联上**。
+
+    ⚠️ **这是四道闸门全绿也照样漏的那一档**（2026-09-30 生产管理 R11 实测）：254 个
+    「关联字段/他表字段，从关联记录带出 X · Y」，规格里一条都没写 —— 于是
+    `build_app` 不摘除、建壳器按名字猜类型（204 个单行文本 / 34 个数字 / …），
+    `patch_fields` 不建他表字段，`app_audit` 也无从核起。表现是界面上 254 个空壳控件，
+    而 save / 部署 / 契约 / audit **全绿**。
+
+    输入 `derive.json` 是需求解析器的产物（`{"linkfields": [{"表","字段","src",
+    "src_field","save","raw"}]}`）；没有这份文件的应用不传 `--derive` 即可。
+
+    三条断言：
+      1. 本表上得有**指向「src」的关联控件**（否则带出字段无处可挂）；
+      2. 该字段要写进这条关联的 `带出`（同名）/ `带出映射`（异名）；
+      3. 口径（`references/app-spec.md`「需求原文的默认读法」第 1 条）：需求**没写
+         「存储数据（模式）」的一律列进 `仅显示`**（落 saveType=view）。例外是流程要拿来
+         定位/判断/计算、或被公式/汇总引用的 —— 这一档**只提示**，由人确认（precheck 不知道
+         流程要用哪些键时，宁可提示也不误报）。
+    """
+    rows = (derive or {}).get('linkfields') or []
+    if not rows:
+        warn('`--derive` 给的文件里没有 linkfields —— 带出字段这一档没校验')
+        return
+    host_of = {}
+    for L in (spec.get('links') or []):
+        host_of.setdefault((L.get('表'), L.get('目标')), []).append(L)
+
+    no_host, undeclared, should_view = [], [], []
+    n_ok = 0
+    for r in rows:
+        t, fld, src = r.get('表'), r.get('字段'), r.get('src')
+        cands = host_of.get((t, src)) or []
+        if not cands:
+            no_host.append('%s.%s ← %s' % (t, fld, src))
+            continue
+        hit = [L for L in cands
+               if fld in (L.get('带出') or []) or fld in (L.get('带出映射') or {})]
+        if not hit:
+            undeclared.append('%s.%s（本表指向「%s」的关联是 %s）'
+                              % (t, fld, src, '、'.join(x.get('字段') or '?' for x in cands)))
+            continue
+        if not r.get('save') and not any(fld in (L.get('仅显示') or []) for L in hit):
+            should_view.append('%s.%s' % (t, fld))
+        n_ok += 1
+
+    print('  . 带出字段 %d 条，%d 条已挂到宿主关联' % (len(rows), n_ok))
+    for m in no_host:
+        err('带出字段没有宿主关联：%s —— 本表上没有指向目标表的关联记录控件，'
+            '这个字段建不出他表字段（需求里那条关联记录多半被解析器漏掉了）' % m)
+    for m in undeclared:
+        err('带出字段没写进规格：%s —— 必须写进该关联的 `带出`（同名）或 `带出映射`（异名），'
+            '否则建壳器会按名字猜类型、建出一个空壳控件（四道闸门都不会报）' % m)
+    if should_view:
+        warn('有 %d 个带出字段需求没写「存储数据（模式）」、也没列进 `仅显示`（会落 saveType=save）'
+             '：%s —— 口径是「没写的一律仅显示」，只有流程定位/判断/计算要用、或被公式/汇总引用的'
+             '才落存储；逐个确认后再定' % (len(should_view), '、'.join(should_view[:12])
+                                     + ('…' if len(should_view) > 12 else '')))
+
+
+# ---------------- Tabs 子页签（需求 → 规格的落位） ----------------
+
+def _nz(s):
+    """全/半角括号归一：需求写「生产订单编号(钉钉)」、控件名是「生产订单编号（钉钉）」"""
+    return (s or '').replace('(', '（').replace(')', '）').strip()
+
+
+#: 需求展示列里点名的**系统字段**：目标表没有对应控件，按口径丢掉（`显示字段` 表达不了
+#: 它们，要在列表列里单配）。这一档只提示、不算违例。
+_TAB_SYS = {'创建时间', '修改时间', '创建人', '修改人', '所属部门', '流程状态', '当前节点',
+            '创建部门', '创建日期', '修改日期'}
+
+
+def check_tabs(spec, derive):
+    """需求写「Tabs（新增时隐藏 子Tab属性 「X」-关联记录 关联「Y」… 标题字段「Z」，展示 A、B；…）」
+    的，规格必须把**每个页签**都声明出来，并把容器级/页签级的「新增时隐藏」+ 每个页签的
+    展示列一并落下。
+
+    ⚠️ **这是又一道「四道闸门全绿也照样漏」的口子**（2026-10-09 生产管理 R12 实测，R11 同病）：
+    规格只落了**页签名** —— 容器与页签的 `新增时隐藏` 没设、每个页签 `显示字段` 为空，
+    落地后**新增页照常显示整块 Tabs、子表格只渲染标题一列**；另有 3 张表因「本表已有指向
+    同一目标表的关联（就是那张表的【子表】）」被整条跳过，**页签整段不存在**。
+    `build_app` / `postbuild_verify` / `app_audit` 都不报（它们只比「规格 ↔ 真机」，
+    而规格本身就是短的），只有人打开表单才看得见。
+
+    输入 `derive.json` 的 `tabs` 是**需求解析器直接转录**的名册
+    （`{表: {"容器隐藏": bool, "页签": [{"名","目标","新增时隐藏","标题字段","展示列"}]}}`）。
+
+    四条断言：
+      1. 每个页签都在本表 `容器[].页签` 里被声明（且表上有对应 link）；
+      2. 名册说容器/页签要「新增时隐藏」的，规格里对应那处就得有 `新增时隐藏`；
+      3. 每个页签的 `显示字段` 不能为空（空 = 界面上只剩标题一列）；
+      4. 展示列里的每一项都要能落到目标表的控件名（需求常写**简称**：所属产品名 /
+         产品需求 / 物料可制 / 当前库存），按「精确 → 括号归一 → 前缀 → 包含」解析；
+         解析不到就报出来，别静默丢。
+    """
+    roster = (derive or {}).get('tabs') or {}
+    if not roster:
+        warn('`--derive` 给的文件里没有 tabs —— Tabs 子页签这一档没校验')
+        return
+    by_form = {f.get('名称'): f for f in (spec.get('forms') or [])}
+    links_of = {}
+    for L in (spec.get('links') or []):
+        links_of.setdefault(L.get('表'), []).append(L)
+
+    no_pane, no_ctrl, no_hid, no_cols, bad_cols, sys_cols = [], [], [], [], [], []
+    n_pane = n_ok = 0
+    for tname, rec in roster.items():
+        conts = (by_form.get(tname) or {}).get('容器') or []
+        declared = set()
+        for c in conts:
+            for p in (c.get('页签') or []):
+                if isinstance(p, dict):
+                    declared.update(p.keys())
+                elif p:
+                    declared.add(p)
+        if rec.get('容器隐藏') and not any(c.get('新增时隐藏') for c in conts):
+            no_ctrl.append(tname)
+        for pn in (rec.get('页签') or []):
+            n_pane += 1
+            name = pn.get('名') or '?'
+            tgt = pn.get('目标') or ''
+            if name not in declared:
+                no_pane.append('%s.%s' % (tname, name))
+                continue
+            hit = [L for L in (links_of.get(tname) or [])
+                   if L.get('字段') == name and (not tgt or L.get('目标') == tgt)]
+            if not hit:
+                no_pane.append('%s.%s（容器声明了，但没有对应的 links 条目）' % (tname, name))
+                continue
+            L = hit[0]
+            if pn.get('新增时隐藏') and not L.get('新增时隐藏'):
+                no_hid.append('%s.%s' % (tname, name))
+            cols = L.get('显示字段') or []
+            if not cols:
+                no_cols.append('%s.%s' % (tname, name))
+            else:
+                names = list((by_form.get(L.get('目标')) or {}).get('字段') or [])
+                idx = {}
+                for n in names:
+                    idx.setdefault(_nz(n), n)
+                for c in (pn.get('展示列') or []):
+                    nc = _nz(c)
+                    if nc in idx or any(n.startswith(nc) or nc in n for n in names):
+                        continue
+                    if nc in _TAB_SYS:
+                        sys_cols.append('%s.%s 的「%s」' % (tname, name, c))
+                        continue
+                    bad_cols.append('%s.%s 的「%s」' % (tname, name, c))
+            n_ok += 1
+
+    print('  . Tabs %d 张表 / %d 个子页签，%d 个已完整声明' % (len(roster), n_pane, n_ok))
+    for m in no_pane:
+        err('Tabs 页签没进规格：%s —— 需求点名了这个子页签，规格的 `容器[].页签` 与 links 里'
+            '都得有它；漏了界面上就是**整块页签不存在**（各闸门都不报）' % m)
+    for m in no_ctrl:
+        err('Tabs 容器「新增时隐藏」没进规格：%s —— 规格写'
+            '`容器: [{"名称": "Tabs", "页签": [...], "新增时隐藏": true}]`' % m)
+    for m in no_hid:
+        err('子页签「新增时隐藏」没进规格：%s —— 写在该 link 上'
+            '（`{"表": ..., "字段": ..., "新增时隐藏": true}`）；漏了新增页会照常显示它' % m)
+    for m in no_cols:
+        err('子页签没有展示列：%s —— 需求写了「展示 A、B、C」，落空后子表格只显示标题一列'
+            % m)
+    if bad_cols:
+        err('展示列在目标表里找不到控件：%s —— 需求常写简称，按「精确 → 括号归一 → 前缀 → 包含」'
+            '映到真实控件名；映不到的要显式丢弃或改名，别原样写进 `显示字段`'
+            % '、'.join(bad_cols[:10]) + ('…' if len(bad_cols) > 10 else ''))
+    if sys_cols:
+        warn('展示列里有 %d 项是系统字段（目标表没有对应控件，按口径丢弃）：%s —— '
+             '想在子表格里看到它们得另配列表列，`显示字段` 表达不了'
+             % (len(sys_cols), '、'.join(sys_cols[:8]) + ('…' if len(sys_cols) > 8 else '')))
+
+
+# ---------------- 子表「批量选择添加」（需求 → 规格） ----------------
+
+def check_sub_batch(spec, derive):
+    """需求写「【子表】…，新增方式：手动添加，批量选择添加 X」的，规格里该子表那条 link
+    必须声明 `批量添加`（X = **明细表自己的**一个关联字段名）。
+
+    ⚠️ **又一道「四道闸门全绿也照样漏」的口子**（2026-10-09 生产管理 R12 实测，12 条全丢）：
+    能力一直在 `postbuild_struct.py` §5，但它吃的是 `struct_cfg.py` 里**手写的 CREATE_MODE 清单**，
+    建表链（`patch_fields`）**根本不看规格的这一档** —— 生成器不喂，那一段就空转；
+    而 `postbuild_verify` 只在 `createMode.select == true` 时才校验绑定字段，
+    `select` 恒 false 就一路绿灯。落地后**子表的「批量选择添加」按钮就是关着的**，
+    只有人打开子表去点才发现。
+
+    输入 `derive.json` 的 `sub_batch` 是需求解析器直接转录的名册
+    （`[{"表","字段","目标","绑定","手动添加"}]`）。
+
+    三条断言：
+      1. 规格 links 里有这条子表、且带 `批量添加`；
+      2. 绑定的字段名能在目标表（明细表）的字段清单上找到（精确 → 括号归一 → 前缀 → 包含）；
+      3. 名册说「没写手动添加」（`手动添加: false`）的，规格得用对象形态显式关掉
+         （`{"字段": "X", "手动添加": false}`），写成字符串就是没关。
+    """
+    roster = (derive or {}).get('sub_batch')
+    if not roster:
+        warn('`--derive` 给的文件里没有 sub_batch —— 子表「批量选择添加」这一档没校验')
+        return
+    by_form = {f.get('名称'): f for f in (spec.get('forms') or [])}
+    links_of = {}
+    for L in (spec.get('links') or []):
+        links_of.setdefault(L.get('表'), []).append(L)
+    no_key, bad_field, no_manual = [], [], []
+    for rec in roster:
+        tname, fld, tgt = rec.get('表'), rec.get('字段'), rec.get('目标') or ''
+        want = rec.get('绑定') or ''
+        hit = [L for L in (links_of.get(tname) or [])
+               if L.get('字段') == fld and (not tgt or L.get('目标') == tgt)]
+        if not hit:
+            no_key.append('%s.%s（规格里没有这条子表 link）' % (tname, fld))
+            continue
+        got = hit[0].get('批量添加')
+        if not got:
+            no_key.append('%s.%s（有 link 但没写 `批量添加`）' % (tname, fld))
+            continue
+        gfield = got.get('字段') if isinstance(got, dict) else got
+        names = list((by_form.get(hit[0].get('目标')) or {}).get('字段') or [])
+        idx = {_nz(n): n for n in names}
+        if not (_nz(gfield) in idx
+                or any(n.startswith(_nz(gfield)) or _nz(gfield) in n for n in names)):
+            bad_field.append('%s.%s 绑定「%s」，目标表「%s」上没有这个控件'
+                             % (tname, fld, gfield, hit[0].get('目标')))
+        if rec.get('手动添加') is False and not (isinstance(got, dict)
+                                                and got.get('手动添加') is False):
+            no_manual.append('%s.%s' % (tname, fld))
+
+    print('  . 子表批量选择添加 %d 条，%d 条已声明' % (len(roster), len(roster) - len(no_key)))
+    for m in no_key:
+        err('`批量添加` 没进规格：%s —— 写在该子表那条 link 上'
+            '（`{"表":…, "字段":…, "批量添加": "明细表上的关联字段名"}`）。漏了子表的'
+            '「批量选择添加」就是关着的，`postbuild_verify` 也不会报（它只在 select=true 时查）'
+            % m)
+    if bad_field:
+        err('`批量添加` 绑定的字段在目标表上找不到：%s —— 需求写的是**明细表自己的**关联字段名，'
+            '别写成来源表名；对不上就按「精确 → 括号归一 → 前缀 → 包含」改名'
+            % '、'.join(bad_field))
+    if no_manual:
+        # ⚠️ **提示不是违例**：关不关手动添加是业务决定（2026-10-09 生产管理：需求只写了
+        # 「批量选择添加」，用户明确要「全部保留手动添加」）—— 只提示，由人拍板。
+        warn('需求只写了「批量选择添加」（没写手动添加）：%s —— 要按需求关掉就写对象形态'
+             '（`{"字段": "X", "手动添加": false}`）；确认要保留手动添加就忽略本条'
+             % '、'.join(no_manual))
+
+
+# ---------------- 静态选项的值（需求 → 规格） ----------------
+
+def check_option_values(spec, derive):
+    """需求里静态下拉/单选/多选的选项，**值**必须按需求来：
+
+      · 需求**没写值**（`选项：自行排产/销售订单`）→ 规格里 value 必须**等于文案本身**
+        （写字符串列表，或 `{"value": "自行排产", "label": "自行排产"}` 都算对）；
+      · 需求**写了值**（`1=草稿未提报 / 2=已排期`）→ 必须用需求给的值。
+
+    ⚠️ **这是「实现方自作主张」型缺陷的闸门**（2026-10-09 生产管理实测）：生成器当时
+    给纯文案的选项**自动编号 `0,1,2…`** —— 83 个字段全偏。需求没要求、界面看不出
+    （下拉显示的是 label）、`precheck` 只看规格内部自洽、`app_audit` 拿规格比真机也一致
+    → 四道闸门全绿；直到要用「值」的地方（按钮条件、业务规则、流程）才暴露，
+    而那时值已经写进了条件里，一改就得连流程一起返工。
+
+    输入 `derive.json` 的 `options` 是需求解析器直接转录的名册
+    （`{表: {字段: {"文案": [...], "值": [None|"1", ...]}}}`，按需求原文逐项对齐）。
+    """
+    roster = (derive or {}).get('options')
+    if not roster:
+        warn('`--derive` 给的文件里没有 options —— 静态选项「值」这一档没校验')
+        return
+    by_form = {f.get('名称'): f for f in (spec.get('forms') or [])}
+    KEYS = ('静态下拉', '静态单选', '静态多选')
+    missing, bad, extra = [], [], []
+    n_ok = n_chk = 0
+    for tname, flds in roster.items():
+        form = by_form.get(tname) or {}
+        for fname, rec in flds.items():
+            n_chk += 1
+            decl = None
+            for k in KEYS:
+                if fname in (form.get(k) or {}):
+                    decl = (form.get(k) or {})[fname]
+                    break
+            if decl is None:
+                missing.append('%s.%s' % (tname, fname))
+                continue
+            got = []
+            for o in (decl or []):
+                if isinstance(o, dict):
+                    v = o.get('value')
+                    got.append((str(v), str(o.get('label') if o.get('label') is not None else v)))
+                else:
+                    got.append((str(o), str(o)))
+            want = list(zip([str(x) if x is not None else None for x in (rec.get('值') or [])],
+                            [str(x) for x in (rec.get('文案') or [])]))
+            if len(got) != len(want):
+                bad.append('%s.%s 选项数 %d ≠ 需求 %d（需求：%s）'
+                           % (tname, fname, len(got), len(want), '、'.join(rec.get('文案') or [])))
+                continue
+            _hit = [True]
+            for (gv, gl), (wv, wl) in zip(got, want):
+                exp_v = wv if wv is not None else wl
+                if gv != exp_v:
+                    bad.append('%s.%s 的「%s」值应为 %r，规格里是 %r'
+                               % (tname, fname, wl, exp_v, gv))
+                    _hit[0] = False
+            if _hit[0]:
+                n_ok += 1               # ⚠️ 只有**值全对**才计数（早先把 +1 写在值循环外，
+                                        #    对不上的字段也报「一致」——自证过：反证时 88/88 假绿）
+    print('  . 静态选项 %d 个字段，%d 个值与需求一致' % (n_chk, n_ok))
+    for m in missing:
+        err('静态选项没进规格：%s —— 需求写了「选项：…」，规格的 `静态下拉`/`静态单选`/`静态多选` '
+            '里没有它（会建出空文本框或空下拉）' % m)
+    if bad:
+        err('静态选项的**值**和需求对不上：%s —— ⚠️ 需求没写值的，值必须就是文案本身；'
+            '写了 `n=文案` 的，必须用需求给的 n。实现方自己编号（0,1,2…）看着能用，'
+            '但值会随选项增删整体位移，按钮条件/业务规则/流程里引用的值全部指错'
+            % '；'.join(bad[:10]) + ('…' if len(bad) > 10 else ''))
+    if extra:
+        warn('规格里的静态选项比需求名册多：%s' % '、'.join(extra[:8]))
+
+
 # ---------------- 数量 ----------------
 
 def check_counts(spec, expect):
@@ -1331,6 +1658,11 @@ def main():
                     help='显式声明本应用没有流程（跳过「漏传 --flows」的拦截）')
     ap.add_argument('--expect', default='',
                     help='数量期望，如 "汇总=7,表单=52,字典=22,看板=25"')
+    ap.add_argument('--derive', default='',
+                    help='需求解析器产物 derive.json（可选）：核「从关联记录带出」的字段'
+                         '有没有挂到宿主关联上、口径对不对 —— 这一档以前四道闸门都不看；'
+                         '并核 Tabs 子页签（页签齐不齐、新增时隐藏、展示列）'
+                         '与子表「批量选择添加」（`批量添加` 有没有进规格、绑定字段在不在明细表上）')
     ap.add_argument('--struct', default='',
                     help='建后套件配置 struct_cfg.py（可选）：读其 DEFAULTS()，已给默认值的累加列不再提示缺初值；'
                          '读其 RENAME，流程段按改名后的真机现名校验')
@@ -1369,6 +1701,19 @@ def main():
     check_field_opts(spec)
     check_types(spec)
     check_undeclared(spec)
+    if a.derive:
+        if not os.path.exists(a.derive):
+            err('--derive 指的文件不存在：%s' % a.derive)
+        else:
+            _dv = load_derive(a.derive)
+            print('—— 带出字段（需求 → 规格）——')
+            check_carryfields(spec, _dv)
+            print('—— Tabs 子页签（需求 → 规格）——')
+            check_tabs(spec, _dv)
+            print('—— 子表批量选择添加（需求 → 规格）——')
+            check_sub_batch(spec, _dv)
+            print('—— 静态选项的值（需求 → 规格）——')
+            check_option_values(spec, _dv)
 
     # 看板/流程写的是建后 RENAME 之后的真机现名：规格自身的校验按原名跑完，这里再套 RENAME
     fspec = _renamed_for_flows(spec, a.struct) if a.struct else spec

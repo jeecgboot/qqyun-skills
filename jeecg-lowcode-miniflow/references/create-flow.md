@@ -65,6 +65,21 @@ Windows 用 `py -3` 跑脚本。含中文节点名时写成临时 `.py` 再执�
 > ```
 > 全库扫 17/17 条手搭子流程一致（金标 `增加/减少库存子流程`：父 get_more 叫「从单条记录获取关联记录」，子流程登记名照样是「子流程」）。**父节点 id 要等父流程发布后才出现在子流程的 formTableList 里**，`build_flows` 构建期拿不到 → 由 main 的 **pass ③ 收尾回填**（`_fix_sub_ownrow_refs`）统一改写，**别再手工补**；只跑 `--only <子流程>` 时没有主流程 → 不会回填，需连主流程一起 `--update` 跑一轮。同时定形 `data_update` 指向本行的来源：`formTableSourceTaskId` = 输入行 nodeId + `formTableSourceNodeType:"search"`（金标 `自动报价2` 的「更新报价明细」），builder 原本写的是 `start`/`table`。**别误改**指向运算节点的引用（`formNodeType:"function"` 是对的）。`check_node_contract` 有一条「输入行登记名应为父流程调用节点名」的**提示**与金标相反，忽略即可（提示级、非违例）。
 
+> **⚠️ 子流程里排他网关的条件分支：`branchForm` 同样必须写成 `search` 形态，否则静默走默认支（2026-09-29 落库实测）：**
+> 与上一条同源。子流程里排他网关的**条件分支** `branchForm` 会停在 `{formNodeId:"start", formNodeType:"table"}`
+> —— **子流程画布上没有 `start` 这个节点**，分支条件解析不到本行字段，带默认分支的网关就**兜底走默认支**
+> （静默走错分支、无任何报错）。落库三键（`formNodeId` / `formTableCode` 都取**本流程 `formTableList` 里 `isSubStart` 那条**）：
+> ```
+> branchForm = {"formNodeId": <isSubStart 条目的 nodeId>,
+>               "formNodeType": "search",
+>               "formTableCode": <同一条目的 formTableCode>}
+> ```
+> ⛔ **建后套件的 `postbuild_subfix.py` 不管这一项**（其职责只有 `startType` + `subFlowSourceInfo` 两项），
+> 所以 `save` / `deploy` / 条数校验 / `app_audit` / `check_node_contract` **全绿也照样不通** ——
+> 这是「闸门全绿但业务流程走错支」的静默档，必须显式补。修法：`query_flow` 取子流程 →
+> 重写每个条件分支的 `branchForm` → `save_flow(…, update_count=rec['updateCount'])` → `deploy_flow`
+> → **再重跑一遍 `postbuild_subfix.py`**（只存子流程会清空它的注册信息，见上文）。
+
 > **⚠️ 手工拼子流程 JSON 的渲染键清单（2026-09-04 实证，防"无＋加节点标识"）：** subEvent 子流程常需手工构造 JSON（builder 对普通流程会自动补齐渲染键，手搭不会）。**start 根节点与每一个手拼节点**（data_add/data_get_*/callActivity 等）都必须带五个渲染键，否则设计器无"＋"、无法删除：
 > ```python
 > # start 根节点（控制首节点上方的＋）：

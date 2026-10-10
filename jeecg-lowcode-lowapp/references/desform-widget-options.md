@@ -317,6 +317,13 @@ className: `form-select` | icon: `icon-select`
 
 className: `form-date` | icon: `icon-date`
 
+> ⚠️ **手工改 design JSON 加/换日期控件时，`options` 要写全，不能留 `{}`。**
+> 上面的键一个都不能少（尤其 **`timestamp`**）。只写 `{}` 时设计器里渲染正常、保存设计也不报错，
+> 但**用户在该表加行、点确定时会 500**：
+> `Cannot invoke "java.lang.Boolean.booleanValue()" because the return value of "...desform.vo.widget.DesformOptions.getTimestamp()" is null`
+> （实测：把某明细表的「盘点日期」从 `input` 换成 `date`，options 只写了 `{}`，保存明细即报此 NPE；补全后正常）。
+> 最稳的做法：**从同应用里任一正常日期控件整段 copy `options`**，只改 `type`/`format`/`designType`。
+
 JSON：`{"name": "入职日期", "type": "date"}` 或 `{"name": "所属季度", "type": "date", "dateType": "quarter"}`。Python：`DATE('所属季度', date_type='quarter')`。
 
 ## time — 时间选择器

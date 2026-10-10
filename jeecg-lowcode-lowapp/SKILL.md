@@ -1,6 +1,6 @@
 ---
 name: jeecg-lowcode-lowapp
-description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作表。创建/复制/改名/删除/列出应用；在某租户或应用下创建/修改工作表、一对一、关联记录。不处理 Online 表单。禁止同时加载 jeecg-desform / jeecg-onlform / jeecg-system。一句话建应用（只说「建一个 XX 系统」、没逐表列字段）：先读 references/requirement-design.md 补全设计，把需求说明和功能设计发给用户确认，确认后再建。同一句要应用+工作表+简流+仪表盘（或同时点名 miniflow/dashboard）：只读 references/fast-full-chain.md，禁止并行通读三个 SKILL.md。应用 CRUD：直接跑 scripts/lowapp_creator.py（零预读）。租户+应用下建表或一对一：不要读本 SKILL 全文，只读 references/fast-create.md，立刻跑 scripts/create_linked_worksheets.py。改已有关联记录：只读 references/fast-link-record.md。已有表新增关联记录字段：只读 references/fast-add-link-record.md。租户升级会员 / 改成会员：只读 references/tenant-vip.md，跑 scripts/tenant_vip.py（直连数据库）。
+description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作表。创建/复制/改名/删除/列出应用；在某租户或应用下创建/修改工作表、一对一、关联记录。不处理 Online 表单。禁止同时加载 jeecg-desform / jeecg-onlform / jeecg-system。一句话建应用（只说「建一个 XX 系统」、没逐表列字段）：先读 references/requirement-design.md 补全设计，把需求说明和功能设计发给用户确认，确认后再建。同一句要应用+工作表+简流+仪表盘（或同时点名 miniflow/dashboard）：只读 references/fast-full-chain.md，禁止并行通读三个 SKILL.md。应用 CRUD：直接跑 scripts/lowapp_creator.py（零预读）。租户+应用下建表或一对一：不要读本 SKILL 全文，只读 references/fast-create.md，立刻跑 scripts/create_linked_worksheets.py。改已有关联记录：只读 references/fast-link-record.md。已有表新增关联记录字段：只读 references/fast-add-link-record.md。
 ---
 
 # JeecgBoot 低代码应用（敲敲云）
@@ -90,7 +90,6 @@ description: JeecgBoot 低代码应用（lowApp / 敲敲云）及应用内工作
 | 创建 / 复制 / 改名 / 删除 / 列出**应用** | **第一条 tool call 就是** `lowapp_creator.py`（参数见「创建 / 复制 / 编辑 / 删除应用」）。会话已有 api-base / token / 租户时 **零 Read** | 先读 `lowapp_creator.py` / `desform_lowapp_utils.py` / 本文件全文 / `desform-lowapp.md` |
 | 在**已有应用**下加**少量**工作表（一般 ≤3 张）/ **一对一** | **只读** `references/fast-create.md`，立刻跑 `scripts/create_linked_worksheets.py`。只有「全新创建子表」才再读 `desform-new-sub-table.md`。⚠️ **多表应用不是这一档，见下一行** | 本文件全文；`lowapp-init.md`；`desform-lowapp.md`；`desform-cross-form-binding.md`；`desform-link-record.md`；应用 CRUD；`jeecg-desform` / `jeecg-onlform` / `jeecg-system` 的 SKILL.md；`widget-options`；`json-config` |
 | 建一个**多表应用**（多张表 / 数据字典 / 关联记录 / 汇总 / 公式 / 视图；**有没有简流和看板都算这一档**） | **只读** `references/fast-full-chain.md` + `engine-contract.md`，写 `app_spec.json`，跑 `scripts/precheck.py` 后 `scripts/build_app.py --spec app_spec.json`（确无流程时显式 `--no-flows`）。规格写法见 `app-spec.md`；建后套件 `postbuild_*` 已含默认值/类型/结构/子表/验收 | **把 `fast-create.md` 当主路径**；手搓 job.json + 自建补丁脚本（`create_linked_worksheets.py` 只覆盖建壳，字段级 options 键要自己拼，且 `postbuild_*` 里的东西得重写一遍）；`widget-options`；`json-config` |
-| **租户升级会员** / 把租户改成会员 / `sys_vip_membership` | **只读** `references/tenant-vip.md`，跑 `scripts/tenant_vip.py`（没有接口，直连数据库；连接取用户贴的 application yml） | 找升级会员的 API；`lowapp_creator.py`；手写 INSERT |
 | 应用分组 / 工作表分组 / 改工作表名 / 删工作表 | `desform-lowapp.md` 用 grep 定位对应节，`Read` limit=50 | widget-options；json-config；应用 CRUD |
 | 给已有**主表**加字段（点名了表+字段） | 文末「主表加字段只跑 add_widget」。会话已有 code 时 **零 Read**，第一条 tool call 就是 `add_widget` 脚本 | 本文件「更新已有表单」；加前/加后 `get_form_fields`；`save_auth_from_design`；工厂默认 type 的 widget-options |
 | 改已有控件 / 删字段 / 子表加列 | 改/删：`grep -n "^## 更新已有表单"` Read limit=40。子表加列：文末「往已有子表加列」 | 本文件全文；`desform-lowapp.md`；应用 CRUD |
@@ -215,6 +214,29 @@ skill_dir = app_tmpdir('patch')          # → <该应用的工作目录>/patch/
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 ```
+
+### ⚠️ 写文件一律显式 `encoding='utf-8'`（Windows 默认 GBK，静默写坏）
+
+**Windows 下 `open(path, 'w')` / `json.dump(obj, open(path, 'w'))` 默认 GBK**。写出来的 JSON 中文变 GBK 字节，
+skill 脚本按 utf-8 读 → `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xcf`（GBK 的「中」），
+**或更坏：`.py` 脚本里读到一半才炸**。实测一个任务里连栽 **3 次**（按钮配置、探针产物、子流程 cfg），每次烧一个往返。
+
+规矩（开工第一件事就写这对 helper，别等炸了再补）：
+
+```python
+def jload(p):                       # 读：容错三种编码
+    b = open(p, 'rb').read()
+    for enc in ('utf-8', 'gbk', 'utf-8-sig'):
+        try: return json.loads(b.decode(enc))
+        except Exception: pass
+    raise SystemExit('读不了 ' + p)
+
+def jdump(o, p):                    # 写：恒 utf-8 + 不转义
+    json.dump(o, open(p, 'w', encoding='utf-8'), ensure_ascii=False)
+```
+
+同源坑：`subprocess` 调 skill 脚本时结果要 `capture_output=True, text=True, encoding='utf-8', errors='replace'`
+（否则子进程中文输出按 GBK 解，同样炸）；打印前设 `PYTHONIOENCODING=utf-8`。
 
 ### ❌ 禁止
 
@@ -752,7 +774,6 @@ python "<skill目录>/scripts/list_view/desform_list_view.py" --api-base <用户
 | `scripts/desform_button_utils.py` | 自定义按钮操作工具库（增删改查、视图绑定、排序） |
 | `scripts/desform_jimureport.py` | 一键创建积木报表并关联表单打印（含删除/清除关联） |
 | `scripts/skill_temp_path.py` | 跨平台获取本技能临时目录/文件路径（写临时配置前必先调用，自动建目录） |
-| `scripts/tenant_vip.py` | 租户升级会员：直连 MySQL 往 `sys_vip_membership` 插 `normalVip` 行（`--tenant-name`/`--tenant-id`/`--all`，见 `references/tenant-vip.md`） |
 | `scripts/lowapp_creator.py` | 创建/复制/编辑/删除/查询低代码应用（`--json` 一条命令，不要改 desform_lowapp_utils.py） |
 | `scripts/list_view/desform_list_view.py` | 列表视图查/改/建入口（表格类 action + 通用 action：list/get/delete/sort/config_table/config_sort/config_quick_filter/config_left_filter/config_data_filter/update 等；`--json` 一条命令。内部还有 columns/filter/quickfilter 模块，禁止当 CLI 跑） |
 | `scripts/list_view/desform_custom_button.py` | 自定义按钮 CLI（list/get/create/update/delete/remove/bind/reorder；**四类视图同一套按钮体系，无需按视图分支**，见「自定义动作」章节） |
@@ -1107,16 +1128,22 @@ def find(node, key, val, out, d=0):   # 按 键==key 且 值含val 收集所在 
 - **整体（表单级）列数设置：仅 1~4 列**（autoWidth=20 等勿配）；
 - **单个控件行宽档位**：1/4=25、1/3=33.333、1/2=50、**2/3=66.667、3/4=75**、整行=100。
 
-与 `options.width`（`'100%'`）是配套属性：**整行控件 = 独占一个 card 且 autoWidth 100 + width '100%'**（对照同表 定位_1/手写签名_1/文本识别_1 都是单卡 + 100）；工厂默认 text 类（input/phone/email/number 等）= autoWidth 50 + width ''，input 例外 width '100%'+autoWidth 50；imgupload 默认单卡但 autoWidth 50。
+与 `options.width`（`'100%'`）是配套属性：**整行控件 = autoWidth 100 + width '100%'，且不得与他人共卡**（2026-10-08 修正：此前写"必须独占 card"过严）。两种合法形态：**① 裸挂**在 `design.list[]`/tabs `panes[].list[]` 顶层（平台原生，textarea/汇总等宽控件工厂产出即如此；同租户参照应用实测全部如此）；**② 独占单成员 card**（UI 拖宽度/手工拆卡产出）。渲染错只因「autoWidth=100 混在多人 card 里」。工厂默认 text 类（input/phone/email/number 等）= autoWidth 50 + width ''，input 例外 width '100%'+autoWidth 50；imgupload 默认单卡但 autoWidth 50。
 
 **可靠改法（一条 python 整单改，禁止用 `update_widget` 单改宽度）：**
 1. `query_form(code)` 拿 `desformDesignJson`（`get_form_fields` 只有字段映射，**拿不到 card 行结构**，要行布局必须整单 query）；
 2. 改目标控件 `options`：`autoWidth=100` 且 `width='100%'`；
-3. 把控件挪进**自己独占的 card**：原 card 只留另一半控件（或删）。新 card 照抄现有单控件 card 结构：`{"options":{}, "isContainer":true, "model":"card_"+ms, "type":"card", "isAutoGrid":true, "list":[控件], "key":ms+'_1'}`，`ms=int(time.time()*1000)`，model 与 key 都必须是新值；
+3. 让控件**不与他人共卡**（两种均可：留在根/pane 层裸挂，或挪进自己独占的 card）。挪 card 时：原 card 只留另一半控件（或删）。新 card 照抄现有单控件 card 结构：`{"options":{}, "isContainer":true, "model":"card_"+ms, "type":"card", "isAutoGrid":true, "list":[控件], "key":ms+'_1'}`，`ms=int(time.time()*1000)`，model 与 key 都必须是新值；
 4. 写临时文件 + `save_design_from_file(code, path)` 整单保存；
 5. 再 `query_form` 复核：该控件所在 card 只剩它自己、options 里两个宽度键都在。
 
 若用户已手工在界面改过：先 query 读当前真实结构再动，不要拿旧认知覆盖。改完提示用户硬刷新设计器。
+
+**2026-10-08 复检口径（对需求全量核对宽度/整行时用）：**
+- **归一**：全应用凡 `autoWidth==100` ⇒ `width` 必须 `'100%'`——建表产出可能缺（`''`）或残留 `'180px'`（money 类），需整单补丁全表扫一遍归一。
+- **UI 保存会重排**：用户在设计器里改布局再保存后，UI 按自己的网格重建——共卡字段宽度被均分（1/3→50）、整行卡重新编组。**用户界面动过布局后必须对需求全量复检宽度**；修补前先 `query_form` 读当前设计，保留用户卡片改动再补，不要用旧快照覆盖。
+- **拆卡会换序**：把整行控件从共卡拆出时，新卡插在「原卡之后」——若拆的不是原卡末位成员，就会与相邻字段互换位置（2026-10-08 实测 3 表先后中招）。**拆卡后必须按需求原文复核字段顺序**（顺序核对口径见 `references/app-spec.md`「交付前必须拿需求原文逐表比一遍真机控件顺序」节）。
+- 扫描判定：期望 100 ⇒ autoWidth=100 + width='100%' +（裸挂 或 独占 card）；期望 <100 ⇒ autoWidth 精确等值。
 
 ---
 

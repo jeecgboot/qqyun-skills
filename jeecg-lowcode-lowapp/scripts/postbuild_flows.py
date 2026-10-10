@@ -174,6 +174,14 @@ def more_id(node, t):
             'fieldType': 'input', 'formNodeType': 'getMore', 'formNodeId': node['id'], 'formNodeName': node['name']}
 
 
+def search_id(node, t):
+    """前面 get_one 节点查到的那条记录的 id（写进关联记录字段 / 当条件值）。
+    2026-09-28 生产管理补：以前只有 start_id / more_id / added，「把取单条的记录 id 写回关联字段」
+    写成 search(_g, t, '_id') 会 KeyError（_id 不是字段），需求里「设为 X 的记录id」一类整批写不出来。"""
+    return {'variableValue': '_id', 'formTableCode': CODE[t], 'variableName': '记录id',
+            'fieldType': 'link-record', 'formNodeType': 'search', 'formNodeId': node['id'], 'formNodeName': node['name']}
+
+
 def added(node, t):
     """前面 add 节点刚新增的那条记录的 id（写进关联记录字段）"""
     return {'variableValue': '_id', 'formTableCode': CODE[t], 'variableName': '记录id',
@@ -655,10 +663,25 @@ def _req(method, path, body=None):
         return json.loads(f.read().decode('utf-8'))
 
 
+def _flow_table(fid):
+    """流程所属工作表 code（formTableList 里 start 那条）"""
+    pj = json.loads(((_req('GET', '/act/process/extActProcess/queryById?id=%s' % fid) or {})
+                     .get('result') or {}).get('processJson') or '{}')
+    for x in pj.get('formTableList') or []:
+        if x.get('nodeId') == 'start':
+            return x.get('formTableCode')
+    return None
+
+
 def existing_flows():
+    """{(流程名, 表code): id}。同名流程分属不同表是合法的（需求/线上都有「审核」「撤销」这类
+    挂在多张表上的同名按钮流，2026-09-28 生产管理），所以身份 = 名称 + 表。"""
     r = _req('GET', '/act/process/extActProcess/list?pageSize=500&lowAppId=' + AID)   # 不带 pageSize 只回 10 条
-    return {x.get('processName'): x.get('id') for x in ((r.get('result') or {}).get('records') or [])
-            if x.get('lowAppId') == AID}
+    recs = [x for x in ((r.get('result') or {}).get('records') or []) if x.get('lowAppId') == AID]
+    out = {}
+    for x in recs:
+        out[(x.get('processName'), _flow_table(x.get('id')))] = x.get('id')
+    return out
 
 
 def _sig(pj):
@@ -674,9 +697,10 @@ def _sig(pj):
 
 
 names = [f['name'] for f in FLOWS]
-dup = {n for n in names if names.count(n) > 1}
+_ids = [(f['name'], f['table']) for f in FLOWS]
+dup = {n for n in _ids if _ids.count(n) > 1}
 if dup:
-    sys.exit('流程名重复：%s（同名流程按名查询只返回最新一条，后续换绑会错）' % dup)
+    sys.exit('流程重复（同名且同表）：%s' % dup)
 
 ex = existing_flows()
 replace = {x.strip() for x in A.replace.split(',') if x.strip()}
@@ -690,7 +714,8 @@ for f in FLOWS:
         cfg, pj = build(f)
     except Exception as e:
         res.append('FAIL %s 构建失败：%s' % (f['name'], str(e)[:160])); fail += 1; continue
-    fid = ex.get(f['name'])
+    _key = (f['name'], CODE[f['table']])
+    fid = ex.get(_key)
     if A.dry_run:
         if not fid:
             res.append('PLAN %s 新建（%d 个节点）' % (f['name'], len(walk_nodes(pj)) - 1)); continue
@@ -714,7 +739,7 @@ for f in FLOWS:
         # 与配置无关，但日志只写「已保存但发布失败」，只能手写一次 deploy 才看得到（项目管理 R3）
         res.append('FAIL %s 已保存但发布失败 %s —— %s'
                    % (f['name'], fid, str((d or {}).get('message'))[:200])); fail += 1; continue
-    ex[f['name']] = fid
+    ex[_key] = fid
     res.append('OK %s %s' % (f['name'], fid))
 
 # ── 节点字段权限：按流程名+节点名回读真实节点 id 再配 ──
@@ -722,7 +747,7 @@ if PERMS and not A.dry_run:
     from desform_utils import get_form_fields
     cache, fcache = {}, {}
     for fname, nname, tbl, ed, rq, hd, nth in PERMS:
-        fid = ex.get(fname)
+        fid = ex.get((fname, CODE[tbl])) or next((v for (n, _c), v in ex.items() if n == fname), None)
         if not fid:
             res.append('FAIL 权限 %s/%s：流程不存在' % (fname, nname)); fail += 1; continue
         if fid not in cache:

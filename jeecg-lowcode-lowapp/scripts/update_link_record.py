@@ -72,6 +72,12 @@ FILTER_RULE = {
     "不为空": "NOT_EMPTY", "not_empty": "NOT_EMPTY",
     "是其中一个": "IS_ONE_OF",
     "不是其中一个": "NOT_IS_ONE_OF",
+    # 「属于」原缺席 → 当时只能手写 OR(等于)×N（2026-10-08 实测）。平台原生支持
+    # IS_ONE_OF（radio）/ IN_ONE_OF（多选档），sqParam 都是 in —— 直接映射，按字段档位
+    # 在 build_filter_rule 里再选 IS_ONE_OF / IN_ONE_OF（见该函数）。
+    "属于": "IS_ONE_OF", "不属于": "NOT_IS_ONE_OF",
+    "is_one_of": "IS_ONE_OF", "in_one_of": "IN_ONE_OF",
+    "not_is_one_of": "NOT_IS_ONE_OF", "not_in_one_of": "NOT_IN_ONE_OF",
 }
 FILTER_SQ = {
     "EQ": "eq", "NE": "ne", "GT": "gt", "GE": "ge", "LT": "lt", "LE": "le",
@@ -224,7 +230,7 @@ def norm_filter_rule(raw):
         return key
     mapped = FILTER_RULE.get(key) or FILTER_RULE.get(key.lower())
     if not mapped:
-        raise SystemExit(f"未知筛选规则: {raw}；用 开头是/等于/不等于/大于/大于等于/包含/为空 或大写 EQ/NE/BEFORE/GE")
+        raise SystemExit(f"未知筛选规则: {raw}；用 开头是/等于/不等于/大于/大于等于/包含/属于/为空 或大写 EQ/NE/BEFORE/GE/IS_ONE_OF")
     return mapped
 
 
@@ -271,7 +277,10 @@ def option_labels(src):
     out = {}
     for x in o.get("options") or []:
         if isinstance(x, dict) and x.get("value") is not None:
-            out[str(x.get("label"))] = str(x.get("value"))
+            # label 缺失时回退用 value（老控件只有 {"value","itemColor"}；以前这里 key 落成
+            # "None"，报错文案「可选：None」（2026-10-08 实测）
+            k = x.get("label")
+            out[str(k if k is not None else x.get("value"))] = str(x.get("value"))
     code = o.get("dictCode")
     if code:
         if _DICTS is None:
@@ -290,6 +299,18 @@ def option_labels(src):
 def build_filter_rule(item, source_widgets, current_widgets):
     src = resolve_field(item.get("field") or item.get("name"), source_widgets)
     rule = norm_filter_rule(item.get("rule") or item.get("op") or "EQ")
+    # 「属于/是其中一个」按字段档位落到 IS_ONE_OF（单选）/ IN_ONE_OF（多选）——
+    # 两档 sqParam 都是 in，但设计器面板按字段类型校验可用规则，错档会显示不出条件
+    if rule in ("IS_ONE_OF", "NOT_IS_ONE_OF"):
+        typ = src.get("type")
+        o = src.get("options") or {}
+        multi = (typ == "checkbox"
+                 or (typ == "select" and o.get("multiple"))
+                 or (typ in ("select-user", "select-depart", "select-depart-post", "org-role")
+                     and o.get("multiple"))
+                 or (typ == "link-record" and o.get("showMode") == "many"))
+        if multi:
+            rule = "IN_ONE_OF" if rule == "IS_ONE_OF" else "NOT_IN_ONE_OF"
     value_type = item.get("valueType") or "fixed"
     if value_type in ("本表", "字段"):
         value_type = "field"
@@ -301,6 +322,11 @@ def build_filter_rule(item, source_widgets, current_widgets):
         value_text = cur.get("name") or ""
     else:
         value = as_list(item.get("value"))
+        # 多值规则的值可写顿号/逗号串（「待领取、部分领取」）→ 拆成数组
+        if len(value) == 1 and rule in ("IS_ONE_OF", "NOT_IS_ONE_OF", "IN_ONE_OF", "NOT_IN_ONE_OF"):
+            parts = [p.strip() for p in value[0].replace("、", ",").replace("，", ",").split(",") if p.strip()]
+            if len(parts) > 1:
+                value = parts
         if rule not in ("EMPTY", "NOT_EMPTY") and not value:
             raise SystemExit(f'筛选「{src.get("name")}」缺少 value')
         # 选项类字段：写显示文案（「申报中」）时翻成存储值（"0"），valueText 保留文案。

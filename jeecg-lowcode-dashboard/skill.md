@@ -28,6 +28,10 @@ description: >-
 
 整轮墙钟 = 接口 + 探查往返。开场 memory 计入探查（常见 30–40s），不是准备。接口秒级而整轮分钟级 = 路径违规。
 
+**同一应用要建 ≥2 个盘面 → 按盘面拆 subagent 并行，一个盘面一个 agent。禁止一个 agent 串行做完全部盘面。**（实测：2 个盘面 18 块串行塞给一个 agent 花了 ~29 分钟，占整条关键路径一半；拆成每盘一个 agent 可压到 ~12 分钟。各盘各建自己的 pageId，互不冲突。）两点配套：
+- **菜单/分组/排序一律放最后串行做一次**（分组 `orderNum`、组内顺序）——并行期任何 agent 都不要碰菜单；`create-dashboard --group X` 建的组 `orderNum` 是末位，收尾必须显式重排（`desform_lowapp_utils.apply_menu_order`，**参数是 `[(组名,[子项])]` 列表，不是 dict**）。
+- **给每个 agent 的简报里写死平台的硬限制**，否则它会自己摸索掉时间：`add-buttons` 对 `graphical` **强制最小 h=19**（要求 h<19 只能建后整页改模板）、`add-filter` **没有精确 y 参数**、规格坐标若与 skill 自动铺版校验冲突（KPI h≤12 / 图 h≥20 / 每排=24）就走手工 CLI 路径并显式传 `x/y/w/h`。
+
 **建 ≥5 张盘 → `references/scripts/build_dashboards.py`**（读声明式 `dashboards.json`，一条命令建完；单进程 + 非破坏 + 断点续跑）。**⚠️ `dashboards.json` 的 schema 权威页 = `references/create.md`「批量建盘 `dashboards.json`」——`charts` 必须是「以表单编码为键的对象」，写成数组会整批失败（`'list' object has no attribute 'items'`）且 `--dry-run` 假绿。schema 不确定时先跑「一页一图」的最小 spec，别一次铺满。** 手搓编排器、每操作 `subprocess` 起进程、delete-then-create **三条都禁止**——2026-09-15 实测手搓方案：25 张盘跑 42 分钟，还因 `menus` 抓错列（名称后是 parentId，**drag 的 pageId 在 menuUrl 列**）删盘从未生效，攒出 58 个重复盘。
 
 **判断标准以「轮数」为主：单点 mutate 1 轮、已有盘加图 1 轮、图+查询 2 轮串行、复合盘 1 轮、多表单主链 1 条 Bash；秒数为参考（单点 mutate ≤15–30s、单图旗标加图 ≤30s、复合盘一条 ≤60s、多表单全链 ≤2–3m）**——慢先数轮数；轮数超标查本节禁止项，轮数达标仍久才 `pitfalls-core` 墙钟段。已解析 TID/APP/PAGE 直接用。点名维值跳过 `fields`。互不依赖只读同壳；同页写入串行（失败改参立刻重跑，中间禁 Read/grep）。**口语枚举（本月/按日/包含/柱状图…）进 layout/specs/旗标，脚本归一；禁止为对码读文档或删盘重写 JSON。** 加图（含雷达/四地图/透视/双轴）禁先读 `charts-special`/`gold-specs`（读它确认别名 = 探查；仅白屏/不显示才读）。**单图禁止 Write specs-file**，用 `--oral "原句"` + 点名旗标。勿事后再 mutate。改计算值+标题 = 一条 `set-chart-calc`；改回字段 `--clear --val`。禁止 dump 页 JSON / 手写 py。「不是最新」立刻原命令重跑。追问为何久 → `pitfalls-core` 墙钟段即答，禁再 memory/grep。
@@ -113,6 +117,11 @@ $COMP switch-type "$QQY_API" "$QQY_TOKEN" PAGE_ID --name CHART --to 折线图
 #    "filter":{"title":"查询条件","place":"above","charts":["T"],"conditions":[{"field":"FIELD","mode":"包含"}]}}
 # 多图 = 同数组加元素；位置 = x/y/w/h。省略 x/y = 从上到下顺序排，【不会】自动左右并排；并排必须显式 x/y（2026-09-08：省略坐标 → 4 组件全 x=0 单列堆叠，删盘重建才补上）
 # 数字卡 JNumber 禁叠 "calc":"求和"+数值 val——表含 money 字段（如单价）时引擎自动拼出 $f-2$*$f-4$+$f-1$ 垃圾公式（2026-09-08 实测）；总数卡 val=record_count，合计卡只绑字段、建后 set-chart-calc --formula 求和 升级
+# ⛔ 承上：**只绑字段（不叠 calc）也会被自动拼**。2026-09-30 进销存实测：KPI 只写 "val":"销售订单金额(含税)/元"，
+#   建出来 valueFields 变成 `$money_优惠金额-4$*$number_增值税税率-1$`（= avg(优惠金额)×sum(税率)，纯垃圾）。
+#   这类卡 `set-chart-calc --formula 求和` 会被 CALC_TOKEN_MISMATCH 拒（want=2 got=1）。
+#   正确两步：`set-chart-calc --clear --val 字段原名` → 再 `set-chart-calc --formula 求和`。
+#   建"合计"KPI 前先想好：**金额类字段（money/formula）优先按此两步走**，别指望一次到位。
 # add-filter 禁 --form-name/--oral/--form-code；表单从 charts 推断
 ```
 

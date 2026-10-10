@@ -273,23 +273,99 @@ def stage_dicts(spec, a, work):
         log('[1/7 字典] 规格里没有字典，跳过')
         return 0
     dicts_py = os.path.join(_HERE, 'lowapp_dict.py')
-    ok = 0
+
+    # ⚠️ 后端**不按 dictName 去重**：`--action add` 每次都真建一条新字典（dictCode 由服务端生成），
+    # 所以「无脑 add」对已经建过的应用根本不是幂等的。2026-09-29 进销存实测：同一应用重跑 5 次
+    # build_app → 32 个字典变 160 个副本 → app_audit 报「字典 160 / 规格 32」→ 事后还得写脚本
+    # 逐表扫 options.dictCode 才判得出该保哪份，光去重就烧了 25 分钟。
+    # 这里原先写着「已存在时后端报错，视为通过（幂等）」—— 那个假设是错的，后端不报错。
+    # 现在先回查一次按 dictName 建索引：存在且项一致就沿用，项不一致就按规格覆盖，不存在才新建。
+    exist = {}
+    try:
+        from desform_lowapp_utils import init_lowapp
+        from desform_utils import api_request
+        # prewarm=False：本段只打 /sys/dict/*，用不到「表单编码→ID」缓存，
+        # 预热会白拉一次全租户表单列表（154 表时 22~38 秒）。
+        init_lowapp(a.api_base, a.token, a.tenant_id, a.app_id, prewarm=False)
+        q = api_request('/sys/dict/getDictListByLowAppId', method='GET')
+    except Exception as e:
+        # 宁可停在这里，也不要「回查不了就当没有」——那正是把 32 个字典变 160 个的那条路。
+        log('FAIL:字典回查失败：%s' % e)
+        return 5
+    recs = q.get('result') or []
+    if isinstance(recs, dict):
+        recs = recs.get('records') or recs.get('list') or []
+    for x in recs:
+        if x.get('dictName'):
+            exist.setdefault(x['dictName'], []).append(x)
+    log('[1/7 字典] 应用内已有 %d 条字典记录（%d 个名字）' % (len(recs), len(exist)))
+
+    def _texts(rec):
+        it = rec.get('dictItemsList') or rec.get('items') or []
+        return [str(i.get('itemText', i.get('label', ''))) for i in it]
+
+    n_add = n_keep = n_edit = 0
+    dups, bad = [], []
     for name, opts in items.items():
-        cfg = {'dictName': name,
-               'dictItemsList': [{'itemText': o if isinstance(o, str) else o.get('itemText')}
-                                 for o in opts]}
+        want = [str(o if isinstance(o, str) else (o or {}).get('itemText')) for o in opts]
+        hits = exist.get(name) or []
+        if len(hits) > 1:
+            dups.append((name, len(hits)))
+        # 有多份副本时取**最后一条**：与 patch_fields.load_dicts 的覆盖顺序一致，
+        # 保证「这里认的字典」和「补丁阶段绑的 dictCode」是同一条，不会一个建一个绑。
+        rec = hits[-1] if hits else None
+        if rec and _texts(rec) == want:
+            n_keep += 1
+            continue
+        action = 'edit' if rec else 'add'
+        # 选项三种写法：'文案'（值按下标 0 起）/ {'itemText','itemValue'} / {'label','value'}。
+        # 需求写「1=草稿未提报 / 2=已排期」这类**指定值**时必须用后两种 —— 以前只认 itemText，
+        # {'label','value'} 会落成文本为空的字典项，而本段照样报「就位」（2026-09-28 生产管理实测）。
+        def _item(o):
+            if isinstance(o, str):
+                return {'itemText': o}
+            it = {'itemText': o.get('itemText') or o.get('label')}
+            v = o.get('itemValue', o.get('value'))
+            if v is not None:
+                it['itemValue'] = str(v)
+            return it
+        cfg = {'dictName': name, 'dictItemsList': [_item(o) for o in opts]}
+        bad = [o for o in cfg['dictItemsList'] if not o.get('itemText')]
+        if bad:
+            raise SystemExit('[字典] %s 有 %d 个选项文本为空（写法见 app-spec.md「字典」）' % (name, len(bad)))
         p = os.path.join(work, 'dict.json')
         with open(p, 'w', encoding='utf-8') as fh:
             json.dump(cfg, fh, ensure_ascii=False)
-        r = subprocess.run([sys.executable, dicts_py, '--api-base', a.api_base,
-                            '--token', a.token, '--tenant-id', str(a.tenant_id),
-                            '--app-id', str(a.app_id), '--action', 'add', '--config', p],
-                           capture_output=True, timeout=300)
+        argv = [sys.executable, dicts_py, '--api-base', a.api_base,
+                '--token', a.token, '--tenant-id', str(a.tenant_id),
+                '--app-id', str(a.app_id), '--action', action, '--config', p]
+        if rec:
+            argv += ['--id', str(rec.get('id'))]
+        r = subprocess.run(argv, capture_output=True, timeout=300)
         txt = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', errors='replace')
-        # 已存在时后端报错，视为通过（幂等）
-        ok += 1 if (r.returncode == 0 or '已存在' in txt or 'exist' in txt.lower()) else 0
-    log('[1/7 字典] 期望 %d / 就位 %d' % (len(items), ok))
-    return 0 if ok == len(items) else 5
+        if r.returncode == 0:
+            if action == 'edit':
+                n_edit += 1
+                log('   ~ %s：项与规格不一致，已按规格覆盖（dictCode 不变，控件绑定不受影响）' % name)
+            else:
+                n_add += 1
+                log('   + %s：新建' % name)
+        else:
+            bad.append(name)
+            log('   !! %s：%s 失败 —— %s' % (name, action, txt.strip()[-200:]))
+
+    log('[1/7 字典] 期望 %d / 就位 %d（新建 %d · 沿用 %d · 覆盖 %d）'
+        % (len(items), len(items) - len(bad), n_add, n_keep, n_edit))
+    # 副本是历史重跑留下的既成事实，本段**不删**（哪份被 options.dictCode 引用了，不扫全表判不出来；
+    # 删错就是静默绑空）。只报清楚，交给 app_audit 的「字典 N / 规格 M」当闸门。
+    if dups:
+        log('!! 存在字典副本：%s' % '、'.join('%s×%d' % (n, c) for n, c in dups))
+        log('!! 后端不按 dictName 去重，这是历史重跑留下的。清理时要先扫各表 options.dictCode，')
+        log('!! 保留被控件引用的那份、删其余 —— 别按名字随便删，删错控件会静默变空。')
+    if bad:
+        log('FAIL:字典未就位：%s' % '、'.join(bad))
+        return 5
+    return 0
 
 
 def stage_shell(spec, a, work):
@@ -353,9 +429,26 @@ def stage_patch(spec, a, work):
     sp = os.path.join(work, 'spec_for_patch.json')
     with open(sp, 'w', encoding='utf-8') as fh:
         json.dump(spec, fh, ensure_ascii=False)
-    rc = run_script(pf, ['--api-base', a.api_base, '--token', a.token,
-                         '--tenant-id', a.tenant_id, '--app-id', a.app_id,
-                         '--spec', sp], '补丁')
+    # 跨表依赖链（A 的关联标题/显示字段是 B 的他表字段、B 又从 C 带出）一趟收敛不了：
+    # 2026-09-28 生产管理 53 表首趟 42 处缺口，原样重跑第二趟 0 缺口。所以有缺口就自动再跑，
+    # 最多 3 趟、缺口数不再下降即停（真缺口不会被掩盖，仍非零退出）。
+    gap_file = os.path.join(work, '..', 'patch', 'patch_gaps.json')
+    prev, rc = None, 0
+    for rnd in range(1, 4):
+        rc = run_script(pf, ['--api-base', a.api_base, '--token', a.token,
+                             '--tenant-id', a.tenant_id, '--app-id', a.app_id,
+                             '--spec', sp], '补丁' if rnd == 1 else '补丁(第%d趟)' % rnd)
+        if rc == 0:
+            break
+        try:
+            with open(gap_file, encoding='utf-8') as fh:
+                n = len(json.load(fh))
+        except Exception:                                       # noqa: BLE001
+            n = None
+        if n is None or (prev is not None and n >= prev):
+            break
+        log('[3/7 补丁] 第 %d 趟剩 %s 处缺口，依赖链可能未收敛，再跑一趟' % (rnd, n))
+        prev = n
     log('[3/7 补丁] %s' % ('完成' if rc == 0 else '有缺口（见上面原因分组）'))
     return rc
 

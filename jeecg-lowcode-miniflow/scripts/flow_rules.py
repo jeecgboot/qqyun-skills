@@ -2,7 +2,7 @@
 """流程声明（flow_dsl 的 FLOWS）上的「引擎行为规则」—— 构建前的一道预处理。
 
 为什么有这个模块（2026-09-21 进销存 47 表 / 56 流程真机端到端实测）：
-下面六条引擎行为**全部是静默的** —— save / deploy / 节点契约检查全绿，流程也照跑，
+下面这些引擎行为**全部是静默的** —— save / deploy / 节点契约检查全绿，流程也照跑，
 只有造单据、点确认、回读数据才看得出账错了。那一轮为此在真机上试错约 30 分钟。
 把它们固化成「自动改写 / 构建期报错」，声明怎么写都不会再踩。
 
@@ -15,6 +15,7 @@
 | 5 | 判据取自输入行上复制来的 link-field/summary **快照**时读的是旧值（比较符本身对称、支持小数：ConditionItemComparator:94-185） | 告警：改用取多条/取单条的实时结果 |
 | 6 | 同表同事件多条主流程**都会触发但未必都生效**：`cond` 判的是**当前行**而非触发快照，前一条改了字段后，后一条的条件就不再成立（2026-09-22 进销存 R5 定论）| 告警：合并成一条多分支流程，或改显式链式 |
 | 7 | **子流程内的排他网关实测恒走默认支**（2026-09-22 进销存两例：`盘亏数量>0`、`result()>=0`） | 告警：**已知风险，不是改结构的许可**。照需求原文建 + 在交付里标注，由用户决定。要改成 `get_one + data_branch`（会把「获取多条」塌成「获取单条」）或挪到父流程，**必须先问用户**。教训见 batch-flows.md「禁止语义等价替换」条 |
+| 8 | 分支条件右值写字符串常量：**数值族字段的常量在部署 EL 里不加引号** → 中文名成裸词 → `Unknown property used in expression`、流程触发失败、记录卡 `bpm_status=2`（2026-10-09 生产管理 24 条 / 5 条流程全部静默通过五道闸门） | **报错**（`--lenient` 降级；在 `apply_typed` 的 `_check_branch_values`）：数值族右值禁字符串常量；右值恰好命中同表字段名也拦（疑似把「字段对字段」写成常量）。正确写法 `('var','start'|'<取单条节点名>','字段名')` 或 `ref()` |
 
 用法（build_flows / precheck 都走这两个入口）：
 
@@ -274,9 +275,9 @@ def _check_gateways(flows, rep, strict):
                     where = "流程「%s」网关「%s」分支「%s」" % (f.get("name"), n.get("name"), b.get("name"))
                     if _is_result(subj) and isinstance(val, dict):
                         bucket.append("%s：运算结果建议只和固定数值比（和 ref()/var() 比的写法未验证）" % where)
-                    elif not _is_result(subj) and _is_ref(val):
-                        bucket.append("%s：「字段 vs ref(字段)」比较未经真机验证（此前一次不命中已确认是快照旧值所致）；"
-                                      "稳妥写法：compute() 算差额后判 result()" % where)
+                    # 「字段 vs ref(字段)」右值的形态检查已移到 apply_typed 的 _check_branch_values：
+                    # 2026-10-09 生产管理真机证实——取值对象（valueType:2）在排他/相容网关**均正确求值**，
+                    # 要拦的是**落成常量**（valueType:1）的写法：数值族必崩、文本族恒不成立。
 
 
 def _check_same_event(flows, rep):
@@ -348,6 +349,11 @@ def _node_tables(flow):
 
 _ARITH = re.compile(r"^[\s0-9.+\-*/()]*$")
 NUM_TYPES = {"number", "integer", "slider", "rate"}
+
+# 分支条件右值「字符串常量」会崩的字段族（2026-10-09 生产管理实测）：
+# 部署拼 EL 时按 **type=字段族** 决定加不加引号，数值族不加 —— 中文名变裸词
+# → `Unknown property used in expression`。formula/money 同样落 number 型 EL，一并纳入。
+STR_CONST_CRASH_FAMS = NUM_TYPES | {"money", "formula"}
 
 
 def _expand_formula(table, field, ftype, fexpr, depth=0):
@@ -468,6 +474,71 @@ def _check_judgement_sources(flow, ftype, rep):
                                            % (flow.get("name"), n.get("name"), b.get("name"), subj, ty))
 
 
+def _safe_ftype(ftype, table, field):
+    """ftype(表, 字段) 的容错包装：字段不在这张表上时返回 None（调用方按「认不出」处理）。"""
+    try:
+        return ftype(table, field) if (table and field) else None
+    except (SystemExit, Exception):       # SystemExit 是 BaseException，得单独列
+        return None
+
+
+def _check_branch_values(flow, ftype, rep, lenient):
+    """规则 8：分支条件的右值形态 —— 字符串常量落在数值族字段上**必崩**（2026-10-09 生产管理实测）。
+
+    事故：需求「合格数量 等于 交验数量」（字段对字段）被判据写成裸中文字符串
+    `("合格数量", "等于", "交验数量")`，落库成常量（valueType:"1"）。部署拼 EL 时
+    **数值族字段的常量不加引号**：`eq2('number_…', …, 交验数量)` —— 裸词被 FreeMarker
+    当属性名解析 → `Unknown property used in expression` → 流程触发失败、记录 bpm_status=2
+    卡锁（列表里被锁、无编辑按钮）。全应用 24 条 / 5 条流程曾全部静默通过构造与五道闸门
+    （表达式只在**部署时**生成，processJson 回读看不见）。
+
+    正确写法：右值写 `('var', 'start'|'<取单条节点名>', '字段名')` —— build_flows 自
+    2026-10-09 起直接支持 `ref()/var()` 分支右值（落成取值对象 valueType:2 + valType:"variable"；
+    排他/相容网关真机均正确求值）。文本族字段写字符串常量虽然不崩，但若该字符串**恰好是同表
+    字段名**，几乎必然是把「字段对字段」写错了 —— 一起拦。
+
+    变体：主语是 `ref("字段", node="<取单条节点名>")` 时按**该节点查询的表**解析字段。
+    """
+    bucket = rep["warnings"] if lenient else rep["errors"]
+    ctx = flow.get("table") or flow.get("context")
+    ntab = _node_tables(flow)
+    for n in walk_nodes(flow.get("nodes") or []):
+        if n.get("type") not in ("exclusive", "inclusive"):
+            continue
+        for b in n.get("branches") or []:
+            for c in b.get("cond") or []:
+                if not isinstance(c, (list, tuple)) or len(c) < 3:
+                    continue
+                subj, rule_cn, val = c[0], c[1], c[2]
+                if rule_cn in ("为空", "不为空"):
+                    continue
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                if re.fullmatch(r"-?\d+(\.\d+)?", val.strip()):
+                    continue
+                if isinstance(subj, dict):
+                    node = subj.get("$node") or START
+                    sub_table = ctx if node == START else (ntab or {}).get(node) or ctx
+                    subj_name = subj.get("$ref")
+                else:
+                    sub_table, subj_name = ctx, subj
+                where = "流程「%s」网关「%s」分支「%s」" % (flow.get("name"), n.get("name"), b.get("name"))
+                fam = _safe_ftype(ftype, sub_table, subj_name)
+                if fam in STR_CONST_CRASH_FAMS:
+                    bucket.append(
+                        "%s：「%s」是数值族(%s)字段，右值却是字符串常量 %r —— 部署生成的 EL 对该常量"
+                        "**不加引号**，运行时必报 `Unknown property used in expression: %s`、流程触发失败、"
+                        "记录 bpm_status=2 卡锁（2026-10-09 生产管理 24 条实测）。要「字段对字段」请写 "
+                        "('var','start'|'<取单条节点名>','%s')；确要常量请核对字段族（文本族才收字符串）。"
+                        % (where, subj_name, fam, val, val, val))
+                elif _safe_ftype(ftype, sub_table, val) is not None:
+                    bucket.append(
+                        "%s：右值 %r 恰好是表上的字段名 —— 疑似把「字段对字段」写成了常量（该条件实际是"
+                        "「%s %s 文本常量」，恒不成立；文本族不崩所以更难发现）。要比较两个字段请写 "
+                        "('var','start'|'<取单条节点名>','%s')。"
+                        % (where, val, subj_name, rule_cn, val))
+
+
 def apply_typed(flows, ftype, fexpr=None, rewrite=True, lenient=False, expand_formula=False):
     flows = copy.deepcopy(flows)
     rep = _report()
@@ -475,6 +546,7 @@ def apply_typed(flows, ftype, fexpr=None, rewrite=True, lenient=False, expand_fo
         _fix_inc(f, ftype, fexpr, rep, rewrite, expand_formula)
         _check_compute(f, ftype, rep, lenient)
         _check_judgement_sources(f, ftype, rep)
+        _check_branch_values(f, ftype, rep, lenient)
     return flows, rep
 
 

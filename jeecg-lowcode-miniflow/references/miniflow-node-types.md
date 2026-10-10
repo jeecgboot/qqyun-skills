@@ -2480,7 +2480,7 @@ startType 枚举值（来源：ExtActProcess.java）：
 "startCondition": [
     {
         "id": "969586911868002304",   # 条件组ID（时间戳随机数）
-        "matchType": "",              # 同组内多条件关系：""=AND，"or"=OR
+        "matchType": "",              # 同组内多条件关系：""=AND，"OR"=OR（须大写，小写已证伪）
         "queryItems": [
             {
                 "rule": "eq", "ruleName": "等于",

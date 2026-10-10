@@ -349,6 +349,11 @@ KPI_W, KPI_H = 6, 12          # 一行四个
 # 刚好包住数字。**改像素公式救不了这个**——手工拖出来的同高卡片一样难看。
 CHART_W, CHART_H = 12, 28     # 一行两个
 WIDE_H = 32
+# 标准宽度档位（`create.md` 排版三条硬规则第 2 条）：非这些档位的 w 会让垂直边对不齐。
+W_NOTCHES = (6, 8, 12, 24)
+# 页眉组件：位置由 `finalize_page` 的 ①/①-b 统一决定（标题置顶、查询面板各占一整行），
+# 不属于「图表格子」那一套坐标系，归一化不能碰。
+CHROME_COMPS = ("JText", "JFilterQuery")
 BTN_MIN_H = 20
 # ⚠️ 按钮组（JCustomButton）**不能低于 20 行**。`customButton/Button.vue` 的 `.btn-area`
 # 写死 `min-height: 200px`（外加 `padding:24px 20px`、空 `.title` 还占 `margin-bottom:12px`），
@@ -377,19 +382,27 @@ def _tile_class(comp):
 def _spec_layout_bad(specs, extra=()):
     """规格自带的 x/y/w/h 是否**不合格**（不合格就别尊重它，改用自动铺版）。
 
-    四条判据，都来自真机渲染出来的难看效果（2026-09-22 项目管理 R5）：
+    五条判据，都来自真机渲染出来的难看效果（2026-09-22 项目管理 R5）：
     · 行宽 > 24 → 组件重叠；
     · 中间有整行没人占 → 页面开天窗（项目看板 y=100~111 空了 12 行）；
     · 图类组件高度 < 20 → 图例压在图上（项目状态分布饼图 h=15）；
-    · 数字卡高度 > KPI_H → 一个大空框中间一个小数字。
+    · 数字卡高度 > KPI_H → 一个大空框中间一个小数字；
+    · 同一排组件高度不一致 → 垂直边对不齐，右边吊在半空（`create.md` 排版三条硬规则
+      第 1 条「同一排必须等高：一排里所有组件 h 取该排最大值，全排统一」）。
 
-    ⚠️ 最后一条的门槛原先写 18，结果规格给的 h=16 从门槛下溜过去，自动铺版没接管，
+    ⚠️ 第 4 条的门槛原先写 18，结果规格给的 h=16 从门槛下溜过去，自动铺版没接管，
     真机上四张 KPI 全是大空框（2026-09-22 用户连报三次「贴底」）。门槛一律跟 KPI_H 走，
     别再单独设一个更松的数。
+
+    ⚠️ 第 5 条是**兜底**，正常路径下不该触发：`_normalize_rows` 在建盘前就把混排拆了、
+    同排拉平了。只有它整页让步时才轮到这里——即**图与按钮带相交**的页（那种页整页跳过
+    归一），或外部裸调本函数。它是 2026-09-30 进销存事故的直接补丁：当时 16 张盘里 7 张
+    有「KPI h=12 与图 h=28 并排」，前四条判据一条都拦不住，规格被判成合格原样落位。
+    **别因为"归一已经管了"就删掉它**——归一对按钮并存页是主动放弃的。
     """
     if not specs:
         return None
-    cov, top, bottom = {}, None, 0
+    cov, top, bottom, row_h = {}, None, 0, {}
     # extra：规格给了坐标的按钮组也占行。以前只算图表，按钮组占的那几行被当成「开天窗」，
     # 整页坐标被丢掉、透视表被排到盘底（人事OA-速测19：规格 y=20 落到 y=110）
     for g in list(specs) + [dict(e, comp="JCustomButton") for e in extra]:
@@ -404,6 +417,10 @@ def _spec_layout_bad(specs, extra=()):
                 return "图「%s」高 %d < 20（图例会压在图上）" % (g.get("title") or g.get("comp"), h)
             if cls == "kpi" and h > KPI_H:
                 return "数字卡「%s」高 %d > %d（大空框）" % (g.get("title") or g.get("comp"), h, KPI_H)
+            # 判据 5 的取样：逐行记下非按钮组件的 h。**按钮必须豁免** —— 按钮的 h
+            # 天然与图不同（BTN_MIN_H=20），不豁免会把「按钮与图同 y 并排」误判成不等高。
+            for yy in range(y, y + max(h, 1)):
+                row_h.setdefault(yy, {})[h] = g.get("title") or g.get("comp")
         for yy in range(y, y + max(h, 1)):
             cov[yy] = cov.get(yy, 0) + w
         top = y if top is None else min(top, y)
@@ -414,6 +431,14 @@ def _spec_layout_bad(specs, extra=()):
     hole = next((yy for yy in range(top or 0, bottom) if yy not in cov), None)
     if hole is not None:
         return "第 %d 行整行没有组件（页面开天窗）" % hole
+    # 判据 5：同一排（含竖向重叠）上非按钮组件的 h 只能有一种取值。
+    # 起点不同但区间重叠（h=28@y=0 与 h=12@y=16）也会被判 —— 正确，它们共享 y=16~28，
+    # 视觉上就是错位的。h 相同不误伤。
+    even = next((yy for yy in sorted(row_h) if len(row_h[yy]) > 1), None)
+    if even is not None:
+        (h1, t1), (h2, t2) = sorted(row_h[even].items())[:2]
+        return ("第 %d 行组件高度不一致（%s h=%d 与 %s h=%d）——同一排必须等高，"
+                "全排 h 取该排最大值" % (even, t1, h1, t2, h2))
     return None
 
 
@@ -458,6 +483,116 @@ def _auto_tile(items, y0):
         out.append((c, 0, y, GRID, h))
         y += h
     return out, y
+
+
+# ── 建前归一：把「同一排必须等高」变成构建器的硬约束 ──
+#    `create.md` 排版三条硬规则第 1 条：「一排里所有组件 h 取该排最大值，全排统一。
+#    禁止数字卡 h=17 与柱状图 h=32 并排。」——这条规则**以前只写在文档里，代码里没有
+#    对应的闸门**：`_spec_layout_bad` 的四条判据（行宽>24 / 开天窗 / 图 h<20 / KPI h>12）
+#    一条都拦不住「KPI h=12 与图 h=28 同排」这种规格。于是它四条全过、被判成合格规格
+#    原样落位，盘出来高矮不齐（2026-09-30 进销存：16 张盘里 7 张有混排、共 9 行，
+#    用户截图报障并指出「这个之前优化过」）。**规则写在文档、闸门在代码，两者没接上**
+#    —— 这正是它改过还会再犯的根因。这里把它提前到建盘之前，让错误生不出来。
+#
+#    ⚠️ 混排**必须拆成两排，不能拉平**：KPI 的 h > KPI_H 本身就是判据 ④ 要拒的
+#    （大空框），把 KPI 拉到图的高度等于亲手造一个大空框。`_auto_tile` 的注释
+#    （「数字卡绝不和图并排等高，否则又被拉成大空框」）说的是同一件事，但那是**兜底
+#    路径**——只有规格被判不合格时才跑得到。
+def _normalize_rows(page):
+    """就地归一 `page["charts"]`：同排等高、宽和=24、y 连续。返回是否有改动。
+
+    只动**带坐标**的图表规格（没坐标的走 `_auto_tile`，行为不变）；`page["buttons"]`
+    一字不动（finalize 的 ①-c 读它）。
+    """
+    grp = page.get("charts") or {}
+    if not isinstance(grp, dict):
+        return False
+    # ① 跨表扁平化：首页实测两个表单各出 2 张 KPI 拼成同一排（y=20 的 6/6/6/6）。
+    #    按表单分开归一会把它们各算一排、总宽 48，直接重叠。
+    #    **页眉组件不参与**：盘标题 JText 与查询面板 JFilterQuery 由 `finalize_page` 的
+    #    ①/①-b 统一置顶（`top_h`），它们的 y 是自己的那套坐标系；混进来会让归一以标题为
+    #    原点重排、把图顶到标题下面压住按钮（2026-09-30 首页实测）。
+    flat = [(f, i, c) for f, items in grp.items()
+            for i, c in enumerate(items or [])
+            if isinstance(c, dict) and ("x" in c or "y" in c)
+            and c.get("comp") not in CHROME_COMPS]
+    if not flat:
+        return False
+
+    # ② 图与按钮带相交 → **整页让步**，不做行级跳过：被跳过的行真实高度含 BTN_MIN_H，
+    #    后面几行的重排游标就没有良定义了。交给既有逻辑（判据 ① 抓重叠、finalize ③-b
+    #    处理「半宽按钮 + 图并排」），行为与今天一致。
+    _b = page.get("buttons")
+    _b = [_b] if isinstance(_b, dict) else (_b or [])
+    bands = []
+    for g in _b:
+        if isinstance(g, dict) and ("x" in g or "y" in g):
+            b0 = int(g.get("y") or 0)
+            bands.append((b0, b0 + max(int(g.get("h") or 0), BTN_MIN_H)))
+    for _f, _i, c in flat:
+        c0 = int(c.get("y") or 0)
+        c1 = c0 + max(int(c.get("h") or 0), 1)
+        if any(c0 < b1 and b0 < c1 for b0, b1 in bands):
+            return False
+
+    # ③ 按原 y 分行，行内按原 x 排序；混排拆成「KPI 排」+「其余排」。
+    #    只拆 KPI↔非 KPI：非 KPI 之间（如柱图配透视表）保持并排，靠 ④ 拉平等高就够了
+    #    —— 硬拆成两排会改掉规格作者的并排意图，而规则原文只说「取该排最大值，全排统一」。
+    by_y = {}
+    for f, i, c in flat:
+        by_y.setdefault(int(c.get("y") or 0), []).append((f, i, c))
+    rows = []
+    for y in sorted(by_y):
+        items = sorted(by_y[y], key=lambda t: int(t[2].get("x") or 0))
+        kpis = [t for t in items if _tile_class(t[2].get("comp")) == "kpi"]
+        rest = [t for t in items if _tile_class(t[2].get("comp")) != "kpi"]
+        rows += [kpis, rest] if (kpis and rest) else [items]
+
+    # ④ 每排再按 ≤4 切块（`GRID // 5` = 4 不是标准档位）；KPI 排恒为 KPI_H，
+    #    其余排取该排最大值（含宽表时不低于 WIDE_H），h 全缺省才用 CHART_H。
+    chunks = []
+    for items in rows:
+        kpi_row = all(_tile_class(t[2].get("comp")) == "kpi" for t in items)
+        for i in range(0, len(items), 4):
+            part = items[i:i + 4]
+            if kpi_row:
+                chunks.append((part, KPI_H))
+                continue
+            hs = [int(t[2].get("h") or 0) for t in part]
+            h = max(hs) if any(hs) else CHART_H
+            if any(_tile_class(t[2].get("comp")) == "wide" for t in part):
+                h = max(h, WIDE_H)
+            chunks.append((part, h))
+
+    # ⑤ 宽度：宽和≠24 或含非标准档位 → 按 `GRID // n` 重均分、末位吃余数，
+    #    **必须同时重写 x**（只改 w 会把 8/8/8 变成 12/12/0 重叠）。
+    #    y 从该页最小 y 起连续 —— **不能归零**：finalize 的
+    #    `gy + (btn_shift if gy >= spec_bottom else 0)` 依赖图行保持在按钮带之下，
+    #    归零会让图落进按钮区间、吃不到位移，被 BTN_MIN_H 抬高的按钮直接压图。
+    changed, y = False, min(int(c.get("y") or 0) for _f, _i, c in flat)
+    for part, h in chunks:
+        # ⑤-a 按钮带避让：图行整排重排（本段把 y 拉连续）时不得滑进按钮带 —— 判据与
+        #      `_spec_layout_bad` ② 的 band 相交一致。2026-10-08 实测：首页图表原本
+        #      在按钮带上下两段（按钮 y=0/60），归一把各行连续重排到 y=60..88，压进
+        #      y=60..80 的按钮组 → finalize 判「第 60 行起宽度合计>24」整页弃坐标、
+        #      改自动铺版 → 只能手工读模板回排。此处让游标跳过按钮带，两段图分居按钮上下。
+        while any(y < b1 and b0 < y + h for b0, b1 in bands):
+            y = max(b1 for b0, b1 in bands if y < b1 and b0 < y + h)
+        n = len(part)
+        ws = [int(t[2].get("w") or 0) for t in part]
+        redo = sum(ws) != GRID or any(w not in W_NOTCHES for w in ws)
+        x = 0
+        for k, (_f, _i, c) in enumerate(part):
+            w = (GRID // n) if redo else ws[k]
+            if redo and k == n - 1:
+                w = GRID - x
+            if (int(c.get("x") or 0), int(c.get("y") or 0),
+                    int(c.get("w") or 0), int(c.get("h") or 0)) != (x, y, w, h):
+                changed = True
+            c["x"], c["y"], c["w"], c["h"] = x, y, w, h
+            x += w
+        y += h
+    return changed
 
 
 def finalize_page(page, page_id):
@@ -629,6 +764,69 @@ def finalize_page(page, page_id):
     return ("标题@0 + %d 组件已规整" % len(out)) if texts else ("%d 组件已规整（无标题）" % len(out))
 
 
+def _verify_layout(done_pages):
+    """建后回读核对（只读）：逐页回读 template，核对排版三条硬规则的几何部分。
+
+    「全绿不是验收」——`OK:done 建 16 / 跳过 0 / 失败 0` 只说明命令跑通，**不说明盘长什么样**。
+    2026-09-30 进销存事故里 7 张盘同排高矮不齐，那行摘要照打 OK，用户开浏览器才发现。
+
+    ⚠️ 不复用 `_spec_layout_bad`：它按**规格**判，这里判的是**回读回来的真机 template**，
+    里面有 JText 盘标题（h≈10），过一遍它的「图 h<20」判据会全军覆没。
+
+    ⚠️ 已知盲区：按钮规格的 `h_raw < 20` 时，`finalize_page` 的 `btn_shift` 会在按钮底与
+    下移后的图之间留几行缝，全页扫天窗会误报。所以天窗只扫「第一个非按钮组件 → 最后一个
+    非按钮组件底部」这一段，按钮带的人眼负责。进销存那份规格 `h_raw` 全是 20，不触发。
+
+    返回 `(核对盘数, [排版问题...], [回读失败...])`。回读失败单列 —— 网络抖动不该把一次
+    建得成功的盘判成交付缺陷，所以它只报 WARN、不进退出码。
+    """
+    api, token, tenant, app = AUTH
+    hdr = {"X-Access-Token": token, "X-Tenant-Id": str(tenant), "X-Low-App-ID": str(app)}
+    checked, issues, readfail = 0, [], []
+    for page, pid in done_pages:
+        name = page["name"]
+        try:
+            req = urllib.request.Request(
+                api.rstrip("/") + "/drag/page/queryById?id=" + str(pid), headers=hdr)
+            res = json.load(urllib.request.urlopen(req, timeout=60)).get("result") or {}
+            tmpl = res.get("template")
+            comps = json.loads(tmpl) if isinstance(tmpl, str) and tmpl else (tmpl or [])
+        except Exception as e:                                        # noqa: BLE001
+            readfail.append("%s %s" % (name, str(e)[:60]))
+            continue
+        comps = [c for c in comps if isinstance(c, dict)]
+        if not comps:
+            continue
+        checked += 1
+        cov, row_h = {}, {}
+        top, bottom = None, 0
+        for c in comps:
+            y = int(c.get("y") or 0)
+            h = max(int(c.get("h") or 0), 1)
+            w = int(c.get("w") or 0)
+            for yy in range(y, y + h):
+                cov[yy] = cov.get(yy, 0) + w
+            if c.get("component") == "JCustomButton":
+                continue                       # 按钮不参与「同排等高」（与判据 5 同一豁免）
+            for yy in range(y, y + h):
+                row_h.setdefault(yy, {})[h] = _chart_title(c) or c.get("component")
+            top = y if top is None else min(top, y)
+            bottom = max(bottom, y + h)
+        over = sorted(yy for yy, v in cov.items() if v > GRID)
+        if over:
+            issues.append("%s 第 %d 行宽度合计 %d > 24（重叠）" % (name, over[0], cov[over[0]]))
+            continue
+        hole = next((yy for yy in range(top or 0, bottom) if yy not in cov), None)
+        if hole is not None:
+            issues.append("%s 第 %d 行没有组件（开天窗）" % (name, hole))
+        odd = next((yy for yy in sorted(row_h) if len(row_h[yy]) > 1), None)
+        if odd is not None:
+            (h1, t1), (h2, t2) = sorted(row_h[odd].items())[:2]
+            issues.append("%s 第 %d 行高度不一致（%s h=%d / %s h=%d）"
+                          % (name, odd, t1, h1, t2, h2))
+    return checked, issues, readfail
+
+
 # ---------------- 主流程 ----------------
 
 def _lowcode_workdir(app_id, sub):
@@ -701,6 +899,14 @@ def main():
         pages = [p for p in pages if p["name"] in only]
     if not pages:
         raise SystemExit("FAIL:spec 里没有待建页面")
+
+    # 建前归一（`_normalize_rows`：「同一排必须等高」+ 标准宽度 + y 连续）。放在这里而不是
+    # `finalize_page` 里，是为了让**预校验 / --dry-run / 建盘 / finalize 四条路径读同一份
+    # 坐标** —— 坐标在 add-charts 那趟就烧进 template 了，只放 finalize 意味着新盘生下来
+    # 就是坏的、每张都得靠 finalize 回改。也在删盘之前，归一有问题时不至于先删了旧盘。
+    for p in pages:
+        if _normalize_rows(p):
+            log("NOTE:规格归一 %s —— 混排已拆排、同排已拉平等高" % p["name"])
 
     # ⚠️ 规格预校验要在**删盘之前**：否则 --recreate 先把旧盘删了、再因规格不合格拒建，
     #    应用里那张盘就凭空消失了（2026-09-22 实测踩到）。
@@ -814,8 +1020,24 @@ def main():
                 log("OK:finalize %s %s" % (page["name"], msg))
         except Exception as e:                                # noqa: BLE001
             log("WARN:finalize %s %s" % (page["name"], str(e)[:120]))
+
+    # ③-b 趟：回读核对（只读）。**必须在 ③ 趟 finalize 之后** —— 放在上面 `OK:分组`
+    #      那段是在核对规整前的状态，等于没核。见 `_verify_layout` 的 docstring。
+    layout_bad = 0
+    if done_pages and not a.dry_run:
+        checked, issues, readfail = _verify_layout(done_pages)
+        for it in issues[:8]:
+            log("FAIL:排版 " + it)
+        if len(issues) > 8:
+            log("FAIL:排版 ……其余 %d 条略" % (len(issues) - 8))
+        for it in readfail[:4]:
+            log("WARN:排版回读 %s" % it)
+        if issues:
+            layout_bad = 1
+        else:
+            log("OK:排版 %d 张盘 同排等高、宽和=24、y 连续" % checked)
     log("OK:done 建 %d / 跳过 %d / 失败 %d，%.1fs" % (ok, skip, fail, time.time() - t0))
-    if fail:
+    if fail or layout_bad:
         sys.exit(1)
 
 

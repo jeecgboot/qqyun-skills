@@ -61,12 +61,13 @@ def iter_widgets(node):
         if not isinstance(w, dict):
             continue
         yield w
+        # ⚠️ 这里**只**递归一次：`iter_widgets(w)` 内部已经把 `w['list']`、`w['columns']`、
+        # `w['panes']` 三样都走了。2026-09-30 生产管理 R11 实测：以前在下面又单独遍历了
+        # 一次 `w['panes']`，**Tabs 页签里的每个控件都被吐两遍**（原始 JSON 里只出现 1 次，
+        # 这里返回 2 次、model 相同）—— `patch_fields.do_two_way` 的「目标表指回本表的
+        # 控件有几个」是计数逻辑，于是 13 组双向关联被误判成「有 2 个，歧义」记了缺口。
         for x in iter_widgets(w):
             yield x
-        for p in (w.get('panes') or []):
-            if isinstance(p, dict):
-                for x in iter_widgets(p.get('list') or []):
-                    yield x
     for c in cols:
         if isinstance(c, dict):
             for x in iter_widgets(c):

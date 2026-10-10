@@ -898,12 +898,64 @@ class Builder(object):
 
         if t == "get_one":
             tb = spec["table"]
+            if spec.get("link"):
+                # 「从（触发行的）关联字段取单条」= selectType=3 —— 见 flow_dsl.get_one 文末。
+                # 键集对齐线上模版（金标 取物料档案）：formTableCode/Name = **主表**（本行所在表），
+                # linkFormTableCode/Name/Type = **目标表**，formTableSourceTaskId="start" →
+                # sourceNodeType 由 creator 推成 "table"。
+                # formTableId 按契约落 `form_<来源节点id>_<来源表code>`，源=start 即
+                # `form_start_<主表code>`（node-contract §4/§9.1，闸门同口径，设计器重存实证）。
+                # ⚠️ 2026-10-09 修：此前写 creator 的默认形态 `form_<本节点id>_<主表>` ——
+                # 主流程产物过不了 check_node_contract（判违例）、须建后 fix_linkid.py 外科。
+                # 子流程不受影响：自递归改指（pass ③）按 selectType+sourceTaskId=='start' 匹配，与本初值无关。
+                src_tb = spec.get("from_") or ctx_table
+                if str(src_tb) in ("start", "子流程", "工作表事件触发"):
+                    src_tb = ctx_table
+                scode = self.rv.code(src_tb)
+                d = {"type": "get_one", "name": spec["name"], "selectType": 3,
+                     "sourceTaskId": "start",
+                     "formTableCode": scode, "formTableName": src_tb,
+                     "formTableId": "form_start_%s" % scode,
+                     # ⚠️ 这几个键 `build_get_one_node` 的白名单里**已经有**，写在 attr 里会被丢弃
+                     #    （`attr.update` 只补白名单外的键）→ 必须走顶层参数。
+                     "formTableSourceGetDataType": 1,
+                     "relationField": self.rv.f(src_tb, spec["link"])["model"],
+                     # 目标表只能走 attr：白名单里没有这三个键
+                     "attr": {"linkFormTableCode": self.rv.code(tb), "linkFormTableName": tb,
+                              "linkFormTableType": 1},
+                     "emptyAction": {"继续": 1, "新增": 2, "中止": 3,
+                                     "分支": 3}.get(spec.get("empty"), 1)}
+                # selectType=3 没有条件：给 cond 就当写错了，早点报
+                if spec.get("cond"):
+                    raise KeyError("get_one(%r)：link= 是「从关联字段取」，不能再给 cond"
+                                   % spec["name"])
+                return d
             conds = self._cond_items(spec.get("cond"), tb)
+            # ⚠️ 「用**文本字段**（典型是 `记录id`=`_id`）去等于**本行的一个关联记录字段**」恒不成立。
+            #    本行取值走 formNodeType:"table"，引擎按上下文行取出来的是**数组**（`["2108…"]`），
+            #    于是查询成了 `_id = ["2108…"]` —— 一条都匹配不上，而且**不报错、不中止**，
+            #    下游字段静默写空，save/deploy/回读/契约检查全绿（实测：
+            #    子流程「取物料档案」这么写，子行少掉全部取自它的 5 个字段，只有人工看数据才发现）。
+            #    正确写法是「从触发行关联取」（selectType=3）—— 见 flow_surgery 的 link_get_one。
+            #    **不要**误伤：取值来源是 `search`（某个节点的输出）时引擎给的是标量，是对的，
+            #    「生成」流程里的同款节点就是这么写的、一直正常。
+            for it in conds:
+                v = it.get("val") if isinstance(it.get("val"), dict) else {}
+                if it.get("field") == "_id" and v.get("fieldType") == "link-record" \
+                        and v.get("formNodeType") == "table":
+                    raise KeyError(
+                        "get_one(%r)：条件「记录id 等于 **本行**的关联记录字段 %s」恒不成立 ——\n"
+                        "  本行取值引擎给的是数组，`_id = [\"2108…\"]` 一条都匹配不上，且静默取空。\n"
+                        "  改用「从触发行关联取」(selectType=3)：建完流程后用 flow_surgery 的 "
+                        "{'op':'link_get_one','flow':<流程名>,'node':%r,'link':%r,'src':'start'}"
+                        % (spec["name"], v.get("variableName"), spec["name"], v.get("variableName")))
             d = {"type": "get_one", "name": spec["name"], "getType": 1,
                  "formTableCode": self.rv.code(tb), "formTableName": tb,
-                    # 显式写死 formTableId = form_<本节点 id>_<表 code>（node-contract §9）。
+                    # 显式写死 formTableId = form_<本节点 id>_<表 code>（node-contract §9.1）。
                     # 不写时靠 creator 的 selectType=1 默认分支推导：值一样，但推导过程
                     # 不可见，上游默认一变就静默漂走。
+                    # ⚠️ 仅 selectType=1。selectType=3 不走这里：用 flow_surgery.link_get_one
+                    # （formTableId = form_<来源节点id>_<来源表code>，条目用目标表）。
                     "formTableId": "form_%s_%s" % (spec["id"], self.rv.code(tb)),
                     "conditions": conds,
                     # ⚠️ 「未查到数据时」的口径以**设计器**为准（miniflow_creator
@@ -1164,6 +1216,7 @@ class Builder(object):
                 items = []
                 branch_form = None
                 for (fname, rule_cn, val) in (b.get("cond") or []):
+                    sub_table = ctx_table      # 判据主语的来源表（主语写 ref(字段,node=…) 时改写）
                     # 判据可以是**运算节点的结果**：主语写成 `result("统计条数")`。
                     # 此时 field 固定 "result"、字段源换成该运算节点
                     # （branchForm=function-{funType}）——否则分支按触发行快照取值，
@@ -1174,6 +1227,20 @@ class Builder(object):
                             raise KeyError(
                                 "网关「%s」分支「%s」：判据 result(%r) 找不到对应运算节点"
                                 % (spec["name"], b.get("name"), fname["$result"]))
+                        # ⛔ 判据是**运算节点结果**时，落库的 type/valType 只能是 number（下面写死的），
+                        #    而后端拼 EL 时按它决定「字面量加不加引号」——number 就是**不加引号**。
+                        #    所以右边写**字符串字面量**必炸：
+                        #      eq2('function-fun.function.<节点>.result',…,成品)  → 成品 被当属性解析
+                        #      → 运行时 `Unknown property used in expression`，实例卡死。
+                        #    实测（两条流程栽在这：层级分支、以及「只处理需生产的行」这类行级过滤）。
+                        #    改法：运算节点输出 0/1（IF(…,1,0)），分支条件改成 `等于 1`。
+                        if isinstance(val, str):
+                            raise ValueError(
+                                "网关「%s」分支「%s」：判据 result(%r) 右边是**字符串字面量** %r —— "
+                                "运算节点结果的分支落库 type/valType 恒为 number，EL 里该字面量不会加引号，"
+                                "运行时必报 `Unknown property used in expression`。"
+                                "改成数字：运算节点算式包一层 `IF(<原式>,1,0)`，条件写 `等于 1`。"
+                                % (spec["name"], b.get("name"), fname["$result"], val))
                         fcode = "function-%s" % (rb.get("fun_type") or "fun")
                         items.append({"rule": rule_code(rule_cn),
                                       "ruleName": rule_cn, "valueType": "1",
@@ -1184,34 +1251,57 @@ class Builder(object):
                                        "formNodeId": rb["id"],
                                        "formNodeType": "function"}
                         continue
-                    if isinstance(fname, dict):
-                        # 主语写成 ref(字段, node=取单条节点) —— 以前直接进 self.rv.f() 报
-                        # `unhashable type: 'dict'`，看不出错在哪（2026-09-24 销售-速测18 #4）。
-                        # 分支按「前面节点查到的记录」判的落库形态未实测，不猜，给出两条实测可靠的写法。
+                    if isinstance(fname, dict) and "$ref" in fname:
+                        # ✅ 2026-10-09 起支持：主语写 ref("字段", node="<取单条节点名>") ——
+                        # 判据在那条**取回的记录**上求值（branchForm 指向该节点，gotchas #128 形态）；
+                        # 条件项照常解析该记录表上的字段 model（真机实证：排他/相容网关均可用）。
+                        lnode = fname.get("$node") or "start"
+                        if lnode not in ("start", "子流程", "工作表事件触发"):
+                            lb = self.built.get(lnode)
+                            if not lb:
+                                raise KeyError("网关「%s」分支「%s」：ref(node=%r) 引用的节点还没建"
+                                               "（只能引用前面的节点）" % (spec["name"], b.get("name"), lnode))
+                            if lb.get("type") == "operation":
+                                raise ValueError("网关「%s」分支「%s」：要判运算结果请把主语写成 result(\"%s\")"
+                                                 % (spec["name"], b.get("name"), lnode))
+                            sub_table = lb.get("table") or ctx_table
+                            bf = {"formTableCode": self.rv.code(sub_table), "formNodeId": lb["id"],
+                                  "formNodeType": NODE_FORM_TYPE.get(lb["type"], "search")}
+                            if branch_form and branch_form != bf:
+                                raise ValueError(
+                                    "网关「%s」分支「%s」：同一分支的判据主语引用了两个不同节点 —— "
+                                    "一条分支只能在一张表/一条记录上求值（branchForm 只有一个）"
+                                    % (spec["name"], b.get("name")))
+                            branch_form = bf
+                        fname = fname["$ref"]
+                    elif isinstance(fname, dict):
                         raise ValueError(
-                            "网关「%s」分支「%s」的判据写成了 %s —— 分支条件的主语只能是**触发行字段名**"
-                            "或 result(运算节点)。要按前面 get_one 查到的记录判：① compute(\"取值\", \"$x$\", "
-                            "{\"x\": ref(字段, node=节点名)}) 后用 result(\"取值\") 当主语；② 把条件并进 "
-                            "get_one 的 cond、用 empty=\"分支\" + data_branch() 分流"
+                            "网关「%s」分支「%s」的判据写成了 %s —— 分支条件的主语只能是**触发行字段名**、"
+                            "**ref(字段, node=取单条节点名)** 或 result(运算节点)"
                             % (spec["name"], b.get("name"), fname))
+                    tf = self.rv.f(sub_table, fname)
+                    _ct = self.rv.family(sub_table, fname)
                     if isinstance(val, dict) and ("$ref" in val or "$var" in val):
-                        # 排他网关的分支条件**只支持「字段 vs 字面量」**：值写 ref()/var() 时
-                        # 引擎仍按 valueType:"1" 当字面量比，条件恒假，而且实测父流程会卡在
-                        # bpm=2 不结束（2026-09-22 进销存 R2「收款单-核销」）。
-                        raise ValueError(
-                            "网关「%s」分支「%s」的条件 %s 右侧写了 ref()/var() —— 分支不支持"
-                            "「字段对字段」比较（会恒判失败且父流程卡死）。改法二选一："
-                            "① compute() 算出差值再用 result() 当主语；"
-                            "② get_one(目标表, cond=[(字段, 规则, 值)], empty=\"分支\") + data_branch()"
-                            "（引擎原生，实测可靠）"
-                            % (spec["name"], b.get("name"), fname))
-                    tf = self.rv.f(ctx_table, fname)
-                    _ct = self.rv.family(ctx_table, fname)
+                        # ✅ 2026-10-09 起支持：分支右值写 ref()/var()（「字段 与 另一个字段/变量 比较」）
+                        # —— 落成**取值对象**（valueType:2 + valType:"variable"，见 Resolver.value）。
+                        # 旧结论「分支不支持字段对字段、恒假且父流程卡死」的真因是**值落成了常量**
+                        # （valueType:"1"，EL 里按字面量比；数值族还不加引号 → Unknown property 崩）。
+                        # 真机实证：取值对象形态在排他网关正确命中（2026-10-09 生产管理 24 条修复复验）；
+                        # 相容网关另有 2026-09-28 18/18 命中。
+                        if rule_cn in ("为空", "不为空"):
+                            raise ValueError("网关「%s」分支「%s」：「%s」不带值，不能配 ref()/var()"
+                                             % (spec["name"], b.get("name"), rule_cn))
+                        vv = self.value(val, ctx_table)
+                        items.append({"rule": rule_code(rule_cn), "ruleName": rule_cn,
+                                      "valueType": 2, "val": _cond_val(vv), "name": fname,
+                                      "field": tf["model"], "columnName": fname,
+                                      "type": _ct, "valType": "variable"})
+                        continue
                     # 字面量先翻成**表单真实存储值**（写「冻结释放入库」、库里存 "9"）。
                     # ⚠️ 这里原先直接 `cond_value(_ct, val)` —— 分支条件是**另起炉灶**拼的，
                     # 没走 `_cond_items`，所以主触发条件修好了、**分支条件还是显示名**
                     # （2026-09-21 实测：其他入库单-确认 的分支恒落默认支）。
-                    _raw = val if rule_cn in ("为空", "不为空") else self.rv.field_value(ctx_table, fname, val)
+                    _raw = val if rule_cn in ("为空", "不为空") else self.rv.field_value(sub_table, fname, val)
                     _v, _nm = cond_value(_ct, _raw, self.rv)
                     items.append({"rule": rule_code(rule_cn),
                                   "ruleName": rule_cn, "valueType": "1",
@@ -1683,45 +1773,108 @@ def _own_flow(rec, app_id, tenant_id=None):
 SUB_ROW_NAME = "子流程"     # 子流程内「输入行」的合法别名（= formNodeName 该写的值）
 
 
-def _fix_sub_ownrow_refs(spj, node_id, log_=None):
+def _walk_json(o):
+    """遍历 processJson 里所有 dict（含条件分支）。改已落库的定义时用。"""
+    if isinstance(o, dict):
+        yield o
+        for v in o.values():
+            yield from _walk_json(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _walk_json(v)
+
+
+def _self_calling(spj, sub_id):
+    """子流程自己调自己的**取数节点 id**（= 自调用 callActivity 的 subFormTableObject.nodeId）。
+
+    在**已保存的 processJson** 上探，不看本次构建的 sub_links：自调用节点可能是事后
+    注入/克隆进去的，构建时根本没建（见 flows 里的 ERP2_NO_SELF_CALL 那套）。
+    落库的节点 type 是 `callActivity`（构建器内部才叫 `subprocess`），两个都认。
+
+    返回的是**取数节点**（父流程那个 get_more）的 id，不是 callActivity 自己的 id ——
+    formTableList 的 isSubStart 登记、selectType=3 的 formTableId 用的都是前者。
+    """
+    out = []
+
+    def go(o):
+        if isinstance(o, dict):
+            if (o.get("type") in ("callActivity", "subprocess")
+                    and str((o.get("attr") or {}).get("customProcessId") or "") == str(sub_id)):
+                gm = ((o.get("attr") or {}).get("subFormTableObject") or {}).get("nodeId")
+                if gm:
+                    out.append(gm)
+            for v in o.values():
+                go(v)
+        elif isinstance(o, list):
+            for v in o:
+                go(v)
+
+    go(spj)
+    return out
+
+
+def _fix_sub_ownrow_refs(spj, node_id, log_=None, to_start=False):
     """子流程「本行字段」引用定形 —— 必须在父流程发布**之后**跑（见 main 的 pass ③）。
 
+    to_start=False（默认，**只在子流程只有一个调用方时用**）—— 绑到那个调用方的取数节点。
     落库三键的实测形态（2026-09-20 全库扫 17/17 条手搭子流程一致）：
         formNodeId   = 父流程那个 get_more 节点的 id（= formTableList isSubStart 的 nodeId）
         formNodeName = "子流程"
         formNodeType = "search"
 
-    `Builder.value()` 对「本行」写的是 `table` + `formNodeId:"start"` —— 那是**主流程触发行**
-    的写法，子流程画布上根本没有 start 这个节点。运行时按上下文行取值，所以**跑得对**，
-    但设计器解析不到来源 → 字段值面板「设置的数据」与手动下拉显示不一致（用户报障形态）。
+    to_start=True（**多调用方 / 自递归时用**）—— 改回 `Builder.value()` 的原样
+    （`table` + `formNodeId:"start"`，按上下文行取值，对任何调用方都成立）。
+    配套要求：每个调用方在 `formTableList` 里**各登记一条** isSubStart（见 pass ③）。
+    这条路径同时也是**自愈**的：之前被绑死在某个调用方节点上的引用会在这里掰回来。
+
+    `node_id` 收单个 id 或一组 id（多调用方时传全部调用方 + 自调用的取数节点）。
     本函数只改引用**三键**，不动 variableValue/variableName/formTableCode（那些本来就是对的）。
 
     顺带把 `data_update` 指向「本行」的来源也定形：sub 流程里 source=start 的更新
     写的是 `formTableSourceTaskId:"start"` + `formTableSourceNodeType:"table"`，
     实测形态应为 输入行 nodeId + `"search"`（金标 自动报价2 的「更新报价明细」）。
+    多调用方时反过来保留 `"start"`（同一条更新被每个调用方各跑一次，绑谁的 id 都错）。
     返回 (改写引用数, 改写更新节点数)。
     """
+    ids = tuple(node_id) if isinstance(node_id, (set, frozenset, list, tuple)) else (node_id,)
+    src_ids = {i for i in ids if i}
+    tgt_id = "start" if to_start else (ids[0] if ids else "start")
+    tgt_type = "table" if to_start else "search"
     n_ref = n_upd = 0
 
     def walk(o):
         nonlocal n_ref, n_upd
         if isinstance(o, dict):
-            if o.get("variableValue") and o.get("formNodeId") in (node_id, "start"):
-                if (o.get("formNodeType") != "search"
+            if o.get("variableValue") and o.get("formNodeId") in src_ids | {"start"}:
+                if (o.get("formNodeType") != tgt_type
                         or o.get("formNodeName") != SUB_ROW_NAME
-                        or o.get("formNodeId") != node_id):
-                    o["formNodeType"] = "search"
+                        or o.get("formNodeId") != tgt_id):
+                    o["formNodeType"] = tgt_type
                     o["formNodeName"] = SUB_ROW_NAME
-                    o["formNodeId"] = node_id
+                    o["formNodeId"] = tgt_id
                     n_ref += 1
-            if (o.get("type") == "data_update"
-                    and o.get("formTableSourceTaskId") == "start"):
-                o["formTableSourceTaskId"] = node_id
-                o["formTableSourceNodeType"] = "search"
-                code = o.get("formTableCode")
-                if code:
-                    o["formTableId"] = "form_%s_%s" % (node_id, code)
-                n_upd += 1
+            # ⚠️ `type` 在节点顶层，`formTableSourceTaskId/formTableId/formTableCode` 在 `attr` 里
+            # （gotchas #84 实证落库位置）。以前在同一层 dict 里同时判两者，条件永不成立 ——
+            # 日志恒为「更新节点 0 个」，子流程更新对象全留在 form_start_<code>，设计器显示裸编码
+            # （2026-09-29 生产管理R6：6 条子流程 12 个节点，gotchas #136）。
+            if o.get("type") == "data_update":
+                ua = o.get("attr") if isinstance(o.get("attr"), dict) else o
+                cur = ua.get("formTableSourceTaskId")
+                if to_start:
+                    if cur in src_ids:              # 曾被绑到某个调用方 → 掰回 start
+                        ua["formTableSourceTaskId"] = "start"
+                        ua["formTableSourceNodeType"] = "table"
+                        code = ua.get("formTableCode")
+                        if code:
+                            ua["formTableId"] = "form_start_%s" % code
+                        n_upd += 1
+                elif cur == "start":
+                    ua["formTableSourceTaskId"] = tgt_id
+                    ua["formTableSourceNodeType"] = "search"
+                    code = ua.get("formTableCode")
+                    if code:
+                        ua["formTableId"] = "form_%s_%s" % (tgt_id, code)
+                    n_upd += 1
             for v in o.values():
                 walk(v)
         elif isinstance(o, list):
@@ -1730,8 +1883,8 @@ def _fix_sub_ownrow_refs(spj, node_id, log_=None):
 
     walk(spj)
     if log_ and (n_ref or n_upd):
-        log("OK:subrow 引用 %d 处 + 更新节点 %d 个 → search/%s/%s"
-            % (n_ref, n_upd, SUB_ROW_NAME, node_id))
+        log("OK:subrow 引用 %d 处 + 更新节点 %d 个 → %s/%s/%s"
+            % (n_ref, n_upd, tgt_type, SUB_ROW_NAME, tgt_id))
     return n_ref, n_upd
 
 
@@ -2013,17 +2166,27 @@ def main():
     #    子流程侧：`formTableList[0]`（数据源）+ `subFlowSourceInfo`（谁调我）。
     if a.update or True:
         log("OK:backfill 子流程登记回填 %d 条引用" % len(sub_links))
+        # 每个子流程的全部调用方取数节点 id（去重，按首次出现排序）。
+        # 多个调用方（**包括自己调自己**）时后面的走「多调用方」分支，见下。
+        callers = {}
+        for lk in sub_links:
+            lst = callers.setdefault(lk["sub_id"], [])
+            _nid = (lk.get("obj") or {}).get("nodeId")
+            if _nid and _nid not in lst:
+                lst.append(_nid)
         bound = {}      # 子流程 id → (父流程名, 取数节点 id, 改写的本行引用数)
         for lk in sub_links:
+            # ⚠️ **多调用方子流程的「本行」引用不能绑到某一个调用方的取数节点上。**
+            #    绑了以后，其余调用方运行时解析不到那个节点 → 本行字段全空，而且**不报错**。
+            #    实测：子流程被另一个流程调用、
+            #    又被自己递归调用，绑给了「生成」的 `取下一层BOM行` → 递归层查不到产品档案，
+            #    `来源` 空 → 分析结果全落到 ELSE 的「需委外」（顶层正常，第 2 层起全错）。
+            #    改法：**每个调用方各登记一条** isSubStart，「本行」引用保持
+            #    `Builder.value()` 原样（table / formNodeId:"start"）——
+            #    该形态按**上下文行**取值，对任何调用方都成立（function 节点里的本行 ref
+            #    从来没被改写，一直是 start，一直是好的，可作旁证）。
+            #    单调用方仍走老路（绑到那个调用方的节点，设计器面板能显示来源）。
             prev = bound.get(lk["sub_id"])
-            if prev and prev[1] != (lk["obj"] or {}).get("nodeId") and prev[2]:
-                # 本行引用已经绑到第一个调用方的取数节点；再绑第二个会把第一个调坏，不绑又让第二个取空。
-                # 只能拆成每个调用方一条子流程（precheck 的 _check_shared_subflows 同一条规则，进销存-速测18 S4）
-                log("FAIL:backfill 子流程 %s 同时被「%s」和「%s」逐行调用，且取了本行字段 —— "
-                    "本行取值只能绑一个调用方（已绑前者），「%s」调用时取值全空。每个调用方各建一条子流程"
-                    % (lk["sub_name"], prev[0], lk["main_name"], lk["main_name"]))
-                fail += 1
-                continue
             try:
                 srec = MC.query_flow(a.api_base, a.token, flow_id=lk["sub_id"],
                                      tenant_id=a.tenant_id)
@@ -2032,6 +2195,37 @@ def main():
                     continue
                 spj = srec.get("processJson")
                 spj = json.loads(spj) if isinstance(spj, str) else (spj or {})
+                # 多调用方判据：① 本次构建里被 ≥2 个调用方引用；② **子流程自己调自己**。
+                # ② 必须从**已保存的定义**里探，不能只看本次构建的 sub_links —— 自调用节点
+                # 常常是建完之后单独注入/克隆进去的（flows 里的 ERP2_NO_SELF_CALL 那套），
+                # 构建时压根没建它，漏判就会重跑回「绑死第一个调用方」的老路。
+                self_calls = _self_calling(spj, lk["sub_id"])
+                is_multi = bool(self_calls) or len(callers.get(lk["sub_id"]) or []) > 1
+                # 自递归子流程里「从触发行关联取」(selectType=3) 的 formTableId 要指向它**自己的**
+                # 那个取数节点（线上模版就是取数节点、不是 `form_start_*`）。
+                # 构建器建的时候还不知道递归那一侧的取数节点 id，这里补。
+                if self_calls:
+                    _n = 0
+                    for _o in _walk_json(spj):
+                        _a = _o.get("attr") if isinstance(_o, dict) else None
+                        if (isinstance(_a, dict) and _a.get("selectType") == 3
+                                and _a.get("formTableSourceTaskId") == "start"
+                                and _a.get("formTableCode")
+                                and _a.get("formTableId") != "form_%s_%s" % (self_calls[0],
+                                                                             _a["formTableCode"])):
+                            _a["formTableId"] = "form_%s_%s" % (self_calls[0], _a["formTableCode"])
+                            _n += 1
+                    if _n:
+                        log("OK:subrow 子流程 %s 的 %d 个「从触发行关联取」formTableId → 取数节点 %s"
+                            % (lk["sub_name"], _n, self_calls[0]))
+                if prev and not is_multi and prev[1] != (lk["obj"] or {}).get("nodeId") and prev[2]:
+                    # 本行引用已经绑到第一个调用方的取数节点；再绑第二个会把第一个调坏，不绑又让第二个取空。
+                    # 只能拆成每个调用方一条子流程（同一条规则）
+                    log("FAIL:backfill 子流程 %s 同时被「%s」和「%s」逐行调用，且取了本行字段 —— "
+                        "本行取值只能绑一个调用方（已绑前者），「%s」调用时取值全空。每个调用方各建一条子流程"
+                        % (lk["sub_name"], prev[0], lk["main_name"], lk["main_name"]))
+                    fail += 1
+                    continue
                 obj = dict(lk["obj"])
                 obj["nodeTypeMain"] = "getMore"
                 obj["nodeType"] = "search"          # 子流程侧是 search（主流程侧是 getMore）
@@ -2040,7 +2234,19 @@ def main():
                 # 子流程登记的照样是「子流程」。填成父节点名时设计器下拉会显示成像表名。
                 obj["nodeName"] = SUB_ROW_NAME
                 ftl = spj.get("formTableList") or []
-                if ftl and ftl[0].get("isSubStart"):
+                if is_multi:
+                    # 一个调用方一条登记。**只能追加/原位替换** —— `ftl[0] = obj`
+                    # 会把上一个调用方的登记冲掉，那正是本 bug 的成因。
+                    known = set(callers.get(lk["sub_id"]) or []) | set(self_calls)
+                    ftl = [e for e in ftl if not e.get("isSubStart") or e.get("nodeId") in known]
+                    hit = [i for i, e in enumerate(ftl) if e.get("isSubStart")
+                           and e.get("nodeId") == obj.get("nodeId")]
+                    if hit:
+                        ftl[hit[0]] = obj
+                    else:
+                        ftl.append(obj)
+                    spj["formTableList"] = ftl
+                elif ftl and ftl[0].get("isSubStart"):
                     ftl[0] = obj
                 else:
                     spj["formTableList"] = [obj] + [e for e in ftl if not e.get("isSubStart")]
@@ -2049,11 +2255,13 @@ def main():
                 # 回填趟此前只写了第三处，`start.attr` 留着空壳 `{nodeTypeMain: null}` + `formTableId: null`，
                 # 引擎拿不到「本次处理的是哪张表」→ 子流程里 `ref()` 取空、`var()` 正常，记账类子流程每次都走
                 # missing 分支、新建的行只有 var 写进去的那几个字段（2026-09-22 进销存 R3 实测，四道闸门全绿）。
+                # 多调用方只有第一个调用方写（写第二个 ≠ formTableList[0]，三处就不一致了）。
                 sattr = spj.setdefault("attr", {})
-                sattr["subFormTableObject"] = dict(obj)
-                sattr["formTableId"] = obj.get("formTableId")
-                sattr.setdefault("formTableCode", obj.get("formTableCode"))
-                sattr.setdefault("formTableName", obj.get("formTableName"))
+                if not (is_multi and prev):
+                    sattr["subFormTableObject"] = dict(obj)
+                    sattr["formTableId"] = obj.get("formTableId")
+                    sattr.setdefault("formTableCode", obj.get("formTableCode"))
+                    sattr.setdefault("formTableName", obj.get("formTableName"))
                 src = [x for x in (spj.get("subFlowSourceInfo") or [])
                        if x.get("mainProcessId") != lk["main_id"]]
                 src.append({"mainProcessName": lk["main_name"],
@@ -2062,7 +2270,20 @@ def main():
                 spj["subFlowSourceInfo"] = src
                 # 子流程「本行字段」引用定形（改用 obj["nodeId"] = 父流程那个 get_more 节点）。
                 # ⚠️ 只在取数节点位于**主链路**时才改：分支里的取数，子实例读不到（见 _in_branch）
-                if lk.get("nested"):
+                if is_multi:
+                    # 「本行」引用一律掰回 table/start（自愈：之前被绑到某个调用方节点的
+                    # 也在这里改回来）。多调用方绑任一方，都会让另一方运行时取空。
+                    _fix_sub_ownrow_refs(
+                        spj, set(callers.get(lk["sub_id"]) or []) | set(self_calls),
+                        log, to_start=True)
+                    log("OK:backfill 子流程 %s 登记调用方「%s」（取数节点 %s）；"
+                        "「本行」引用统一 table/start —— 共 %d 个调用方，绑任一方都会让另一方取空"
+                        % (lk["sub_name"], lk["main_name"], obj.get("nodeId"),
+                           max(len(callers.get(lk["sub_id"]) or []), 2)))
+                    if lk["sub_id"] not in bound:
+                        # 第 3 位为 0：多调用方不该触发上面那条「只能绑一个调用方」的 FAIL
+                        bound[lk["sub_id"]] = (lk["main_name"], obj.get("nodeId"), 0)
+                elif lk.get("nested"):
                     log("OK:backfill 子流程 %s 的取数节点在网关分支里 → 取值来源保持 table/start"
                         "（search 形态在这种拓扑下运行时取空）" % lk["sub_name"])
                 else:

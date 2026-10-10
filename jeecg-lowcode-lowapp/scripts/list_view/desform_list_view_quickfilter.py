@@ -113,11 +113,46 @@ def build_query_list(code: str, names) -> list:
             if default:
                 qlist.append({'field': info['model'], 'type': default[0], 'queryType': default[1], 'seq': i})
                 continue
+            # 字段在、类型不在可搜索档（link-field 等 UI dontShowTypes）—— 准确报原因，
+            # 别落到下面那句「未找到字段」（2026-10-08 实测：他表字段被误报「未找到」）。
+            # link-field 有绕行：显式 queryList 直连（field=model、type='link-field'、
+            # queryType='like'），见 desform-list-view.md「config_quick_filter」节。
+            raise ValueError(
+                '字段「%s」类型 %s 不支持字段名自动匹配快速筛选（UI dontShowTypes：link-field/'
+                'daterange/capital-money/ocr 等被禁）—— 可改用显式 queryList（field 传 model、'
+                'type="link-field"、queryType="like"）直连落库，或在需求允许时剔除并登记说明' % (n, info.get('type')))
         if n in _SYS_QUICK_FILTER:
             model, ftype, qt = _SYS_QUICK_FILTER[n]
             qlist.append({'field': model, 'type': ftype, 'queryType': qt, 'seq': i})
             continue
         if n in _SYS_FIELD_NAMES:
             raise ValueError('系统字段「%s」暂无内置快速筛选方式，请用 queryList 显式传 type/queryType' % n)
+        # info 为空：名称不在可搜索字段集。控件可能真实存在但类型不可搜索（他表字段
+        # saveType=view 不进 get_form_fields 字段集）—— 读设计给准确原因。
+        _hit = None
+        try:
+            import json as _json
+            from desform_utils import query_form
+            _design = _json.loads(query_form(code)['desformDesignJson'])
+
+            def _walk(node, acc):
+                if isinstance(node, dict):
+                    acc.append(node)
+                    for v in node.values():
+                        _walk(v, acc)
+                elif isinstance(node, list):
+                    for _i in node:
+                        _walk(_i, acc)
+                return acc
+
+            _hit = next((w for w in _walk(_design, [])
+                         if w.get('name') == n and (w.get('model') or w.get('type'))), None)
+        except Exception:  # noqa: BLE001
+            _hit = None
+        if _hit is not None:
+            raise ValueError(
+                '字段「%s」控件存在但类型 %s 不可作为快速筛选（如他表字段「仅显示」不开搜索）'
+                '—— link-field 可改用显式 queryList 直连（type="link-field"、queryType="like"），'
+                '或按需求剔除并在交付说明登记' % (n, _hit.get('type')))
         raise ValueError('未找到字段: %s；现有: %s' % (n, '、'.join(fields_map)))
     return qlist

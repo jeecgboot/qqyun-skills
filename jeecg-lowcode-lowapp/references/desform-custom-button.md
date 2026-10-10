@@ -340,7 +340,7 @@ COLOR_CYAN   = 'rgb(0, 188, 212)'
 | 操作 | 方法 | 路径 | 说明 |
 |------|------|------|------|
 | 创建按钮 | POST | `/desform/button/save` | 新建按钮 |
-| 更新按钮 | POST | `/desform/button/update` | 更新按钮配置 |
+| 更新按钮 | POST | `/desform/button/update` | 更新按钮配置。⚠️ **是整体覆盖不是局部更新**：只发 `{id, designFormCode, note}` 会把 `label` / `clickThen` / `processId` / `conditionsGroup` / `showStatus` / `buttonFormConfig` **全部清成 null**，接口照样回 `success: true`（页面上按钮变成空白无名）。**必须先 `GET /desform/button/queryById?id=` 取整条、改完再整条 POST 回去**；`desform_button_utils.update_button` 已是这个姿势，裸调接口时要自己补 |
 | 删除按钮 | DELETE | `/desform/button/remove?buttonId={id}&designFormCode={code}` | 删除按钮。⚠️ 实测（2026-09-03）必须同时传 `buttonId` 和 `designFormCode` 两个参数：只传 `id` 报 500「Required request parameter 'buttonId'」，补 `buttonId` 后又报缺 `designFormCode`。curl 示例：`curl -X DELETE ".../desform/button/remove?buttonId=xxx&designFormCode=my_form"` |
 | 查询列表 | GET | `/desform/button/list` | 查询表单/视图的按钮列表 |
 | 查询单个 | GET | `/desform/button/queryById` | 根据 id 查询详情 |

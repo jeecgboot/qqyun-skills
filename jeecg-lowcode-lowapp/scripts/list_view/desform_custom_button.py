@@ -508,9 +508,14 @@ def run(action: str, cfg: dict, app_id: str) -> None:
                    and k not in ('buttonId', 'id', 'global', 'checkOnly',
                                  'conditions', 'conditionsGroup', 'conditions_group',
                                  'conditionType', 'condition_type', 'confirmText')}
-        if not changes and not any(k in cfg for k in ('conditions', 'conditionsGroup', 'conditions_group')):
+        if not changes and not any(k in cfg for k in ('conditions', 'conditionsGroup',
+                                                      'conditions_group', 'confirmText')):
+            # confirmText 也算「要改的字段」：它被上面的列表过滤在 changes 之外，但下面
+            # `if 'confirmText' in cfg` 会把它并进 changes —— 只有 confirmText 的 payload
+            # 以前会在这里被误拒（2026-09-30 生产管理 R11：两个「扫描入库」按钮重跑时报
+            # 「update 必须提供要改的字段」，而它确实带着要改的二次确认文案）。
             raise ValueError('update 必须提供要改的字段（label/icon/color/showStatus/clickThen/'
-                             'conditions/conditionsGroup/processId 等）')
+                             'conditions/conditionsGroup/confirmText/processId 等）')
         if 'buttonFormConfig' in changes:
             form_config = _normalise_form_config({**cfg, 'buttonFormConfig': changes['buttonFormConfig']}, code)
             if form_config is not None:
@@ -626,14 +631,28 @@ def main() -> None:
         return
     try:
         tenant_id = args.tenant_id or resolve_tenant_id(None, tenant_name, args.api_base, args.token)
-        init_lowapp(args.api_base, args.token, tenant_id=tenant_id)
+        # ⚠️ prewarm=False：init_lowapp 默认会打一次 tenantAppFormList（租户级，本租户 4 秒），
+        # 而后置套件是**一个按钮一个子进程** —— 2026-09-30 生产管理 R11 实测：
+        # 43 个按钮 130 次调用 × 每次预热 ≈ 24 分钟白等（关掉后整体 3.5 分钟）。
+        #
+        # 代价（实测，本租户 1009）：`list/reorder/delete/bind/get` 不读字段 = 0 代价；
+        # `create/update` 经 `get_form_fields(code)` → `get_form_id(code)` 缓存未命中，
+        # 每个进程首次多付 4~7 秒，仍低于预热。
+        # ✅ 安全的前提：本 CLI 永远带 `--app-id`、且只碰**本应用**的表和按钮。
+        #    `get_form_id` 的兜底是 `/desform/list`，它受 `X-Low-App-ID` 限定在**当前应用**内
+        #    —— 所以「本应用的表」查得到（R11 实测 5s、R10 4.0s、R2 6.8s），
+        #    **别的应用的表一律 None**（实测同一进程换 app 头即可复现）。
+        #    ⚠️ 唯一例外：按钮表单配置若引用**别的应用**的关联表
+        #    （`_link_record_widget` → `get_form_fields(lr_table)`），那个查不到。
+        #    跨应用场景请把这里改回 prewarm=True（预热是租户级的，能跨应用）。
+        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, prewarm=False)
         app_id = pick(cfg, 'appId') or args.app_id
         if not app_id:
             if args.app_name or pick(cfg, 'appName'):
                 app_id = resolve_app_id(cfg, tenant_id, cli_app_name=args.app_name)
             else:
                 raise ValueError('自定义按钮操作必须提供 --app-id/appId 或 --app-name/appName（按钮挂在设计器层）')
-        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, app_id=app_id)
+        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, app_id=app_id, prewarm=False)
         run(action, cfg, app_id)
     except Exception as e:
         dump(False, action, message=str(e))

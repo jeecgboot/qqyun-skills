@@ -163,7 +163,8 @@ update_list_view('2039961002911772674', name='计划视图', groupField='select_
 | 甘特 `gantt` | `titleField`（**model**）、`ganttFields`：`{beginDateField, endDateField, dateType:"date", defaultView:"day", showUnscheduled:false}` |
 
 ⚠️ **titleField 陷阱：看板传 key（`1788233827189_850656`），日历/甘特传 model（`input_1788233827189_850656`）**，混用会导致标题显示异常。
-⚠️ 视图列表 lite 接口（queryByCodeLite）返回的 `type` 有**映射错位**不可信（实测同一工作表的表格显示 card、看板显示 base），验证/取类型一律以 `queryById` 为准。
+⚠️ **titleField 白名单是硬约束**（前端 `Kanbanshezhi.vue` 的 `titleFieldTypes`：文本类/数值类/link-record/select-user）—— `auto-number` / `text-compose` 等**不能做看板卡片标题**，写了平台必拒（2026-10-08 实测：三处看板标题被拒）。需求点名这类字段当标题时：省略 titleField（看板回退表单标题字段），并在交付说明登记偏差；`config_board` 的报错文案已带此指引。
+⚠️ 视图列表接口 `GET /desform/view/queryByCodeLite?code=<表单code>`（须带 `X-Access-Token` + `X-Tenant-Id` + `x-low-app-id` 头；**参数名是 `code`**，传 `desformCode` 报 500）——用于**数视图/列名字**做交付回读；返回的 `type` 有**映射错位**不可信（实测同一工作表的表格显示 card、看板显示 base），验证/取类型一律以 `queryById` 为准。
 > 低代码 UI 上用户说「图标类型」通常指视图类型本身。改完类型后视图名不自动变，名字与类型不符时应提醒用户改名。
 
 ---
@@ -265,6 +266,10 @@ _, fields = get_form_fields('<form_code>')
 title_key = fields['项目名称']['key']
 update_list_view(view_id, titleField=title_key)
 ```
+
+> ⚠️ **白名单之外的标题字段，本函数直连可落库**（2026-10-08 实测）：`config_board` 会按上表白名单拒
+> auto-number / text-compose 标题与 link-field 分组，但 `update_list_view` 直连写 `titleField`（key）
+> 落库正常、getColumns 体检通过；**前端是否按新标题渲染未核验**。回落走这里，不要再试 `config_board` 参数组合。
 
 **3. 显示字段名称（showLabel）**
 
@@ -841,6 +846,8 @@ config_table_quick_filter(view_id, query_list=[
 > 另可用 `GET /desform/view/queryById?id=<viewId>` 回读原始记录，核对 `queryList` 的键名形态。
 
 > CLI 一键版（推荐，字段名自动匹配）：`{"action":"config_quick_filter","fieldNames":["创建时间","金额1"]}`——按字段中文名转 model，type/queryType 按下表自动匹配，与界面操作完全一致；已收录控件外的写法见下表，未收录时用 `queryList` 显式传参。
+
+> ⚠️ **`fieldNames` 自动匹配会拒 `link-field` 字段（报「未找到字段」，实为 UI 白名单限制、字段其实存在）**——改用显式 `queryList` 直连落库：`field` 传 **model**（中文名不会被解析）、`type: "link-field"`、`queryType: "like"`，落库后按上方体检回读核对。（2026-10-08 实测）
 
 **type / queryType 实测映射表**（采集自界面 `/desform/view/updateViewConfig` 的 queryList payload，2026-09-02，与 UI 保存结果逐字段一致）：
 

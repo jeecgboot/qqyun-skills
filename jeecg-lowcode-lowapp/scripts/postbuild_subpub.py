@@ -22,8 +22,10 @@
     python scripts/postbuild_subpub.py $C --dry-run          # 只列出定义 key 不对的子流程，不保存
     python scripts/postbuild_subpub.py $C --check-only       # 只核验现状，不保存
 
-位置：建完子流程（`build_flows.py` 第一趟、barrier 报未注册）之后、
-      建父流程（`build_flows.py --force`）之前。见 `postbuild-kit.md`「二、运行顺序」。
+位置：建完子流程（`build_flows.py` 第一趟）之后、建父流程之前。
+      ⛔ **本脚本报「实际补发 0 条」时，不要重跑 `build_flows.py`** —— 那只是空跑一趟
+      （62 流程的应用实测要 2.5~6 min，且「建 0 / 跳过 62」），登记没变就没必要。
+      只有真补发过才需要重跑父流程让登记生效。见 `postbuild-kit.md`「二、运行顺序」。
 
 退出码：0 = 全部核验通过；2 = 有失败项（照 `FAIL:` 行排查）；1 = 参数/列表阶段出错。
 """
@@ -161,7 +163,7 @@ def main(argv=None):
         print('==> 正常 0 / 异常 0（没有子流程，无需补发）')
         return 0
 
-    ok = bad = 0
+    ok = bad = fixed = 0
     for rec in subs:
         name = rec.get('processName') or rec.get('id')
         try:
@@ -174,14 +176,23 @@ def main(argv=None):
         print(('OK   ' if good else 'FAIL ') + str(name) + '  ' + note)
         ok += bool(good)
         bad += (not good)
+        # 「真的补发过」= saveFlow+deployProcess 都过了（republish 只在成功后返回该形态）。
+        # 别用「待补发」判：那是 --dry-run 分支的说明，真跑一轮会恒为 0 条。
+        fixed += bool(good and note.startswith('def key ='))
 
-    print('==> 正常 %d / 异常 %d' % (ok, bad))
+    print('==> 正常 %d / 异常 %d（本次实际补发 %d 条）' % (ok, bad, fixed))
     if bad:
         print('提示：仍失败时不要用 /act/process/list 复查（该接口实测 read timeout），'
               '用本脚本的 queryById+processXml 口径。')
         return 2
     if not args.dry_run and not args.check_only:
-        print('下一步：build_flows.py --spec flows.py --force   # 建父流程（子流程会 skip）')
+        # ⛔ 只在真的补发过才要重跑父流程。全部「已就绪」时重跑 build_flows 是纯开销：
+        #    实测 62 流程的应用空跑一趟要 2.5~6 min（2026-09-30 进销存实测），且建 0 条。
+        if fixed:
+            # 补发成功后 barrier 自然放行，重跑**不需要** --force（--force 是放行屏障的带病旗标）
+            print('下一步：build_flows.py --spec flows.py   # 有子流程补发过，重跑父流程让登记生效（不需要 --force）')
+        else:
+            print('下一步：无需重跑 build_flows —— 子流程全部已就绪，父流程登记未变。直接跑 postbuild_subfix.py。')
     return 0
 
 

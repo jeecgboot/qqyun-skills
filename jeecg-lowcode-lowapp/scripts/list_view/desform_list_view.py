@@ -509,9 +509,12 @@ def main() -> None:
     try:
         tenant_id = args.tenant_id or resolve_tenant_id(
             None, tenant_name, args.api_base, args.token)
-        init_lowapp(args.api_base, args.token, tenant_id=tenant_id)
+        # ⚠️ prewarm=False：见 desform_custom_button.py 同一处注释（含实测代价与
+        # 「跨应用查不到」这个前提）—— 每个视图一次子进程，默认预热两次要 4 秒×2；
+        # 本 CLI 只有 create/update 读字段，且只碰本应用的表。
+        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, prewarm=False)
         app_id = resolve_app_id(cfg, tenant_id, args.app_id, args.app_name)
-        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, app_id=app_id)
+        init_lowapp(args.api_base, args.token, tenant_id=tenant_id, app_id=app_id, prewarm=False)
         run(action, cfg, app_id)
     except Exception as e:
         dump(False, action, message=str(e))

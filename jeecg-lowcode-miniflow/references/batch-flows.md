@@ -78,7 +78,7 @@
 > | 项 | 正确形态 | 实际发出 | 面板症状 |
 > |---|---|---|---|
 > | 子流程内取值来源 | `formNodeType:'search'` + `formNodeId`=数据源节点 id | `'getMore'` | 气泡显示「获取多条节点数据」 |
-> | `data_get_one.formTableId` | `form_<本节点id>_<表code>` | `form_start_<表code>` | 更新对象选错 |
+> | `data_get_one.formTableId` | `selectType=3` → `form_<来源节点id>_<来源表code>`（源=start 即 `form_start_<来源表code>`）；其余 → `form_<本节点id>_<表code>` | 一律 `form_start_<表code>` | 面板「节点对象」显示错 |
 > | `data_update` 来源 | 指向前置 `data_get_one` + `'search'` | `'start'`/`'table'` | 同上 |
 > | `updateFields[]` | 含 `id`/`fieldValue`/`valType`/`valueType` | 缺键 | 更新值显示 `[object Object]` |
 > | 审批流 | `approver → data_update` 直连 | 套排他网关两支 | 更新被包在条件里 |
@@ -103,7 +103,7 @@
 | `flow(名称, table=, on=新增/修改/新增\|修改/删除, cond=[(字段,规则,值)], watch=[字段名])` | 主流程；`cond`=触发条件，`watch`=监控字段 |
 | `subflow(名称, context=明细表, params=[变量名])` | 子流程；`params` 声明它要收的流程变量 |
 | `get_one(表, cond=[字段名] 或 [(字段,规则,值)], empty=继续/新增/中止/分支)` | 取单条 |
-| `get_more(表, cond=, sort=, limit=, from_=, name=)` | 取多条。⛔ **`from_` 只认字面量 `"start"`**（=「取本单的关联明细」，发 `selectType=3`）；写字段中文名 / 字段 model 都**不认**，会静默降级成 `getType=1`。**要喂给 `call_sub` 的取多条必须写 `from_="start"`** —— 否则数据对象为空、逐行子流程一行都取不到。⛔ `from_="start"` **不能同时带 `cond`**（selectType=3 不筛选，构建器直接报错）→ 不要的行在子流程里 `compute + gateway` 挡 |
+| `get_more(表, cond=, sort=, limit=, from_=, name=)` | 取多条。⛔ **`from_` 只认字面量 `"start"`**（=「取本单的关联明细」，发 `selectType=3`）；写字段中文名 / 字段 model 都**不认**，会静默降级成 `getType=1`。**要喂给 `call_sub` 的取多条必须写 `from_="start"`** —— 否则数据对象为空、逐行子流程一行都取不到。⛔ `from_="start"` **不能同时带 `cond`**（selectType=3 不筛选，构建器直接报错）→ 不要的行在子流程里 `compute + gateway` 挡。<br>⛔ **`get_more` 的签名里只有 `sort=`、没有 `sort_type=`** —— 写 `sort_type="asc"` 直接 `TypeError: get_more() got an unexpected keyword argument`，**默认是 `desc`**，要升序得建完再补 `attr.sortType`。<br>（对比：`get_one` **有** `sort=`/`sort_type=` —— 两个助手的签名不对称，别互推）|
 | `update(表, {字段: 值})` / `add(表, {字段: 值})` | 改 / 新建 |
 | `approve(名称, users=/roles=)` / `appr(名称, who=发起人/部门/部门负责人)` | **审批**节点；`appr` = 按表达式取审批人 |
 | `fill(名称, users=/roles=/who=)` | **填写**节点（办理人看/改表单） |
@@ -129,9 +129,13 @@
 | 写 / 改记录 | `update(table, mapping, name=, source=)`<br>`add(table, mapping, name=)` | `upd(name, table, [(字段, 值)], src=)`<br>`add(name, table, {…})` |
 | **参数序** | **(表, 字段映射, name=)** | **(name, 表, 字段映射)** ⚠️ **相反** |
 | 取值来源节点 | `source=` / `via=` 收 **节点名字符串** | `src=` 收 **节点对象** ⚠️ **相反** |
-| **取单条的排序** | ✅ `get_one(…, sort="字段中文名", sort_type="asc\|desc")` | ❌ **没有 `sort` 参数**（`postbuild_flows.py:265`）—— 落库无 `sortField`，引擎从命中的多条里**随机**取一条 |
+| **取关联多条明细 + 逐行取值** | `get_more(表, from_="start", name=)`；取值 `ref(字段, node=…)` | `get_more_link(name, 触发表, 关联字段, 明细表)`；逐行取值 `more(节点, 明细表, 明细行上的关联控件名)` 或 `more_id(节点, 明细表)`<br>⚠️ **两者不可互换**：`more_id` 落的是「明细行自身的 `_id`」，**只有目标列本身就指向这张明细表时才对**；目标列指向别的表要用 `more`，否则页面显示「已删除」，而 `save`/`deploy`/闸门**全绿**（见 gotchas **#135**） |
+| **取单条的排序** | ✅ `get_one(…, sort="字段中文名", sort_type="asc\|desc")`。⚠️ **`get_more` 没有 `sort_type=`**（只有 `sort=`，默认 `desc`）—— 要升序得建完补 `attr.sortType` | ❌ **没有 `sort` 参数**（`postbuild_flows.py:265`）—— 落库无 `sortField`，引擎从命中的多条里**随机**取一条 |
+| **字典值从文案翻存储值** | ⛔ **没有 `dv()`** —— 直接**写文案**，由 `Resolver.field_value()` 落库前翻成存储值（**认不出直接报错**）。<br>⚠️ **`app-spec.md` 的「字典」注释写着「用 `dv('订单状态','已接收')` 取」，那是 `pb_flows` 的写法** —— 照它写进 `flows.py` 会当场 `NameError: name 'dv' is not defined`（2026-09-30 库存先进先出踩到） | ✅ `dv('字典名','文案')` |
 | 子流程 / `inclusive` 相容分支 / 运算节点（`compute`/`compute_record`） | ✅ 只有它有 | ❌ 无 |
 | 按钮流（buttonEvent）/ 系统消息收件人=表单字段 / 审批人=表单字段 | ❌ 无 | ✅ 只有它有 |
+| 取单条按记录 id 定位 / 取单条的记录 id 当值 | ❌（`_id` 不在字段表） | ✅ `cond(表,'_id',…)` / `search_id(_g,表)` |
+| **按钮流 + 子流程 / 运算 / 相容分支** | ❌（无按钮触发） | ❌（无这三种节点）—— 两个都不覆盖：用 `flow_dsl` 按表事件建好，再按 gotchas #97 深拷贝改触发键转成 buttonEvent（2026-09-28 生产管理 14 条落在这一档） |
 | 定时（timerEvent）/ 按日期（dateFieldEvent） | ❌ 无 | ❌ 无 —— `timer_job_runner.py` 建简单档；要调子流程 / 函数计算就按 gotchas **#127（2026-09-23）** 手拼（手拼的父流程要写 `subFlowList`，之后跑 `postbuild_subfix.py`；完整配方见下方「定时 + 取多条 + 逐行调已有子流程」节） |
 
 **踩坑症状（三个都不是「文档写错了」，是「文档没写」）：**
@@ -201,6 +205,74 @@
 
 业务语言说「审批」时，先确认要不要看/改表单——**要，就用 `fill()`**。
 
+### `flow_surgery.py` —— 两个构建器都写不出来的档，建完按节点名外科（2026-09-28 生产管理 58 条实测）
+
+`python scripts/flow_surgery.py --api-base … --token … --tenant-id N --app-id A --config ops.py [--dry-run]`，
+`ops.py` 里 `OPS = [...]`，全部幂等（重跑 0 改动）。操作清单（形态均对照 node-contract 与线上同类节点）：
+
+| op | 干什么 | 典型需求原文 |
+|---|---|---|
+| `to_button` | 表事件 → 按钮触发（gotchas #97 键集） | 「按钮事件触发」且要调子流程 / 运算 / 相容分支 |
+| `link_get_one` (`src`=start/节点名) | 取单条改「从关联字段获取」（selectType=3） | 「获取单条记录：从关联字段获取…」 |
+| `get_one_cond` | 取单条改「从工作表按条件取」，条件值取本行/触发行字段 | 「从工作表获取单条，物料编码 等于 …」 |
+| `get_one_var` | 按「记录id 等于 流程参数」取单条 | 子流程收父流程传进来的 JLID |
+| `get_more_from` | 取多条改「从某个取单条结果的关联字段取」，**并同步被调子流程的输入行**（命中三种之一：① callActivity 的 `subFormTableObject.nodeId` 已指向本节点；② **本节点的 `childNode` 就是那个 callActivity**（紧随其后）；③ op 里显式写 `"sync_sub":"<callActivity 节点名>"`。三种都没命中且流程里确有 callActivity → 打 **WARN** 并列出现有输入行，不再静默） | 「从单条记录『成品库』获取关联记录（BOM）」 |
+| `insert_delete` | 在节点后插入「删除记录」（删上游取多条的结果） | 「删除：工作表『物料清单』」 |
+| `set_branch` | 整条重写分支条件：判据可为触发行或某取单条节点；值可为字面量 / 为空 / **另一个表单字段**（`('var', 'start'或节点名, 字段)`） | 「[工作表「产成品质检记录」（触发记录）的「不合格数量」 小于 工作表「产成品质检记录」（触发记录）的「交检数量」]」 |
+| `sequential` | 调子流程改「逐条执行」 | 「逐条执行」 |
+| `swap` | 交换相邻两节点顺序 | 模板顺序与需求不符时 |
+| `rename` | 临时名 → 需求原名 | 见下 |
+
+> ⚠️ **取单条的两种档各有专属 op，按需求原文原话选档 —— 不要按「把现有形态修原生」定档。**
+> 「**从工作表**获取单条，X 等于 …」→ `get_one_cond`（`selectType=1`）；
+> 「**从关联字段**获取单条」→ `link_get_one`（`selectType=3`）。两档形态互斥：
+> 前者 `linkFormTable*` 全空、`formTableId=form_<本节点id>_<表code>` 且**与 formTableList 登记同值**；
+> 后者 `attr.formTableCode` 是**来源表**、`formTableId=form_<来源节点id>_<来源表code>`。
+> **`--dry-run` 报「待保存 N 条」只说明「形态不原生」，不说明「档对」** ——
+> 2026-10-08 销售管理就是先把「从工作表获取单条」手搓成 3，再用 `link_get_one` 修成
+> **"原生但错的档"**，`save`/`deploy`/`check_node_contract` 全绿。
+> **最终验收只有一条：人眼开设计器看节点面板。**
+
+> ⚠️ **`get_more_from` 改完必须回读 callActivity 的四个键**（2026-10-09 生产管理实测事故）：
+> `attr.formTableSourceTaskId` / `attr.formTableId` / `subFormTableObject.nodeId` / `subFormTableObject.formTableId`
+> **四个一起改齐**，且都等于被转换的那个取多条节点。只改一半（例如只改表码、不改 `nodeId` 与
+> `formTableSourceTaskId`）→ 键间自相矛盾，`check_node_contract` 直接判不合格；一个都不改
+> → 逐行子流程拿到 **0 行输入**，**流程 `bpm_status=3` 正常跑完却一条明细都不生成**，五道闸门全绿。
+> 事故场景：流程里有 **≥2 个取数节点**时，builder 把 callActivity 挂在**第一个** `from_="start"` 的取多条上，
+> 而被转换的是**紧随其后**的那个（中间还夹着 `insert_delete`，把前者的行删掉了）。
+> **判据**：改完 `--dry-run` 必须打印 `callActivity「X」输入行 A → B（紧随本节点）`；
+> 只打印 `get_more_from …` 一行 = 没同步（或已同步过）。收尾顺手核一遍
+> `postbuild_subfix --expect N` 的「数据源登记(isSubStart/subFormTableObject ← 父流程)」一行。
+
+> ⚠️ **`set_branch` / `var_cond` 的参数键（2026-10-09 补全 —— 参数写错就是一轮往返）：**
+> `set_branch` = `{'op','flow','branch','src':'start'|'<取单条节点名>','items':[(字段,规则,值)],'match':'AND'|'OR'}`，
+> 同一流程内分支名重复时（「全部合格」在多个网关上各有一条）**必须**加 `'gateway':'<网关名>'` 联定位（或 `'branch_id'`），
+> 否则报「匹配 N 个」。**键名**：条目列表是 **`items`** 不是 `branches`；来源写 **`src`** 不是 `node`；
+> 主语(LHS)写字段中文名，**不写元组**。值：字面量 / `None`(配「为空/不为空」) / `('var','start'|节点名,'字段名')`。
+> `var_cond` = `{'op','flow','gateway','branch','field','rule','var_table','var_field','var_node'}`，只**改写已存在**的条件项。
+> ⚠️ 「排他网关恒假」是 2026-09-22 的旧结论——真因是**值被落成常量**（valueType:"1"；数值族字段的常量
+> 部署 EL 里还不加引号 → 运行时崩，gotchas #146）。取值对象形态排他/相容网关**均**实测可用
+> （2026-09-28 相容 18/18；2026-10-09 生产管理排他全链复验，engine-contract #22 已勘误）。
+
+**顺序（错了会被冲掉）**：`build_flows` → `flow_surgery`（先父后子：父流程取多条改了表，子流程输入行才对）
+→ **`postbuild_subfix.py`**（外科每存一次子流程都会清空「被以下工作流触发」，必须最后回填）→ `check_node_contract.py`。
+
+> ⛔ **这条顺序在交付后同样成立：改完任何流程、`save+deploy` 之后，都要重跑一次 `postbuild_subfix.py`。**
+> 清空 `subFlowSourceInfo` 的不是「存子流程」这一个动作 —— **存父流程一样会清**，
+> 而且清的是**它引用的每一条子流程**（`gotchas.md` #94③）。
+> 2026-09-30 实测（库存先进先出）：外科补完 `自动入库` 重存 → `入库建批次` / `先进先出-补发`
+> 两条子流程的登记由 1 条变 0 条。功能不受影响（端到端照样通），但画布「数据源」变空，
+> **闸门兜不住**（`startType` 仍是 `subEvent`，`check_node_contract` 照报「违例 0」）。
+
+**同名流程**（需求里「审核」「确认入库」挂在多张表上）：`build_flows` 全程按名识别，同名会互相跳过/覆盖。
+先用 `名#表` 临时唯一名建，外科做完再 `rename` 回原名；按钮绑定（`postbuild_appconfig`）与契约闸门都已按「名称 + 表」识别。
+外科里点名同名流程写 `'名称@工作表名'`。
+
+**「字段 vs 另一个表单字段」比较**（`set_branch`/`var_cond` 的 `('var', 节点, 字段)`，或 `flows.py` 直接写 `ref()` —— 2026-10-09 起 `build_flows` 原生支持）：
+相容网关 2026-09-28 冒烟 18/18 命中；**排他网关同样可用**（2026-10-09 生产管理 24 条修复全链复验 —— 旧「排他网关恒假」结论见 engine-contract #22 勘误）。
+⚠️ 别把字段名当**字符串常量**写（数值族字段运行时必崩、文本族恒假，gotchas #146；`flow_rules` 规则 8 构建前拦）。
+限制见 lowapp `engine-contract.md` #34（汇总小数 vs 整数「等于」恒假 → 写成「≥ 且 ≤」）。需要验证分支走向时，按 lowapp `fast-full-chain.md`「⑧-b 端到端冒烟」跑（默认不跑）。
+
 ### 构建前的「引擎行为规则」（`flow_rules.py`，`build_flows` / `precheck` 自动执行）
 
 2026-09-21 先按真机黑盒试错写了六条，当晚对照源码逐条核实后修正（表与源码行号见 `scripts/flow_rules.py` 文首）：
@@ -208,6 +280,7 @@
 | 规则 | 现状 |
 |---|---|
 | 1 数据分支网关名 | **强制「数据分支」**（真因，原「无数据支不执行」是误判）；`--rewrite-databranch` 可选绕行形态 |
+| **1-b 数据分支的前置** | **`data_branch` 必须「紧跟」`get_one(empty="分支")`**，中间不能夹任何节点 —— 否则 `flow_rules.apply_static` 直接 `FAIL: 数据分支前面必须紧跟 get_one(..., empty='分支')`，**整份 `flows.py` 一个流程都建不出来**。⚠️ 这是**拓扑级**约束，不是写法细节：它会把「分支前先取数」的节点逼着**挪进两支里各写一份**（同 `node-contract.md` §6「分支之间没有汇合点」）。**排拓扑时就按这条办**，别等构建报错再整份重排 —— 2026-09-30 库存先进先出实测：核心子流程 `先进先出` 为此整份重写了一遍 |
 | 2 流程建的行不吃默认值 | 被累加的列自动补 0（旧值为空时引擎 NPE） |
 | 3 累加带小数的值归 0 | **构建器**对 number/integer 目标写 `fieldType=money` 走 BigDecimal；对 formula/summary/link-field 目标累加直接报错 |
 | 4 运算节点取「取单条」结果 | 源码未证实 → 只告警 |
@@ -228,7 +301,7 @@
 
 | 缺口 | creator 支持？ | 说明 |
 |---|---|---|
-| **取「当前触发记录自身」当查询条件 / 子流程逐行取本行** | ❌ | `_id` **不在字段表**：`ref("_id")` / `ref("id")` / `cond(表,"_id",…)` 一律 `KeyError`；`record_id()` 只能指向上游 `add()`。→ **「子流程取本行」这种拓扑做不出来**（`call_sub(multi=True)` 要父流程有 `get_more` 提供数据源，而「触发记录自身」写不出来）：逐行处理当前单据明细的逻辑**只能内联进父流程**，一个批次一个 `get_one(empty="分支")` + `data_branch` 块。按钮流「按本单 id 反查」同理，改用**两侧同名同值的业务字段**当桥。⚠️ 受限的只是**按字段中文名解析**这条路：写**值**可用 `lit()`；建后套件 `pb_flows.cond()` 直接收 model，不受此限 |
+| **取「当前触发记录自身」当查询条件 / 子流程逐行取本行** | ❌ | `_id` **不在字段表**：`ref("_id")` / `ref("id")` / `cond(表,"_id",…)` 一律 `KeyError`；`record_id()` 只能指向上游 `add()`。→ **「子流程取本行」这种拓扑做不出来**（`call_sub(multi=True)` 要父流程有 `get_more` 提供数据源，而「触发记录自身」写不出来）：逐行处理当前单据明细的逻辑**只能内联进父流程**，一个批次一个 `get_one(empty="分支")` + `data_branch` 块。按钮流「按本单 id 反查」同理，改用**两侧同名同值的业务字段**当桥。⚠️ 受限的只是**按字段中文名解析**这条路：写**值**可用 `lit()`；建后套件 `pb_flows.cond()` 直接收 model，不受此限。<br>⚠️ **别据此断定「`_id` 不能当查询字段」** —— 本条说的是「取**触发记录自身**」拿不到值；用**变量值**去查 `_id` 是**合法且线上在跑**的形态（查询字段写 `field`/`name`=`记录id`、`type`=`input`，条件值 = 来源行上的某个 link-record 变量，见 gotchas **#45**「查询入库单」）。`flow_surgery` 的 `get_one_cond` 现已支持 `('记录id', '等于', ('start', '<关联字段中文名>'))` |
 | **节点字段权限 `privileges`** | ❌ 节点内那份**无效** | 必须走 `/act/process/extActProcessNodePermission/saveOrUpdateBatch`，见 `field-perm-rule.md` 与 `api-reference.md` |
 | **节点高级设置**（转办/加签/抄送/驳回/自选下一步/超时/表单可编辑） | ✅ 走 `attr` 手写 | 无 DSL 助手；逐项对照表见 `miniflow-node-types.md` **1.4** |
 | 意见分支 `opinion` | ✅ `build_opinion_gateway` | 审批人点按钮选分支（同意/不同意） |

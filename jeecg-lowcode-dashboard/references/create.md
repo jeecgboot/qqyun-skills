@@ -113,7 +113,8 @@ $QQY add-charts API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
 >
 > **整页保存接口：`POST /drag/page/edit`**（**是 POST，PUT 返回
 > `405 不支持PUT请求方法，支持以下POST`**），body `{"id": <pageId>, "template": "<JSON字符串>"}`
-> —— `template` 是**字符串**不是对象，且要带 `X-Tenant-Id` + `X-Low-App-ID`（=应用 ID）。
+> —— `template` 是**字符串**不是对象，且要带 `X-Tenant-Id` + `X-Low-App-ID`（=应用 ID）；
+> **body 必须按 JSON 提交**（`Content-Type: application/json`，form 编码会报 `Content-Type not supported`，2026-10-08 实测）。
 > 保存后 `queryById` 回读、数 `config.chartData` 长度。
 
 - `add-buttons`；布局口语写进 specs（图形/圆角/均分/每行N），脚本解析；`place=top|bottom`
@@ -182,6 +183,10 @@ $QQY edit-filter API TOKEN --tenant-id TID --app-name APP --page-name PAGE \
 `buttons[].buttons[].op` 只认 `qqy_ops._BTN_OP_ALIASES` 里的写法：**创建记录 / 打开列表视图 / 打开页面（=跳转、跳转看板、打开看板）/ 打开链接 / 调用业务流程**。
 `btnType` 写 `button`（纯按钮）或 `graphical`（图形）；`btnWidth: divide` = 每行等分。
 写错 op 或 `page` 点名的看板不存在 → 脚本**预校验拦下、一个按钮都不加**（2026-09-21 起），修好规格重跑即可。
+⚠️ **跳转类按钮（`op: 打开页面`）指向的看板必须先存在**才算"修好规格" → **带跳转按钮的盘（典型是「首页」）
+应排在 `dashboards.json` 的最后建**。若已经先建了：等目标盘全部建好后 `--only 首页 --recreate 首页` 重建一次，
+**要用 `--recreate`**（普通重跑会 `OK:skip` 跳过已存在的盘）。2026-09-30 进销存实测：普通重跑虽补上了按钮组，
+但该盘图表坐标停在旧值（没走 `finalize_page` 规整），`--recreate` 后 7 个组件才归位。
 
 ```bash
 PYTHONIOENCODING=utf-8 PYTHONPATH="$SKILL_REFS:$SKILL_REFS/scripts" \
@@ -202,6 +207,13 @@ python "$SKILL_REFS/scripts/build_dashboards.py" --api-base URL --token TOKEN \
 
 `filters[].charts` 按**图标题**点名。同一页两张图标题互为子串（「对账数量」vs「对账数量2」）会判
 **同名多张**、整盘 FAIL → 标题取**互不为子串**的名字。
+
+> ⛔ **写图表 / 按钮 `y` 的基准 = 最终位置 − 10；页面第一排内容一律写 `y:0`**（2026-10-08 进销存 47 表实测）。
+> `finalize_page` 收尾时把盘标题 `JText` 搬到下标 0、**其余组件整体下移 10**，所以规格里的 `y` 是
+> **相对盘标题之后**的坐标。首排写成 `y:10` 会在盘标题下留 10 单位空档，排版检查直接报
+> **「第 N 行没有组件（开天窗）」、整盘 FAIL** —— 本轮 15 张盘首排全写 `y:10`、全部开天窗，
+> 全量 `y-10` 后一次通过。按钮组同一条（下文第 1 条与此处同源）：`y:0`≈落 10，
+> 图表紧接按钮之后往下写。
 
 > ⚠️ **`place:"top"` 不保证按钮排在上方 —— 必须给按钮组显式 `x/y/w/h`**（2026-09-23 实测）。
 > 需求写「第 1 行大标题、第 2 行 4 个按钮、第 3 行起才是图」时，只写
@@ -276,6 +288,14 @@ calc  calcTitle  queryRange  queryField  customTime  dateGroup
 > 稳妥写法：**KPI 一律 `h:12`，图一律 `h:28`，透视/宽表 `h:32`**，
 > y 按 `0 → 12 → 40 → 72` 这样累加（每行高度必须接上），每排 x 之和**正好** 24。
 > 拿不准就先写「一页一图」跑一遍，看日志有没有 `OK:finalize`，再铺满 16 页。
+
+> ℹ️ **「中途按钮行」（按钮行之后还有图表）自 2026-10-08 起已可正常表达**：`_normalize_rows` 的
+> `y` 游标**跳过按钮带**（与 `_spec_layout_bad` 的 band 相交判据同口径），图表行分居按钮上下。
+> 此前该布局会被判不合格（归一按序压紧行时图表压进按钮带 → 行宽>24）→ 整页弃坐标改自动铺版
+> （旧绕行=建后整页搬数组）。修前症状：日志 `WARN:规格坐标不合格` + 盘长得跟规格完全不一样。
+> 回归口径：`_normalize_rows(page)` 之后 `_spec_layout_bad(charts, extra=buttons)` 应为 `None`。
+> **已建盘改坐标**：改完 `dashboards.json` 后跑 `--spec … --only <盘名> --finalize` 重落位
+> （读模板 → 按规格重排标题/按钮/图 → POST，幂等；不必删盘重建、更不必手写 template 编辑）。
 
 > ⚠️ **`dashboards.json` 没有「多系列 / 按 X 分色」档位。** 需求写「多系列柱状图…按【分类】分色」时，
 > 规格里**表达不出来** → 要么退化单系列，要么回落 `comp_ops`/`set-chart-*` 建后补（成本高）。
@@ -408,6 +428,23 @@ $QQY delete-agg API TOKEN --tenant-id TID --app-name APP --name "聚合名"
   > 或插在查询面板之后 → `POST /drag/page/edit` 整页保存（见上方按钮兜底段的接口说明）。
   > 只调 `add-ui` 的 `--style 整行` **不会**把它放到顶部。
   > 验收：回读 `template`，文本组件的下标必须是 0 或 1（1 = 排在查询面板之后）。
+
+> **三条已由构建器强制**（2026-09-30 起，`build_dashboards.py`）。前两条过去**只写在本文档里**，
+> 代码里没有对应闸门 —— `_spec_layout_bad` 原有的四条判据（行宽>24 / 开天窗 / 图 `h<20` /
+> KPI `h>12`）**一条都拦不住「KPI `h=12` 与图 `h=28` 同排」**，于是这种规格四条全过、被判成
+> 合格原样落位。进销存那 16 张盘里 7 张（9 行）就是这么出来的，用户截图报障并指出「这个之前
+> 优化过」。现在的执行链：
+>
+> | 环节 | 做什么 |
+> |---|---|
+> | `_normalize_rows`（建盘前，`main()` 里） | **混排拆排**（KPI 独占一排，`h=KPI_H`；其余排 `h` 取该排最大值）＋宽和≠24 或非标准档位就重均分＋`y` 连续。跨表共排（两个表单的 KPI 拼一排）按一整排处理 |
+> | `_spec_layout_bad` 判据 ⑤ | 归一被跳过时的安全网（**图与按钮带相交**的页整页让过），命中就打 `WARN:规格坐标不合格` 并整页改自动铺版 |
+> | `_verify_layout`（收尾，③ 趟 finalize **之后**） | 回读 template 逐页核对「同排等高 / 每排宽和=24 / 无天窗」，打 `OK:排版 N 张盘 …` 或 `FAIL:排版 …`，**FAIL 计入退出码** |
+>
+> ⚠️ 混排**必须拆、不能拉平** —— KPI 的 `h > KPI_H` 本身就是判据 ④ 要拒的（大空框）。
+> 所以规格里写混排不会被"拉齐"，而是被拆成两排；想把数字卡和图并排是**做不到的**，别试。
+> 改了归一的逻辑记得跑 `python references/scripts/test_build_dashboards.py`（24 项离线用例，
+> 用进销存事故的真实坐标锁住了拆排/跨表/幂等/闸门自证）。
 
 ### 绑字段时不要二次加工
 

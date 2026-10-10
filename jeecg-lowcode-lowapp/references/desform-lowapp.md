@@ -140,13 +140,21 @@ apps = data['apps']  # [{id, appName, ...}]
 
 **工作表菜单（应用内）**
 
+> ⛔ **查菜单/分组一律用下表的函数，禁止猜 HTTP 路径。** 实测为了拿 `orderNum`
+> 连猜 `/desform/menu/list`、`/desform/menu/tree`、`/desform/getMenu`、`/online/lowApp/menuList` 四个全 404/success=false，
+> 白烧 4 轮。`get_menus()` 一条就够（含 `type`/`menuName`/`menuUrl`/`parentId`/`orderNum`；
+> **仪表盘页面的 pageId 在 `type=='drag'` 那行的 `menuUrl` 列**）。
+> ⚠️ **`apply_menu_order(order)` 的 `order` 是 `[(组名, [子项名, ...]), ...]` 列表，不是 dict** ——
+> 传 dict 会炸 `ValueError: too many values to unpack (expected 2)`（它内部 `for g, _ in expected`）。
+> **新建的分组/盘面 `orderNum` 天然落在末位**，建完必须显式重排一次。
+
 | 函数 | 说明 |
 |------|------|
 | `get_menus(app_id=None)` | 查询应用内所有菜单（工作表+分组） |
 | `get_worksheet_groups(app_id=None)` | ⚡ 只查分组（语法糖，返回 `{count, groups}`） |
 | `edit_worksheet(menu_id, menu_name=None, icon_type=None)` | 修改工作表名称/图标 |
 | `sort_worksheets(order_info)` | 重排工作表顺序（原语） |
-| `apply_menu_order(order)` | ⚡ 保证导航顺序：分组顺序 + 组内顺序，写完回读、幂等（建完应用必跑） |
+| `apply_menu_order(order)` | ⚡ 保证导航顺序：分组顺序 + 组内顺序，写完回读、幂等（建完应用必跑）。`order` = `[(组名,[子项])]` 列表 |
 | `check_menu_order(menu_list, expected=None)` | 只读检查：排序号重复/为空、分组 parentId 混用、顺序是否符合期望 |
 | `delete_worksheet(menu_id)` | ⚠️ 删除工作表（含所有数据） |
 

@@ -163,6 +163,12 @@ $QQY set-chart-filter API TOKEN --tenant-id TID --app-name APP --page-name PAGE 
 > 成功判据是脚本打的 **`FILTERED=<图> field=<model>(<中文名>) op=1 value=<v>`** —— 念一遍 `value=`，
 > 确认它是 `itemValue` 而不是文案。
 >
+> ⛔ **radio/select 族（选项类）字段只支持 `3`包含/`4`不包含/`7`为空/`8`不为空 四个条件，
+> 写 `1`（等于，set-chart-filter 的默认码）不生效**（2026-09-30 用户定性；线上成品卡用 `"3"` 包含≡等于）。
+> 且 `set-chart-filter` 的 op 表**不收「包含」**（只收 等于/不等于/大于/小于/大于等于/小于等于/为空/不为空/范围内，
+> 等于→'1'）→ 选项类字段改码只能：`comp_ops edit --set filter.conditionFields[0].condition=3`
+> （⚠️ 会写成**数字 3**）或整页改 template 存**字符串 `"3"`**（前端严格匹配，与线上一致，推荐）。
+>
 > **这条是跨 skill 的同一条规则**（lowapp 按钮条件 / miniflow `cond`·`updateFields`·`pass_` /
 > 看板 `conditionFields`），三处都是**静默失效**：lowapp 见 `fast-full-chain.md` ⑧「字典值形态」行，
 > miniflow 见 `gotchas.md` #40/#51，本页是看板这一档。

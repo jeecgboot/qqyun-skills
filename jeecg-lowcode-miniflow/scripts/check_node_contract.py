@@ -103,11 +103,14 @@ def check_flow(name, pj):
 
         if t == "data_get_more":
             is_link = a.get("selectType") == 3
+            # 来源是前面某个「取单条」节点（从那条记录的关联字段取多条，如「从成品库取 BOM 清单」）也合法：
+            # formTableSourceTaskId=该节点 id、NodeType=search、formTableId=form_<该节点id>_<来源表>（线上同形态，2026-09-28）
+            from_node = is_link and KIND_BY_ID.get(a.get("formTableSourceTaskId")) == "search"
             if is_link:
                 for k, want in (("getDataType", 1), ("noDataType", 1), ("formType", 2),
                                 ("linkFormTableType", 1),
-                                ("formTableSourceTaskId", "start"),
-                                ("formTableSourceNodeType", "table"),
+                                ("formTableSourceTaskId", a.get("formTableSourceTaskId") if from_node else "start"),
+                                ("formTableSourceNodeType", "search" if from_node else "table"),
                                 ("expressionType", "delegateExpression"),
                                 ("expressionValue", "${getMoreRecordDelegate}")):
                     if a.get(k) != want:
@@ -115,7 +118,10 @@ def check_flow(name, pj):
                 for k in ("linkFormTableField", "linkFormTableCode", "linkFormTableName"):
                     if not nonempty(a.get(k)):
                         BAD.append("%s: getMore 取关联记录缺少 %s" % (nm, k))
-                if not str(a.get("formTableId") or "").startswith("form_start_"):
+                if from_node:
+                    if a.get("formTableId") != "form_%s_%s" % (a.get("formTableSourceTaskId"), a.get("formTableCode")):
+                        BAD.append("%s: getMore.formTableId=%r 应为 form_<来源取单条节点id>_<来源表code>" % (nm, a.get("formTableId")))
+                elif not str(a.get("formTableId") or "").startswith("form_start_"):
                     BAD.append("%s: getMore.formTableId=%r 应为 form_start_<主表code>"
                                % (nm, a.get("formTableId")))
                 if nonempty(a.get("limitNum")) and a.get("limitNum") not in (0, "0"):
@@ -147,7 +153,7 @@ def check_flow(name, pj):
                 sa = src.get("attr") or {}
                 # 真不变量（TaskNodeCreator:249-253）：多实例 collection 变量名由 attr.formTableSourceTaskId 拼，
                 # 而变量是取多条节点按**自己的 activityId** 发布的（GetMoreRecordDelegate:142）。
-                # 三者不一致 → ${flowUtil.stringToList(<id>_assigneeDataIdList)} 取不到 → PropertyNotFoundException。
+                # 三者不一致 → ${minFlowUtils.dataIdsToList(<id>_assigneeDataIdList)} 取不到 → PropertyNotFoundException。
                 if a.get("formTableSourceTaskId") != obj.get("nodeId"):
                     BAD.append("%s: callActivity.attr.formTableSourceTaskId=%r 必须等于数据对象 nodeId=%r"
                                "（引擎用它拼 collection 变量名，不一致必 PropertyNotFoundException）"
@@ -157,7 +163,7 @@ def check_flow(name, pj):
                     BAD.append("%s: 数据对象指向的 getMore 带 linkFormTableField 却 selectType=%r 应为 3"
                                % (nm, sa.get("selectType")))
                 # 多实例的 collection 由平台在**部署时**按源节点 id 生成成
-                # `${flowUtil.stringToList(<源节点id>_assigneeDataIdList)}`（见该流程 processXml；
+                # `${minFlowUtils.dataIdsToList(<源节点id>_assigneeDataIdList)}`（见该流程 processXml；
                 # **processJson 里的 collection 是设计器默认残留，改它没用、看它会被带偏**）。
                 # 不发布这个变量的 getMore → PropertyNotFoundException → 整条异步作业回滚。
                 # 表现极具欺骗性：上游行已建出，只有该节点下游的写入永不发生、
@@ -177,7 +183,7 @@ def check_flow(name, pj):
                 #   3=link_field 走 getRecords(dataId)、4=plus 读新增节点 redis），随后在
                 #   `if (isNotEmpty(records))` 分支里**对所有 selectType 统一** setVariable(
                 #   "<activityId>_assigneeDataIdList", join(dataIds))；TaskNodeCreator 部署时
-                #   固定生成 `${flowUtil.stringToList(<源节点id>_assigneeDataIdList)}`。
+                #   固定生成 `${minFlowUtils.dataIdsToList(<源节点id>_assigneeDataIdList)}`。
                 #   → 真正的不变量是「取到 ≥1 行」，不是 selectType 的取值。取到 0 行 → 变量根本
                 #   不设 → PropertyNotFoundException 回滚（#111 那次正是 selectType=4 取到 0 行）。
                 #   SelectTypeEnums：table=1, more_data=2, link_field=3, plus=4。
@@ -216,12 +222,49 @@ def check_flow(name, pj):
             continue
 
         if t == "data_get_one":
-            # formTableId 必须是 form_<本节点 id>_<表 code>：设计器按它解析
-            # 「这个节点取的是哪张表/哪一行」。落成 form_start_<表code> 时面板指错。
-            want = "form_%s_%s" % (n.get("id"), a.get("formTableCode"))
+            # formTableId 口径（设计器按它解析「取的是哪张表/哪一行」）：
+            #   selectType=1 → form_<本节点 id>_<表 code>（落成 form_start_<表code> 时面板指错）；
+            #   selectType=3 → 见下方来源节点例外（2026-09-30 界面重存实证：UI 就写 form_start_<来源表code>）。
+            # ⚠️ 例外：selectType=3「从关联字段获取单条」挂在**来源行**上 —— formTableCode 是来源表、
+            # formTableId = form_<formTableSourceTaskId>_<来源表code>（node-contract §4；线上生产管理应用的同类节点抽查均为这形态，
+            # 2026-09-28 生产管理对照）。以前一律按本节点 id 判，按契约建的节点反被判违例。
+            if a.get("selectType") == 3 and a.get("formTableSourceTaskId"):
+                want = "form_%s_%s" % (a.get("formTableSourceTaskId"), a.get("formTableCode"))
+            else:
+                want = "form_%s_%s" % (n.get("id"), a.get("formTableCode"))
             if a.get("formTableId") != want:
                 BAD.append("%s: get_one.formTableId=%r 应为 %r"
                            % (nm, a.get("formTableId"), want))
+            # ⚠️ 上面那条断言是**自指**的：它拿 attr.formTableCode 去算 want，formTableCode 自己写错时
+            #    两边一起错、照样判过。2026-10-08 销售管理实测：手写 selectType=3 时把 formTableCode
+            #    写成了**目标表**（formTableId 也跟着错），闸门「违例 0 / 提示 1」，最后是设计器面板
+            #    「选择获取对象/选择关联类型」显示成原始编码才被发现。补两条**外部**不变量堵它：
+            reg = next((e for e in (pj.get("formTableList") or [])
+                        if isinstance(e, dict) and e.get("nodeId") == n.get("id")), None)
+            if a.get("selectType") == 3:
+                # §9.1② + §十三：selectType=3 挂在**来源行**上 → attr.formTableCode = 来源表；
+                # linkFormTableCode = 关联**目标**表，两者必不相等；登记那条的 formTableMainCode = 来源表。
+                lc = a.get("linkFormTableCode")
+                if nonempty(lc) and lc == a.get("formTableCode"):
+                    BAD.append("%s: get_one(selectType=3) attr.formTableCode=%r 与关联目标表"
+                               "（linkFormTableCode）相同 —— selectType=3 的 formTableCode 必须是"
+                               "**来源表**；写成目标表时 formTableId 跟着错、面板显示原始编码"
+                               % (nm, a.get("formTableCode")))
+                if reg is not None:
+                    if reg.get("selectType") != 3:
+                        BAD.append("%s: formTableList 登记 selectType=%r，节点 attr.selectType=3"
+                                   "（应同值）" % (nm, reg.get("selectType")))
+                    elif nonempty(reg.get("formTableMainCode")) \
+                            and reg.get("formTableMainCode") != a.get("formTableCode"):
+                        BAD.append("%s: 登记 formTableMainCode=%r 应等于来源表 attr.formTableCode=%r"
+                                   % (nm, reg.get("formTableMainCode"), a.get("formTableCode")))
+            elif reg is not None and nonempty(a.get("formTableId")) and nonempty(reg.get("formTableId")) \
+                    and reg.get("formTableId") != a.get("formTableId"):
+                # selectType=1：node-contract §4「与**本节点自己的** formTableList 登记同值」——
+                # 不同值 = 设计器按登记解析、面板显示原始串（2026-10-08 销售管理实测）。
+                BAD.append("%s: get_one(selectType=1) attr.formTableId=%r 与 formTableList 登记 %r "
+                           "不同值 → 设计器「选择获取对象」显示原始编码"
+                           % (nm, a.get("formTableId"), reg.get("formTableId")))
             # —— 排序（`flow_dsl.get_one(..., sort=, sort_type=)`）——
             # 半配就是坏的：sortType 有值而 sortField 空 = 调用方以为写了排序、引擎当没有。
             # ⚠️ 「该不该有排序」闸门判不了（多数 get_one 确实不需要），这里只判
@@ -981,6 +1024,29 @@ def check_display(name, pj):
             if why:
                 BAD.append("%s: attr.funText=%r 无法解析 —— %s" % (nm, a["funText"], why))
 
+    # ③ data_update 的「选择更新对象」：设计器拿 attr.formTableId 去 formTableList 里**按值匹配**条目，
+    # 匹配不上就显示原始串（`form_start_t7c69a29` 这种）。上面 ① 只验「引用能解析到节点」——
+    # 子流程里 form_start_<code> 照样能解析（ids 里有 start），于是一路全绿。
+    # 2026-09-29 生产管理R6：6 条子流程 12 个更新节点全停在 form_start_<code>，
+    # 而子流程 formTableList 里只有 isSubStart 那条（form_<父getMore>_<code>）→ 全部显示编码（#136，同族 #102）。
+    ftl_ids = {str(e.get("formTableId")) for e in ftl
+               if isinstance(e, dict) and nonempty(e.get("formTableId"))}
+    sub_ftid = next((str(e.get("formTableId")) for e in ftl
+                     if isinstance(e, dict) and e.get("isSubStart")), None)
+    for n in ns:
+        if n.get("type") != "data_update":
+            continue
+        a = n.get("attr") or {}
+        fid = a.get("formTableId")
+        if nonempty(fid) and str(fid) not in ftl_ids:
+            hint = ""
+            if sub_ftid and str(fid).startswith("form_start_"):
+                hint = "；子流程更新「本行」应指向输入行：formTableSourceTaskId=%s + " \
+                       "formTableSourceNodeType='search' + formTableId=%r" % (sub_src, sub_ftid)
+            BAD.append("%s / %s: data_update 更新对象 attr.formTableId=%r 在 formTableList 里"
+                       "没有同值条目 → 设计器「选择更新对象」显示原始编码（#136/#102）%s"
+                       % (name, n.get("name") or "data_update", fid, hint))
+
     # ④ 消息节点：{{<hash>.<字段名>}} 必须在 jsonContext 里有绑定。
     # 2026-09-20 实测：只写 templateContext、不写 jsonContext，save/deploy/回读全绿、
     # 消息也照发，但占位符处**全空** —— 只有消息发出去才暴露（#55 / gotchas 4 键）。
@@ -1061,8 +1127,11 @@ def check_display(name, pj):
                     % (name, n.get("name") or t, nid, a.get("formTableCode")))
 
 
+FLOW_TBL = {}     # 流程 id → 所属表 code（同名流程分属不同表是合法的，2026-09-28 生产管理：审核/撤销… 各挂 3 张表）
+
+
 def duplicate_name_bad(recs, only=None):
-    """同名重复副本：`query_flow` 按名只返回**最新**一条，副本会让「我修的那条」和
+    """同名重复副本（按「流程名 + 所属表」判重；同名不同表不算）：`query_flow` 按名只返回**最新**一条，副本会让「我修的那条」和
     「校验器看的那条」不是同一个 —— 违例怎么改都下不去（2026-09-20 实测）。"""
     out = []
     byname = {}
@@ -1070,8 +1139,8 @@ def duplicate_name_bad(recs, only=None):
         nm = str(x.get("processName") or "")
         if not nm or (only and only not in nm):
             continue
-        byname.setdefault(nm, []).append(str(x.get("id")))
-    for nm, xs in sorted(byname.items()):
+        byname.setdefault((nm, FLOW_TBL.get(str(x.get("id")))), []).append(str(x.get("id")))
+    for (nm, _tbl), xs in sorted(byname.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
         if len(xs) > 1:
             out.append("%s: 有 %d 个同名副本 id=%s —— 按名查询只会拿到最新那条，"
                        "先把副本删掉再改，否则改的和验的不是同一个"
@@ -1129,6 +1198,23 @@ def _mut_update_srctype(pj, declared="getMore"):
                                    "valType": "variable", "fieldType": "link-record",
                                    "val": {"formNodeId": "task1", "formNodeType": "getMore",
                                            "variableName": "记录id", "variableValue": "_id"}}]}}
+    return pj
+
+
+def _mut_sub_update_start(pj, fixed=False):
+    """把样例改成子流程：formTableList 只有 isSubStart 输入行（父流程 get_more = taskP），
+    其后挂一个更新「本行」的 data_update。`fixed=False` 是缺陷形态（停在 start），
+    `fixed=True` 是正确形态（指向输入行），用于「不得误报」回归。"""
+    sub = {"nodeId": "taskP", "nodeType": "search", "nodeTypeMain": "getMore", "isSubStart": True,
+           "formTableId": "form_taskP_tAAA", "formTableCode": "tAAA"}
+    pj["formTableList"] = [sub] + [e for e in pj["formTableList"] if e.get("nodeId") != "start"]
+    pj["childNode"]["childNode"] = {
+        "id": "task2", "name": "更新前数量", "type": "data_update",
+        "attr": {"formTableSourceTaskId": "taskP" if fixed else "start",
+                 "formTableSourceNodeType": "search" if fixed else "table",
+                 "formTableCode": "tAAA",
+                 "formTableId": "form_taskP_tAAA" if fixed else "form_start_tAAA",
+                 "updateFields": [{"field": "input_1", "fieldType": "input", "val": "x"}]}}
     return pj
 
 
@@ -1199,6 +1285,11 @@ SELF_TESTS = [
     ("data_update 来源是 get_one 却声明成 getMore（静默更新不到任何行）",
      _mut_update_srctype,
      "formTableSourceNodeType 应为 'search'"),
+    # 2026-09-29 生产管理R6：子流程更新「本行」停在 form_start_<code>，formTableList 里只有
+    # isSubStart 那条 → 设计器「选择更新对象」显示原始编码；save/deploy/其余闸门全绿（#136）。
+    ("子流程 data_update 更新对象停在 form_start_<code>（#136）",
+     _mut_sub_update_start,
+     "没有同值条目"),
 ]
 
 
@@ -1248,6 +1339,13 @@ def self_test():
     check_flow("来源类型正确样例", pj)
     if any("formTableSourceNodeType" in b for b in BAD):
         fails.append("来源类型正确（search）却被误报: %s" % BAD)
+
+    # 子流程更新对象**指向输入行**时不得误报（#136 新检查的反向回归）
+    del BAD[:], WARN[:]
+    pj = _mut_sub_update_start(_copy.deepcopy(_fx_clean()), fixed=True)
+    check_display("子流程更新对象正确样例", pj)
+    if any("没有同值条目" in b for b in BAD):
+        fails.append("子流程更新对象正确（指向输入行）却被误报: %s" % BAD)
 
     # 审批人能不能解析到人（2026-09-24）
     global TENANT_ROLES, USER_EXISTS
@@ -1461,6 +1559,8 @@ def main():
                     continue
         if not isinstance(pj, dict):
             continue
+        FLOW_TBL[str(x.get("id"))] = next((e.get("formTableCode") for e in pj.get("formTableList") or []
+                                         if e.get("nodeId") == "start" or e.get("isSubStart")), None)
         check_flow(nm, pj)
         check_approvers(nm, pj)
         check_extra(nm, det, pj, call_meta, DEF_KEYS, str(x.get("id")) in called)
