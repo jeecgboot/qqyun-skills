@@ -2961,9 +2961,10 @@ approverGroups[0].variableContent[0].fieldType
 **自测入口（不用麻烦用户，可直接造数跑通整条审批）**：
 ```
 POST /act/designer/miniDesFlow/api/buttonStartProcess
-     ?processId=<流程DBid>&dataId=<记录id>&formKey=<表code>&applyUserId=admin&inputParams=[]
+     ?processId=<流程DBid>&dataId=<记录id>&formKey=<表code>&inputParams=[]
 ```
-⚠️ 五个参数都是 **query 参数**（放 body 里报 `Required request parameter 'processId'`）。
+⚠️ 参数都是 **query 参数**（放 body 里报 `Required request parameter 'processId'`）。
+⚠️ 2026-10-14 起发起人一律取**当前登录用户**，`applyUserId` 传了也被忽略（防冒充他人发起）；要以别的身份发起，换那个账号登录拿 token。
 配合 `add_data` 造单即可 A/B 任意办理人取值，再回读 `/act/task/myTodo` 判定。
 
 ## 110. 同一信号被**多个定义 key** 声明 → `SignalProcessStartListener` NPE、整条流程回滚（2026-09-21 项目管理三版实测，本轮最耗时的一个坑）
@@ -3874,8 +3875,8 @@ processJson 回读看不见 → 构造、五道闸门全绿。
 「数值族字段右值为非数字字符串」与「右值恰好命中同表字段名」→ 构建前**报错**（`--lenient` 降级）。
 
 **复验手段：** 表事件流用 `edit_data` 重放；**按钮流**用
-`POST /act/designer/miniDesFlow/api/buttonStartProcess`（`processId/dataId/formKey/applyUserId/inputParams`
-表单参数）重放，不必借界面点。看 `【条件评估】` 行确认取值/操作符/命中。
+`POST /act/designer/miniDesFlow/api/buttonStartProcess`（`processId/dataId/formKey/inputParams`
+表单参数，发起人取当前登录用户）重放，不必借界面点。看 `【条件评估】` 行确认取值/操作符/命中。
 
 ---
 

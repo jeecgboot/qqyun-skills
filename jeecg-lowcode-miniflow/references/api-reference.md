@@ -327,7 +327,7 @@ GET /act/process/open/{processKey}     # 激活（恢复）
 |---|---|---|---|
 | `/act/designer/miniDesFlow/api/executeProcess` | ANY | `dataId`、`processId`、`desformCode` | 按触发动作立即执行一次流程 |
 | `/act/designer/miniDesFlow/api/generateExecTime` | ANY | attr 表单参数（beginDateStr/timeCycle 等） | 预览定时流程未来 7 次执行时间 |
-| `/act/designer/miniDesFlow/api/buttonStartProcess` | POST | `processId`、`dataId`、`formKey`、`inputParams`(JSON数组`[{field,value}]`)、`applyUserId` | 按钮启动流程（自定义按钮的运行时入口） |
+| `/act/designer/miniDesFlow/api/buttonStartProcess` | POST | `processId`、`dataId`、`formKey`、`inputParams`(JSON数组`[{field,value}]`) | 按钮启动流程（自定义按钮的运行时入口）。2026-10-14 起发起人一律取当前登录用户，`applyUserId` 可不传，传了也忽略 |
 
 ### API 节点 / AI 编排节点辅助端点
 
@@ -337,14 +337,12 @@ GET /act/process/open/{processKey}     # 激活（恢复）
 | `/airag/flow/list` | GET | `pageNo=1&pageSize=999&column=createTime&order=desc&status=enable,release` | 查 AI 编排流程列表（aiOrchestration 节点选 aiProcessId 用） |
 | `/airag/flow/queryFlowConfig?id=` | GET | AI 流程 id | 查 AI 流程配置详情（入参/出参定义） |
 
-### 应用级流程管理（SignalProcessController，按需使用）
+### 应用级流程管理（内部接口，skill 不可调用）
 
-| 端点 | 方法 | 用途 |
-|---|---|---|
-| `/act/designer/miniDesFlow/api/copyAppProcess` | POST | 复制应用下全部流程（跨应用/跨租户模板复用） |
-| `/act/designer/miniDesFlow/api/backupAppProcess` | PUT | 备份应用流程 |
-| `/act/designer/miniDesFlow/api/coverAppProcess` | PUT | 从备份还原 |
-| `/act/designer/miniDesFlow/api/deleteAppProcess?appId=` | DELETE | 删除应用下全部流程（危险，慎用） |
+`copyAppProcess`、`backupAppProcess`、`coverAppProcess`、`deleteAppProcess` 以及 `signalStartProcess`、`userStartProcess`、
+`batchSyncDateFieldTriggerJob`、`setTimeTriggerProcessJobStartTime` 属于 `SignalProcessStartApiController`（原 `SignalProcessController`）。
+2026-10-14 起前缀改为 `/act/designer/miniDesFlow/inner/api`，只在微服务模式加载，供其他服务 Feign 调用；单体模式下不存在，
+微服务下网关也会拦截外部访问。复制、备份、还原应用请走低代码应用自己的接口（如 `/online/lowApp/copy`），由后端在进程内连带处理流程。
 
 ---
 

@@ -378,7 +378,7 @@ if result.get('success'):
 
 需要额外通过 Desform 按钮 API 创建并绑定按钮，见 `references/api-reference.md`（Desform 自定义按钮 API 章节）。
 
-> **inputParams 联动**：配了按钮参数时，保存前须向根 `formTableList` 追加 `{"formTableId":"inputParams","nodeId":"inputParams","formTableCode":"_inputParams_","nodeType":"inputParams"}`。按钮运行时入口为 `POST /act/designer/miniDesFlow/api/buttonStartProcess`（processId/dataId/formKey/inputParams/applyUserId），要求流程已发布。
+> **inputParams 联动**：配了按钮参数时，保存前须向根 `formTableList` 追加 `{"formTableId":"inputParams","nodeId":"inputParams","formTableCode":"_inputParams_","nodeType":"inputParams"}`。按钮运行时入口为 `POST /act/designer/miniDesFlow/api/buttonStartProcess`（processId/dataId/formKey/inputParams），要求流程已发布；发起人取当前登录用户，`applyUserId` 已忽略（2026-10-14）。
 
 **⑦ buttonEvent - attr 示例：**
 

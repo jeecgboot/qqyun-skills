@@ -13,7 +13,7 @@
 | `create_form(name, code, widgets, ...)` | 一站式创建表单（查找/创建→保存设计→同步权限） |
 | `update_form(code, widgets, ...)` | 整体重设计已有表单 |
 | `update_design_config(code, config_updates)` | 只改配置不改控件（发布/通知/打印/业务规则等） |
-| `copy_form(source_code, new_code)` | 复制已有表单 |
+| `copy_form(source_code)` | 复制应用内的工作表（同前端「复制工作表」），新编码自动生成 |
 | `delete_form(code_or_id)` | 删除表单（逻辑+物理） |
 | `query_form(code)` | 查询表单完整信息（含设计JSON） |
 | `get_form_id(code)` | 获取表单 ID 和 updateCount |
@@ -238,10 +238,13 @@ update_design_config('my_form', {"bizRuleConfig": [...]})
 ## copy_form
 
 ```python
-copy_form(source_code, new_code=None) -> dict
-# 复制已有表单设计为新表单
-# new_code 不传时后台自动生成编码
-# 适合基于现有表单快速创建相似表单
+copy_form(source_code, new_code=None, app_id=None) -> dict
+# 复制应用内的工作表，与前端「复制工作表」一致：POST /online/lowAppMenu/copy
+# 表单设计、视图、按钮等配置一并复制；新菜单名「原名-复制」，新编码由后端自动生成
+# 返回 {menuId, menuName, desformCode, formId, appId}
+# 源表单必须挂在应用菜单下，否则报 RuntimeError；new_code 不支持，传了报 ValueError
+# app_id 不传时取表单的 lowAppId，再取 init_lowapp 的当前应用
+# ⚠️ 2026-10-14 起 /desform/api/copyDesignForm 改为微服务内部接口，单体下不存在，不要直接调
 ```
 
 ---

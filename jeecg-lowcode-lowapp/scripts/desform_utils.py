@@ -3910,28 +3910,71 @@ def create_form(name, code, widgets, title_index=0, layout='auto', expand=None,
 # ============================================================
 # 表单复制
 # ============================================================
-def copy_form(source_code, new_code=None):
-    """复制表单
+def copy_form(source_code, new_code=None, app_id=None):
+    """复制工作表（与前端「复制工作表」一致）
+
+    调用 `POST /online/lowAppMenu/copy`：后端复制表单设计（含视图、按钮等配置），
+    并在同一应用、同一分组下新建菜单，名称为「原名-复制」，新表单编码由后端自动生成。
+
+    ⚠️ 2026-10-14 起 `/desform/api/copyDesignForm` 改为微服务内部接口（`/desform/inner/api`），
+    单体模式下不存在，不能再直接调用。
 
     Args:
-        source_code: 源表单编码
-        new_code: 新表单编码（可选，不传则自动生成）
+        source_code: 源表单编码，表单必须已挂在低代码应用的菜单下
+        new_code: 不支持，后端不能指定新编码；传了会报错
+        app_id: 表单所属应用 ID，不传则取表单的 lowAppId，再取 init_lowapp 设置的当前应用
 
     Returns:
-        新表单信息 dict
+        dict: {menuId, menuName, desformCode, formId, appId}
 
-    注意:
-        后端 LowAppCopyMenu 不支持 newFormName 参数，新表单名称由后端自动生成。
+    Raises:
+        ValueError: 传了 new_code
+        RuntimeError: 表单不存在、不在应用菜单下，或复制失败
     """
-    body = {"originFormCode": source_code}
+    global _LOW_APP_ID
     if new_code:
-        body["newFormCode"] = new_code
-    r = api_request('/desform/api/copyDesignForm', data=body, method='PUT')
-    if r.get('success'):
-        print(f"[copy_form] 复制成功: {source_code} → {new_code or '(自动编码)'}")
-        return r.get('result')
-    else:
-        raise RuntimeError(f"复制失败: {r.get('message', '未知错误')}")
+        raise ValueError('copy_form 不支持指定新编码：后端自动生成编码，复制后可用返回的 desformCode')
+    form = query_form(source_code)
+    if not form:
+        raise RuntimeError(f'表单不存在: {source_code}')
+    aid = str(app_id or form.get('lowAppId') or _LOW_APP_ID or '')
+    if not aid:
+        raise RuntimeError(f'表单 {source_code} 不在任何低代码应用下，前端也没有复制入口；请先把表单加到应用里再复制')
+
+    def _menus():
+        r = api_request(f'/online/lowAppMenu/queryMenus?appId={aid}', method='GET')
+        return ((r.get('result') or {}).get('menuList') or []) if r.get('success') else []
+
+    old_app = _LOW_APP_ID
+    _LOW_APP_ID = aid
+    try:
+        before = _menus()
+        src = next((m for m in before if m.get('type') in ('form', 'desform')
+                    and source_code in (m.get('desformCode'), m.get('menuUrl'))), None)
+        if not src:
+            raise RuntimeError(f'应用 {aid} 的菜单里没有表单 {source_code}，无法复制')
+        r = api_request('/online/lowAppMenu/copy', data={'id': src['id']}, method='POST')
+        if not r.get('success'):
+            raise RuntimeError(f"复制失败: {r.get('message', '未知错误')}")
+        before_ids = {m['id'] for m in before}
+        added = [m for m in _menus() if m['id'] not in before_ids and m.get('type') == src.get('type')]
+    finally:
+        _LOW_APP_ID = old_app
+
+    want = f"{src.get('menuName')}-复制"
+    hit = next((m for m in added if m.get('menuName') == want), added[0] if added else None)
+    if not hit:
+        raise RuntimeError('复制接口返回成功，但没有找到新菜单，请到应用里核对')
+    is_id_form = hit.get('type') == 'form'
+    result = {
+        'menuId': hit['id'],
+        'menuName': hit.get('menuName'),
+        'desformCode': hit.get('desformCode') if is_id_form else hit.get('menuUrl'),
+        'formId': hit.get('menuUrl') if is_id_form else None,
+        'appId': aid,
+    }
+    print(f"[copy_form] 复制成功: {source_code} → {result['desformCode']}（菜单「{result['menuName']}」）")
+    return result
 
 
 # ============================================================
